@@ -13,6 +13,7 @@ from hermes_core.fx import FxManager
 from hermes_core.send import SendManager
 from hermes_core.render import RenderManager
 from hermes_core.signal import SignalAnalyzer, SignalReport
+from hermes_core.normalize import NormalizeResult
 
 
 @pytest.mark.unit
@@ -346,6 +347,51 @@ class TestAuditMix:
 
         assert result["passed"] is False
         assert "error" in result
+
+
+@pytest.mark.unit
+class TestNormalizeTrack:
+    def test_delegates_to_normalizer(self):
+        eng = MixingEngine()
+        eng._normalizer.normalize_track = MagicMock(
+            return_value=NormalizeResult(
+                track_index=0, track_name="Kick",
+                original_lufs=-20.0, target_lufs=-14.0,
+                gain_applied_db=6.0, success=True,
+            )
+        )
+        result = eng.normalize_track(0, target_lufs=-14.0, duration=5.0)
+        eng._normalizer.normalize_track.assert_called_once_with(
+            0, target_lufs=-14.0, duration=5.0
+        )
+        assert result.success is True
+        assert result.gain_applied_db == 6.0
+
+    def test_normalize_track_defaults(self):
+        eng = MixingEngine()
+        eng._normalizer.normalize_track = MagicMock(
+            return_value=NormalizeResult(
+                track_index=0, track_name="",
+                original_lufs=0, target_lufs=-14.0,
+                gain_applied_db=0, success=False,
+            )
+        )
+        eng.normalize_track(0)
+        eng._normalizer.normalize_track.assert_called_once_with(
+            0, target_lufs=-14.0, duration=5.0
+        )
+
+
+@pytest.mark.unit
+class TestNormalizeAll:
+    def test_delegates_to_normalizer(self):
+        eng = MixingEngine()
+        eng._normalizer.normalize_all = MagicMock(return_value=[])
+        result = eng.normalize_all(target_lufs=-16.0, duration=3.0)
+        eng._normalizer.normalize_all.assert_called_once_with(
+            target_lufs=-16.0, duration=3.0
+        )
+        assert result == []
 
 
 @pytest.mark.unit

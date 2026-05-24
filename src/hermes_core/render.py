@@ -26,6 +26,23 @@ class RenderManager:
     def __init__(self, bridge: ReaperBridge):
         self._bridge = bridge
 
+    # ── Private helpers ───────────────────────────────────────
+
+    def _can_render(self) -> bool:
+        """Check project has at least one media item to render.
+
+        Iterates all tracks and returns True if any track contains
+        at least one media item.  Returns False for empty projects
+        or projects with tracks that have no media items.
+        """
+        api = self._bridge.api
+        n = api.CountTracks(0)
+        for i in range(n):
+            tr = api.GetTrack(0, i)
+            if tr and api.CountTrackMediaItems(tr) > 0:
+                return True
+        return False
+
     # ── Public API ──────────────────────────────────────────
 
     def render_mix(
@@ -69,6 +86,16 @@ class RenderManager:
         if sample_rate > 0:
             api.GetSetProjectInfo(0, "RENDER_SRATE", sample_rate, True)
 
+        # Guard: check project has something to render
+        if not self._can_render():
+            return {"error": "nothing_to_render", "output_path": None}
+
+        # Guard: time_selection must have non-zero length
+        if bounds == "time_selection":
+            start, end = self.get_time_selection_range()
+            if end <= start:
+                return {"error": "nothing_to_render", "output_path": None}
+
         # Trigger non-modal render
         api.Main_OnCommand(42230, 0)
 
@@ -89,6 +116,13 @@ class RenderManager:
             return
         api = self._bridge.api
         api.GetSetLoopTimeRange(True, False, start, end, False)
+
+    def get_time_selection_range(self) -> tuple[float, float]:
+        """Return (start, end) of the current time selection in seconds."""
+        api = self._bridge.api
+        start = api.GetSetLoopTimeRange(False, False, 0, 0, False)
+        end = api.GetSetLoopTimeRange(False, True, 0, 0, False)
+        return (start, end)
 
     def get_render_settings(self) -> dict:
         """Return current REAPER render configuration as a dict."""

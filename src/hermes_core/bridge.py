@@ -3,6 +3,8 @@ Layer 1: REAPER Bridge — reapy connection and raw API access.
 Zero UI assumption. All operations work without human interaction.
 """
 
+import subprocess
+import threading
 import time
 import logging
 from typing import Optional
@@ -35,13 +37,103 @@ def _extract_reaper_string(result) -> str:
     return ""
 
 
+_AS_DISMISS = """
+tell application "System Events"
+    tell process "REAPER"
+        repeat with w in windows
+            if (name of w does not contain "REAPER v") then
+                keystroke (ASCII character 27)
+            end if
+        end repeat
+    end tell
+end tell
+"""
+
+
+class DialogKiller:
+    """Background thread that auto-dismisses REAPER modal dialogs on macOS.
+
+    Polls for non-main REAPER windows and presses Escape to dismiss
+    error dialogs, warnings, and other popups that would otherwise
+    block remote API calls until a human clicks OK.
+
+    The killer only targets windows whose title does NOT match the
+    main REAPER application window, so it never accidentally closes
+    the primary DAW window.
+    """
+
+    def __init__(self, interval: float = 0.5):
+        self._interval = interval
+        self._thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+        self._killed_count = 0
+
+    # ── Lifecycle ──────────────────────────────────────────
+
+    def start(self):
+        """Start the killer daemon thread.
+
+        Safe to call multiple times -- subsequent calls are no-ops
+        when the thread is already running.
+        """
+        if self._thread is not None:
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        """Signal the thread to stop and wait for it.
+
+        Safe to call on an already-stopped killer -- no-op.
+        """
+        if self._thread is None:
+            return
+        self._stop_event.set()
+        self._thread.join(timeout=self._interval * 2)
+        self._thread = None
+
+    # ── Status ─────────────────────────────────────────────
+
+    @property
+    def is_running(self) -> bool:
+        """True when the background daemon thread is alive."""
+        return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def killed_count(self) -> int:
+        """Number of times the dismissal script has been run."""
+        return self._killed_count
+
+    # ── Internal ───────────────────────────────────────────
+
+    def _run(self):
+        """Main loop: wait for interval, then dismiss dialogs."""
+        while not self._stop_event.wait(self._interval):
+            self._dismiss_dialogs()
+
+    def _dismiss_dialogs(self):
+        """Run the AppleScript dismissal command."""
+        try:
+            subprocess.run(
+                ["osascript", "-e", _AS_DISMISS],
+                capture_output=True,
+                timeout=2,
+            )
+            self._killed_count += 1
+        except Exception:
+            pass
+
+
 class ReaperBridge:
     """Provides a clean API over reapy for REAPER automation."""
 
-    def __init__(self):
+    def __init__(self, dialog_killer: bool = True):
         self._api = None
         self._reapy_module = None
         self._ui_locked = False
+        self._dialog_killer_enabled = dialog_killer
+        self._dialog_killer = DialogKiller()
 
     # ── Connection ──────────────────────────────────────────
 
@@ -56,6 +148,10 @@ class ReaperBridge:
             self._api = reapy_mod.reascript_api
             version = reapy_mod.get_reaper_version()
             log.info("reapy connected, REAPER v%s", version)
+            # Start dialog killer daemon when enabled
+            if self._dialog_killer_enabled:
+                self._dialog_killer.start()
+                log.info("DialogKiller started")
             return True
         except Exception as e:
             log.error("Failed to connect to REAPER: %s", e)
@@ -78,6 +174,8 @@ class ReaperBridge:
             "audio_running": False,
             "version": None,
             "os": None,
+            "dialog_killer_active": self._dialog_killer.is_running,
+            "dialogs_killed": self._dialog_killer.killed_count,
         }
         if self._api is not None:
             try:

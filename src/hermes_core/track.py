@@ -92,6 +92,12 @@ class TrackManager:
         if track:
             self._bridge.api.SetMediaTrackInfo_Value(track, "B_MUTE", 1.0 if mute else 0.0)
 
+    def set_solo(self, index: int, solo: bool):
+        """Set track solo state."""
+        track = self._bridge.api.GetTrack(0, index)
+        if track:
+            self._bridge.api.SetMediaTrackInfo_Value(track, "I_SOLO", 1.0 if solo else 0.0)
+
     def set_folder_depth(self, index: int, depth: int):
         """Set folder depth. 0=normal, 1=parent, -1=last child."""
         track = self._bridge.api.GetTrack(0, index)

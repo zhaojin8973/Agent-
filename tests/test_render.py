@@ -10,7 +10,7 @@ Usage:
 """
 
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
@@ -27,9 +27,23 @@ def _make_bridge(**api_overrides):
 
     Returns (mock_bridge, mock_api) tuple so the caller can assert on
     specific API calls after exercising the RenderManager.
+
+    Default mock setup represents a project with one track that has
+    one media item, so _can_render() returns True.  Callers can override
+    any API method to simulate edge cases.
     """
     mock_bridge = MagicMock()
     mock_api = MagicMock()
+    # Sensible defaults so _can_render() passes by default
+    if "CountTracks" not in api_overrides:
+        mock_api.CountTracks = MagicMock(return_value=1)
+    if "GetTrack" not in api_overrides:
+        mock_api.GetTrack = MagicMock(return_value=MagicMock())
+    if "CountTrackMediaItems" not in api_overrides:
+        mock_api.CountTrackMediaItems = MagicMock(return_value=1)
+    if "GetSetLoopTimeRange" not in api_overrides:
+        # Two calls: start=0.0, end=10.0 → valid non-zero time selection
+        mock_api.GetSetLoopTimeRange = MagicMock(side_effect=[0.0, 10.0])
     for attr, val in api_overrides.items():
         setattr(mock_api, attr, val)
     mock_bridge.api = mock_api
@@ -236,6 +250,32 @@ class TestSetTimeSelection:
 
         # Assert
         assert mock_api.method_calls, "should interact with bridge API"
+
+
+# ══════════════════════════════════════════════════════════════
+# Unit: get_time_selection_range()
+# ══════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestGetTimeSelectionRange:
+    """Tests for RenderManager.get_time_selection_range()."""
+
+    def test_returns_tuple_of_floats(self):
+        mock_bridge, mock_api = _make_bridge(
+            GetSetLoopTimeRange=MagicMock(side_effect=[1.0, 5.0])
+        )
+        manager = RenderManager(mock_bridge)
+        start, end = manager.get_time_selection_range()
+        assert isinstance(start, float)
+        assert isinstance(end, float)
+
+    def test_queries_reaper_for_start_and_end(self):
+        mock_bridge, mock_api = _make_bridge(
+            GetSetLoopTimeRange=MagicMock(return_value=0.0)
+        )
+        manager = RenderManager(mock_bridge)
+        manager.get_time_selection_range()
+        assert mock_api.GetSetLoopTimeRange.call_count >= 2
 
 
 # ══════════════════════════════════════════════════════════════
@@ -793,8 +833,12 @@ class TestRenderIntegration:
         if not bridge.connect():
             pytest.skip("REAPER is not running -- skipping integration test")
 
-    def test_render_empty_project(self, tmp_path):
-        """Render an empty project (no tracks) and verify the output file exists."""
+    def test_render_empty_project_is_rejected(self, tmp_path):
+        """Empty project is rejected with nothing_to_render error.
+
+        This is the defensive guard preventing the modal 'Nothing to render!'
+        dialog from blocking subsequent REAPER API calls.
+        """
         # Arrange
         self._require_reaper()
         bridge = ReaperBridge()
@@ -808,18 +852,17 @@ class TestRenderIntegration:
         # Act
         result = manager.render_mix(str(output_dir))
 
-        # Assert
-        assert "output_path" in result, f"Result missing output_path: {result}"
-        output_path = result["output_path"]
-        assert os.path.isfile(output_path), (
-            f"Rendered file does not exist: {output_path}"
+        # Assert -- empty project should be rejected before render command
+        assert "error" in result, f"Empty project should return error, got: {result}"
+        assert result["error"] == "nothing_to_render", (
+            f"Expected nothing_to_render error, got: {result}"
         )
-        assert os.path.getsize(output_path) > 0, (
-            f"Rendered file is empty: {output_path}"
+        assert result["output_path"] is None, (
+            f"Expected output_path=None for rejected render, got: {result}"
         )
 
-    def test_render_with_entire_project_bounds(self, tmp_path):
-        """Render using explicit entire_project bounds."""
+    def test_render_entire_project_requires_content(self, tmp_path):
+        """Rejects render with entire_project bounds when project has no content."""
         # Arrange
         self._require_reaper()
         bridge = ReaperBridge()
@@ -833,12 +876,14 @@ class TestRenderIntegration:
         # Act
         result = manager.render_mix(str(output_dir), bounds="entire_project")
 
-        # Assert
-        assert "output_path" in result
-        assert os.path.isfile(result["output_path"])
+        # Assert -- guard rejects before Main_OnCommand
+        assert result.get("error") == "nothing_to_render", (
+            f"Empty project should be rejected, got: {result}"
+        )
+        assert result.get("output_path") is None
 
-    def test_render_with_custom_format(self, tmp_path):
-        """Render with wav_16bit format and verify output."""
+    def test_render_requires_content_with_format(self, tmp_path):
+        """Rejects render with format param when project has no content."""
         # Arrange
         self._require_reaper()
         bridge = ReaperBridge()
@@ -852,7 +897,170 @@ class TestRenderIntegration:
         # Act
         result = manager.render_mix(str(output_dir), fmt="wav")
 
+        # Assert -- guard rejects before Main_OnCommand
+        assert result.get("error") == "nothing_to_render", (
+            f"Empty project should be rejected, got: {result}"
+        )
+        assert result.get("output_path") is None
+
+
+# ══════════════════════════════════════════════════════════════
+# Unit: _can_render() project content checks
+# ══════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestCanRender:
+    """Tests for RenderManager._can_render() precondition checks."""
+
+    def test_can_render_returns_false_for_empty_project(self):
+        """_can_render returns False when no tracks exist in the project."""
+        # Arrange
+        mock_bridge, mock_api = _make_bridge(
+            CountTracks=MagicMock(return_value=0)
+        )
+        manager = RenderManager(mock_bridge)
+
+        # Act
+        result = manager._can_render()
+
         # Assert
-        assert "output_path" in result
-        assert os.path.isfile(result["output_path"])
-        assert os.path.getsize(result["output_path"]) > 0
+        assert result is False, (
+            f"_can_render should return False for empty project, got {result}"
+        )
+
+    def test_can_render_returns_false_for_tracks_without_items(self):
+        """_can_render returns False when tracks exist but have no media items."""
+        # Arrange
+        mock_track = MagicMock()
+        mock_bridge, mock_api = _make_bridge(
+            CountTracks=MagicMock(return_value=3),
+            GetTrack=MagicMock(return_value=mock_track),
+            CountTrackMediaItems=MagicMock(return_value=0),
+        )
+        manager = RenderManager(mock_bridge)
+
+        # Act
+        result = manager._can_render()
+
+        # Assert
+        assert result is False, (
+            f"_can_render should return False when no items on any track, got {result}"
+        )
+
+    def test_can_render_returns_true_when_track_has_item(self):
+        """_can_render returns True when at least one track has a media item."""
+        # Arrange
+        mock_track = MagicMock()
+        mock_bridge, mock_api = _make_bridge(
+            CountTracks=MagicMock(return_value=2),
+            GetTrack=MagicMock(return_value=mock_track),
+            CountTrackMediaItems=MagicMock(return_value=3),
+        )
+        manager = RenderManager(mock_bridge)
+
+        # Act
+        result = manager._can_render()
+
+        # Assert
+        assert result is True, (
+            f"_can_render should return True when a track has items, got {result}"
+        )
+
+    def test_can_render_handles_null_track(self):
+        """_can_render skips null tracks returned by GetTrack."""
+        # Arrange
+        mock_bridge, mock_api = _make_bridge(
+            CountTracks=MagicMock(return_value=2),
+            GetTrack=MagicMock(side_effect=[None, MagicMock()]),
+            CountTrackMediaItems=MagicMock(return_value=5),
+        )
+        manager = RenderManager(mock_bridge)
+
+        # Act
+        result = manager._can_render()
+
+        # Assert -- second track has items, so True
+        assert result is True, (
+            f"_can_render should skip null tracks, got {result}"
+        )
+
+
+@pytest.mark.unit
+class TestRenderMixRejection:
+    """Tests for render_mix() rejecting renders with no content."""
+
+    def test_render_mix_rejects_empty_project(self, tmp_path):
+        """render_mix returns error when _can_render() returns False.
+
+        Main_OnCommand(42230) must NOT be called when the project is empty.
+        """
+        # Arrange
+        mock_bridge, mock_api = _make_bridge(
+            CountTracks=MagicMock(return_value=0),
+            GetSetProjectInfo_String=MagicMock(
+                side_effect=_render_config_side_effect()
+            ),
+        )
+
+        output_dir = tmp_path / "renders"
+        output_dir.mkdir()
+
+        manager = RenderManager(mock_bridge)
+
+        # Act -- mock file existence so if we get past the guard, we'd succeed
+        with patch("os.path.exists", return_value=True):
+            with patch("time.sleep", return_value=None):
+                result = manager.render_mix(str(output_dir), timeout=5.0)
+
+        # Assert
+        assert isinstance(result, dict), f"Expected dict, got {type(result)}"
+        assert result.get("error") == "nothing_to_render", (
+            f"Expected error='nothing_to_render', got: {result}"
+        )
+        assert result.get("output_path") is None, (
+            f"Expected output_path=None, got: {result}"
+        )
+
+        # Main_OnCommand(42230) must NOT be called
+        render_calls = [
+            c for c in mock_api.Main_OnCommand.call_args_list
+            if 42230 in c[0]
+        ]
+        assert len(render_calls) == 0, (
+            "Main_OnCommand(42230) must NOT be called when project is empty"
+        )
+
+    def test_render_mix_rejects_zero_length_time_selection(self, tmp_path):
+        """render_mix returns error when bounds=time_selection with zero-length."""
+        # Arrange
+        mock_track = MagicMock()
+        mock_bridge, mock_api = _make_bridge(
+            CountTracks=MagicMock(return_value=1),
+            GetTrack=MagicMock(return_value=mock_track),
+            CountTrackMediaItems=MagicMock(return_value=3),
+            GetSetProjectInfo_String=MagicMock(
+                side_effect=_render_config_side_effect()
+            ),
+            GetSetLoopTimeRange=MagicMock(return_value=5.0),
+        )
+
+        output_dir = tmp_path / "renders"
+        output_dir.mkdir()
+
+        manager = RenderManager(mock_bridge)
+
+        # Act
+        with patch("os.path.exists", return_value=True):
+            with patch("time.sleep", return_value=None):
+                result = manager.render_mix(
+                    str(output_dir), bounds="time_selection", timeout=5.0
+                )
+
+        # Assert -- time selection start == end == 5.0 means zero length
+        assert isinstance(result, dict)
+        assert result.get("error") == "nothing_to_render", (
+            f"Expected error='nothing_to_render' for zero-length time selection, got: {result}"
+        )
+        assert result.get("output_path") is None, (
+            f"Expected output_path=None, got: {result}"
+        )

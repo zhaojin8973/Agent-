@@ -137,6 +137,12 @@ class TestSetProperties:
         mgr.set_folder_depth(0, 1)
         bridge.api.SetMediaTrackInfo_Value.assert_called()
 
+    def test_set_solo(self):
+        bridge = _mock_bridge(SetMediaTrackInfo_Value=MagicMock())
+        mgr = TrackManager(bridge)
+        mgr.set_solo(0, True)
+        bridge.api.SetMediaTrackInfo_Value.assert_called()
+
 
 @pytest.mark.unit
 class TestQuery:

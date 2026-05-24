@@ -11,6 +11,21 @@ from hermes_core.bridge import ReaperBridge
 log = logging.getLogger(__name__)
 
 
+def _extract_string(result) -> str:
+    """Extract a string from REAPER API return variants."""
+    if isinstance(result, str):
+        return result
+    if isinstance(result, bytes):
+        return result.decode("utf-8", errors="replace")
+    if isinstance(result, (tuple, list)):
+        for value in reversed(result):
+            if isinstance(value, str) and value.strip():
+                return value
+            if isinstance(value, bytes) and value.strip():
+                return value.decode("utf-8", errors="replace")
+    return ""
+
+
 class FxManager:
     """FX chain CRUD using reapy's Track/FX/FXParamsList API.
 
@@ -64,8 +79,37 @@ class FxManager:
 
     # ── CRUD ──────────────────────────────────────────────
 
+    def _fx_exists_at_index(self, track_index: int, fx_index: int) -> bool:
+        """Verify an FX actually exists at the given index via reapy.
+
+        RPR TrackFX_GetFXName has an ARM64 tuple-unpacking bug
+        ("too many values to unpack (expected 2)").  We use reapy's
+        high-level Track.fxs API instead, which works correctly on
+        both ARM64 and x86_64.
+        """
+        try:
+            track = self._track(track_index)
+            if track is None:
+                return False
+            if fx_index < 0 or fx_index >= len(track.fxs):
+                return False
+            name = track.fxs[fx_index].name
+            if not name or name.strip() == "":
+                return False
+            if name.strip() == "(0)":
+                return False
+            return True
+        except (OSError, RuntimeError, AttributeError):
+            return False
+
     def add(self, track_index: int, fx_name: str, instantiate: bool = True) -> int:
-        """Add an FX by name using raw RPR. Returns the FX index, or -1."""
+        """Add an FX by name using raw RPR with reapy fallback.
+
+        TrackFX_AddByName can return a valid-looking index even when the
+        plugin failed to load (false positive).  After adding via RPR we
+        verify the FX actually exists; if the check fails, we fall back
+        to reapy's high-level Track.add_fx().
+        """
         track = self._get_track_ptr(track_index)
         if track is None:
             return -1
@@ -76,7 +120,26 @@ class FxManager:
         n_after = self._bridge.api.TrackFX_GetCount(track)
         if idx < 0 or n_after <= n_before:
             return -1
-        return idx
+
+        # ── Defensive check: did the FX *really* load? ──────────
+        if self._fx_exists_at_index(track_index, idx):
+            return idx
+
+        # ── RPR false positive — clean up zombie and try reapy ──
+        self._bridge.api.TrackFX_Delete(track, idx)
+        reapy_track = self._track(track_index)
+        if reapy_track is not None:
+            try:
+                reapy_track.add_fx(fx_name)
+                n_final = self._bridge.api.TrackFX_GetCount(track)
+                if n_final > n_before:
+                    return n_final - 1
+            except Exception:
+                log.warning(
+                    "reapy fallback add_fx('%s') failed on track %d",
+                    fx_name, track_index, exc_info=True,
+                )
+        return -1
 
     def remove(self, track_index: int, fx_index: int):
         """Remove an FX from a track."""

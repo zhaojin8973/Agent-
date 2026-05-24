@@ -173,7 +173,7 @@ else:
     track_mgr.import_media(idx, test_wav, position=0.0)
 
     with tempfile.TemporaryDirectory() as out_dir:
-        result = render_mgr.render_mix(out_dir, bounds="entire_project", fmt="wav_24bit", timeout=30.0)
+        result = render_mgr.render_mix(out_dir, bounds="entire_project", fmt="wav", timeout=30.0)
 
         ok = (
             "output_path" in result

@@ -13,6 +13,7 @@ from hermes_core.fx import FxManager
 from hermes_core.send import SendManager
 from hermes_core.render import RenderManager
 from hermes_core.signal import SignalAnalyzer
+from hermes_core.normalize import Normalizer, NormalizeResult
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ class MixingEngine:
         self._fx = FxManager(self._bridge)
         self._send = SendManager(self._bridge)
         self._render = RenderManager(self._bridge)
+        self._normalizer = Normalizer(self._bridge)
 
     # ── Context manager ──────────────────────────────────
 
@@ -200,6 +202,27 @@ class MixingEngine:
                 result["signal_check"] = {"error": str(e)}
 
         return result
+
+    # ── Scene 7: Loudness normalization ──────────────────
+
+    def normalize_track(self, track_index: int,
+                        target_lufs: float = -14.0,
+                        duration: float = 5.0) -> NormalizeResult:
+        """Normalize a single track to the target LUFS level.
+
+        Renders a snippet, measures integrated LUFS, and applies
+        gain compensation to the track fader.
+        """
+        return self._normalizer.normalize_track(
+            track_index, target_lufs=target_lufs, duration=duration
+        )
+
+    def normalize_all(self, target_lufs: float = -14.0,
+                      duration: float = 5.0) -> list[NormalizeResult]:
+        """Normalize all tracks in the project to the target LUFS level."""
+        return self._normalizer.normalize_all(
+            target_lufs=target_lufs, duration=duration
+        )
 
     # ── Scene 9: Safety audit ────────────────────────────
 
