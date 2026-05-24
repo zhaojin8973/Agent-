@@ -5,6 +5,7 @@ Depends only on bridge.py.
 
 import os
 import logging
+import wave
 from dataclasses import dataclass
 from typing import Optional
 
@@ -111,11 +112,8 @@ class TrackManager:
             return None
 
         try:
-            name_result = api.GetTrackName(track)
-            if isinstance(name_result, (tuple, list)):
-                name = name_result[2] if len(name_result) > 2 else str(name_result[0] or "")
-            else:
-                name = str(name_result or "")
+            _, _, name, _ = api.GetTrackName(track, "", 256)
+            name = name or ""
 
             return TrackInfo(
                 index=index,
@@ -146,19 +144,26 @@ class TrackManager:
     def import_media(self, track_index: int, file_path: str,
                      position: float = 0.0) -> bool:
         """Import an audio file onto a track at the given position (seconds).
+        Uses high-level reapy API to bypass ARM64 RPR_InsertMedia bug.
         Returns True on success.
         """
-        api = self._bridge.api
-        track = api.GetTrack(0, track_index)
-        if track is None:
-            return False
         if not os.path.isfile(file_path):
             return False
         try:
-            api.InsertMedia(file_path, track, 1 if position == 0.0 else 0,
-                            position, 1.0, False)
+            with wave.open(file_path, "rb") as wf:
+                duration = wf.getnframes() / wf.getframerate() if wf.getframerate() > 0 else 1.0
+            rpr = self._bridge.rpr
+            api = rpr.reascript_api
+            # Create a real PCM source from the file
+            pcm_source = api.PCM_Source_CreateFromFile(file_path)
+            proj = rpr.Project()
+            tr = proj.tracks[track_index]
+            item = tr.add_item(start=position, length=duration)
+            take = item.add_take()
+            api.SetMediaItemTake_Source(take.id, pcm_source)
             return True
-        except Exception:
+        except Exception as e:
+            log.warning("import_media failed for %s: %s", file_path, e)
             return False
 
     def import_stems(self, stem_map: dict[str, str],

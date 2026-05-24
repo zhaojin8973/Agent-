@@ -46,6 +46,8 @@ class BusManager:
         """Create a folder bus containing the given child tracks.
 
         The bus is inserted just before the first child. Returns the bus track index.
+        Children must be adjacent and in order — this method sets folder depth flags
+        but does NOT reorder tracks.
         """
         api = self._bridge.api
         num = api.CountTracks(0)
@@ -74,25 +76,13 @@ class BusManager:
         api.GetSetMediaTrackInfo_String(bus_tr, "P_NAME", name, True)
         api.SetMediaTrackInfo_Value(bus_tr, "I_FOLDERDEPTH", 1)
 
+        # Children shift by 1 after bus insertion
         shifted = [c + 1 for c in sorted_children]
-        for i, cur_idx in enumerate(shifted):
-            target = insert_at + 1 + i
-            if cur_idx != target:
-                child_tr = api.GetTrack(0, cur_idx)
-                if child_tr:
-                    api.MoveMediaTrack(child_tr, target)
-                    delta = -1 if cur_idx > target else 1
-                    lo, hi = (target, cur_idx) if cur_idx > target else (cur_idx, target)
-                    for j in range(i + 1, len(shifted)):
-                        if lo <= shifted[j] <= hi:
-                            shifted[j] += delta
-
-        final_children = list(range(insert_at + 1, insert_at + 1 + len(shifted)))
-        for child_idx in final_children[:-1]:
+        for child_idx in shifted:
             child_tr = api.GetTrack(0, child_idx)
             if child_tr:
                 api.SetMediaTrackInfo_Value(child_tr, "I_FOLDERDEPTH", 0)
-        last_idx = final_children[-1]
+        last_idx = shifted[-1]
         last_tr = api.GetTrack(0, last_idx)
         if last_tr:
             api.SetMediaTrackInfo_Value(last_tr, "I_FOLDERDEPTH", -1)
