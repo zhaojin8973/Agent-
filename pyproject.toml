@@ -1,0 +1,14 @@
+[project]
+name = "hermes-core"
+version = "0.1.0"
+description = "REAPER DAW automation - lean 3-layer engine"
+requires-python = ">=3.11"
+dependencies = ["python-reapy>=0.10", "numpy"]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pytest-cov>=6"]
+
+[tool.pytest.ini_options]
+markers = ["unit: no REAPER required", "integration: requires running REAPER"]
+testpaths = ["tests"]
+addopts = ["-v", "--tb=short"]
