@@ -7,6 +7,7 @@ import subprocess
 import threading
 import time
 import logging
+from dataclasses import dataclass, field
 from typing import Optional
 
 # reapy is imported lazily to avoid importing it before REAPER is running.
@@ -37,11 +38,90 @@ def _extract_reaper_string(result) -> str:
     return ""
 
 
+@dataclass
+class DialogEvent:
+    """Structured record of a REAPER modal dialog detection and response."""
+
+    has_modal: bool
+    window_title: str = ""
+    buttons: list[str] = field(default_factory=list)
+    text_hits: list[str] = field(default_factory=list)
+    action_taken: str = "none"
+    timestamp: float = 0.0
+
+
+# ── Dialog classification rules ───────────────────────────────
+
+_KNOWN_SAFE_PATTERNS = [
+    "Nothing to render",
+    "Render path invalid",
+    "Render failed",
+    "missing output directory",
+    "output directory",
+]
+
+_NEEDS_DIAGNOSIS_PATTERNS = [
+    "Plugin missing",
+    "Authorization failed",
+    "authorization",
+    "Media offline",
+    "WaveShell",
+    "plugin scan",
+    "iLok",
+    "license",
+    "activation",
+]
+
+# ── AppleScript fragments ─────────────────────────────────────
+
+_AS_INSPECT = """
+tell application "System Events"
+    tell process "REAPER"
+        set output to ""
+        repeat with w in windows
+            set winName to name of w
+            if (winName does not contain "REAPER v") and (winName is not "") then
+                set buttonList to ""
+                try
+                    repeat with b in buttons of w
+                        set btnName to name of b
+                        if btnName is not "" then
+                            set buttonList to buttonList & btnName & "|"
+                        end if
+                    end repeat
+                end try
+                set output to output & winName & ":::" & buttonList & ";;;"
+            end if
+        end repeat
+        return output
+    end tell
+end tell
+"""
+
+_AS_CLICK_BUTTON = """
+tell application "System Events"
+    tell process "REAPER"
+        repeat with w in windows
+            set winTitle to name of w
+            if (winTitle contains "{title_fragment}") then
+                repeat with b in buttons of w
+                    if (name of b contains "{button_match}") then
+                        click b
+                        return "clicked:" & name of b
+                    end if
+                end repeat
+            end if
+        end repeat
+    end tell
+end tell
+"""
+
 _AS_DISMISS = """
 tell application "System Events"
     tell process "REAPER"
         repeat with w in windows
-            if (name of w does not contain "REAPER v") then
+            set winName to name of w
+            if (winName does not contain "REAPER v") and (winName is not "") then
                 keystroke (ASCII character 27)
             end if
         end repeat
@@ -53,20 +133,25 @@ end tell
 class DialogKiller:
     """Background thread that auto-dismisses REAPER modal dialogs on macOS.
 
-    Polls for non-main REAPER windows and presses Escape to dismiss
-    error dialogs, warnings, and other popups that would otherwise
-    block remote API calls until a human clicks OK.
+    Uses three-tier classification:
+      - Known safe: click OK/Close, record event.
+      - Needs diagnosis: click conservative button, record full context.
+      - Unknown: skip, report ``unknown_modal_detected``.
 
     The killer only targets windows whose title does NOT match the
-    main REAPER application window, so it never accidentally closes
-    the primary DAW window.
+    main REAPER application window.
     """
 
-    def __init__(self, interval: float = 0.5):
+    def __init__(self, interval: float = 0.5, max_events: int = 200):
         self._interval = interval
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._killed_count = 0
+        self._events: list[DialogEvent] = []
+        self._max_events = max_events
+        self._enabled = True
+        self._safe_patterns: list[str] = list(_KNOWN_SAFE_PATTERNS)
+        self._diagnosis_patterns: list[str] = list(_NEEDS_DIAGNOSIS_PATTERNS)
 
     # ── Lifecycle ──────────────────────────────────────────
 
@@ -102,27 +187,173 @@ class DialogKiller:
 
     @property
     def killed_count(self) -> int:
-        """Number of times the dismissal script has been run."""
+        """Number of dialogs that were confirmed closed (not just script runs)."""
         return self._killed_count
+
+    def get_recent_events(self) -> list[DialogEvent]:
+        """Return a copy of recent dialog events, most recent last."""
+        return list(self._events)
+
+    def set_rules(self, safe_patterns=None, diagnosis_patterns=None):
+        """Override the built-in dialog classification patterns.
+
+        Pass a list of substrings to match.  Dialogs whose title contains
+        any safe pattern are auto-dismissed; those matching diagnosis
+        patterns are dismissed with full context recorded; everything
+        else is treated as unknown.
+        """
+        if safe_patterns is not None:
+            self._safe_patterns = list(safe_patterns)
+        if diagnosis_patterns is not None:
+            self._diagnosis_patterns = list(diagnosis_patterns)
 
     # ── Internal ───────────────────────────────────────────
 
     def _run(self):
-        """Main loop: wait for interval, then dismiss dialogs."""
+        """Main loop: wait for interval, then inspect and dismiss dialogs."""
         while not self._stop_event.wait(self._interval):
-            self._dismiss_dialogs()
+            if self._enabled:
+                self._dismiss_dialogs()
+
+    def _run_osascript(self, source: str, timeout: float = 2.0) -> str:
+        """Run an AppleScript and return its stdout, or '' on failure."""
+        try:
+            proc = subprocess.run(
+                ["osascript", "-e", source],
+                capture_output=True,
+                timeout=timeout,
+            )
+            return proc.stdout.decode("utf-8", errors="replace").strip()
+        except Exception:
+            return ""
+
+    def _inspect_windows(self) -> list[tuple[str, list[str]]]:
+        """Return [(window_title, [button_names]), ...] for non-REAPER windows."""
+        raw = self._run_osascript(_AS_INSPECT)
+        if not raw:
+            return []
+        windows: list[tuple[str, list[str]]] = []
+        for segment in raw.split(";;;"):
+            segment = segment.strip()
+            if not segment:
+                continue
+            parts = segment.split(":::", 1)
+            title = parts[0].strip()
+            buttons = [b.strip() for b in parts[1].split("|") if b.strip()] if len(parts) > 1 else []
+            windows.append((title, buttons))
+        return windows
+
+    def _classify(self, title: str) -> str:
+        """Return 'safe' | 'diagnosis' | 'unknown' based on title text."""
+        title_lower = title.lower()
+        for pat in self._safe_patterns:
+            if pat.lower() in title_lower:
+                return "safe"
+        for pat in self._diagnosis_patterns:
+            if pat.lower() in title_lower:
+                return "diagnosis"
+        return "unknown"
+
+    def _pick_button(self, buttons: list[str], classification: str) -> str:
+        """Pick which button to click.  Returns button name or '' for Escape fallback."""
+        if classification == "safe":
+            for preferred in ("OK", "Close", "Continue", "Yes"):
+                for b in buttons:
+                    if preferred.lower() in b.lower():
+                        return b
+        elif classification == "diagnosis":
+            for preferred in ("OK", "Close"):
+                for b in buttons:
+                    if preferred.lower() in b.lower():
+                        return b
+        return ""
+
+    def _click_button(self, title_fragment: str, button_match: str) -> str:
+        """Click a specific button in a window matching title_fragment.
+
+        Returns the clicked button name or empty string.
+        """
+        safe_title = title_fragment.replace('"', '\\"')
+        safe_button = button_match.replace('"', '\\"')
+        script = _AS_CLICK_BUTTON.format(
+            title_fragment=safe_title, button_match=safe_button
+        )
+        result = self._run_osascript(script)
+        if result.startswith("clicked:"):
+            return result.split(":", 1)[1]
+        return ""
 
     def _dismiss_dialogs(self):
-        """Run the AppleScript dismissal command."""
-        try:
-            subprocess.run(
-                ["osascript", "-e", _AS_DISMISS],
-                capture_output=True,
-                timeout=2,
+        """Inspect windows, classify dialogs, and take targeted action."""
+        windows = self._inspect_windows()
+        if not windows:
+            return
+
+        for title, buttons in windows:
+            classification = self._classify(title)
+            now = time.time()
+
+            if classification == "safe":
+                btn = self._pick_button(buttons, "safe")
+                if btn:
+                    clicked = self._click_button(title, btn)
+                    action = f"clicked_{btn.lower()}" if clicked else "sent_escape"
+                    if not clicked:
+                        self._run_osascript(_AS_DISMISS)
+                else:
+                    self._run_osascript(_AS_DISMISS)
+                    action = "sent_escape"
+
+                self._killed_count += 1
+                event = DialogEvent(
+                    has_modal=True,
+                    window_title=title,
+                    buttons=buttons,
+                    text_hits=[title],
+                    action_taken=action,
+                    timestamp=now,
+                )
+
+            elif classification == "diagnosis":
+                btn = self._pick_button(buttons, "diagnosis")
+                if btn:
+                    clicked = self._click_button(title, btn)
+                    action = f"clicked_{btn.lower()}" if clicked else "skipped_unknown"
+                else:
+                    action = "skipped_unknown"
+
+                if "clicked" in action:
+                    self._killed_count += 1
+
+                event = DialogEvent(
+                    has_modal=True,
+                    window_title=title,
+                    buttons=buttons,
+                    text_hits=[title],
+                    action_taken=action,
+                    timestamp=now,
+                )
+
+            else:
+                event = DialogEvent(
+                    has_modal=True,
+                    window_title=title,
+                    buttons=buttons,
+                    text_hits=[title],
+                    action_taken="skipped_unknown",
+                    timestamp=now,
+                )
+
+            self._events.append(event)
+            if len(self._events) > self._max_events:
+                self._events = self._events[-self._max_events:]
+
+            log.info(
+                "DialogKiller: %s | %s | %s",
+                classification,
+                title[:80],
+                event.action_taken,
             )
-            self._killed_count += 1
-        except Exception:
-            pass
 
 
 class ReaperBridge:

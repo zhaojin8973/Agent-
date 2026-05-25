@@ -1,0 +1,240 @@
+{
+  "summary": {
+    "total_plugins": 6,
+    "plugins_found": 3,
+    "plugins_with_all_round_trips_pass": 0,
+    "plugins_with_reapy_pass": 3,
+    "plugins_with_exists_at_index_pass": 0,
+    "arm64": true
+  },
+  "plugin_reports": [
+    {
+      "plugin_name": "FabFilter Pro-Q 3",
+      "found": true,
+      "fx_add_result": 0,
+      "fx_add_duplicate": false,
+      "param_count": 385,
+      "param_names_sample": [
+        "<error at param 0>",
+        "<error at param 1>",
+        "<error at param 2>",
+        "<error at param 3>",
+        "<error at param 4>",
+        "<error at param 5>",
+        "<error at param 6>",
+        "<error at param 7>",
+        "<error at param 8>",
+        "<error at param 9>"
+      ],
+      "round_trip_results": [
+        {
+          "param_label": "Band 1 Frequency",
+          "param_index": -1,
+          "set_value": 0.3,
+          "get_value": null,
+          "match": false,
+          "error": "Could not find param 'Band 1 Frequency'"
+        },
+        {
+          "param_label": "Band 1 Gain",
+          "param_index": -1,
+          "set_value": 0.5,
+          "get_value": null,
+          "match": false,
+          "error": "Could not find param 'Band 1 Gain'"
+        },
+        {
+          "param_label": "Band 1 Q",
+          "param_index": -1,
+          "set_value": 0.4,
+          "get_value": null,
+          "match": false,
+          "error": "Could not find param 'Band 1 Q'"
+        },
+        {
+          "param_label": "Output Gain",
+          "param_index": -1,
+          "set_value": 0.5,
+          "get_value": null,
+          "match": false,
+          "error": "Could not find param 'Output Gain'"
+        }
+      ],
+      "all_round_trips_pass": false,
+      "reapy_path_works": true,
+      "reapy_round_trips_pass": true,
+      "exists_at_index_pass": false,
+      "errors": [
+        "FX at index 0 failed GetFXName check: 'too many values to unpack (expected 2)'"
+      ]
+    },
+    {
+      "plugin_name": "FabFilter Pro-L 2",
+      "found": true,
+      "fx_add_result": 0,
+      "fx_add_duplicate": false,
+      "param_count": 35,
+      "param_names_sample": [
+        "<error at param 0>",
+        "<error at param 1>",
+        "<error at param 2>",
+        "<error at param 3>",
+        "<error at param 4>",
+        "<error at param 5>",
+        "<error at param 6>",
+        "<error at param 7>",
+        "<error at param 8>",
+        "<error at param 9>"
+      ],
+      "round_trip_results": [
+        {
+          "param_label": "Gain",
+          "param_index": -1,
+          "set_value": 0.2,
+          "get_value": null,
+          "match": false,
+          "error": "Could not find param 'Gain'"
+        },
+        {
+          "param_label": "Output",
+          "param_index": -1,
+          "set_value": 0.5,
+          "get_value": null,
+          "match": false,
+          "error": "Could not find param 'Output'"
+        },
+        {
+          "param_label": "Lookahead",
+          "param_index": -1,
+          "set_value": 0.3,
+          "get_value": null,
+          "match": false,
+          "error": "Could not find param 'Lookahead'"
+        },
+        {
+          "param_label": "Channel Link",
+          "param_index": -1,
+          "set_value": 0.8,
+          "get_value": null,
+          "match": false,
+          "error": "Could not find param 'Channel Link'"
+        }
+      ],
+      "all_round_trips_pass": false,
+      "reapy_path_works": true,
+      "reapy_round_trips_pass": true,
+      "exists_at_index_pass": false,
+      "errors": [
+        "FX at index 0 failed GetFXName check: 'too many values to unpack (expected 2)'"
+      ]
+    },
+    {
+      "plugin_name": "Waves RVox",
+      "found": false,
+      "fx_add_result": -1,
+      "fx_add_duplicate": false,
+      "param_count": 0,
+      "param_names_sample": [],
+      "round_trip_results": [],
+      "all_round_trips_pass": false,
+      "reapy_path_works": false,
+      "reapy_round_trips_pass": false,
+      "exists_at_index_pass": false,
+      "errors": [
+        "AddByName returned -1 (plugin not found or failed)"
+      ]
+    },
+    {
+      "plugin_name": "Waves CLA-76",
+      "found": false,
+      "fx_add_result": -1,
+      "fx_add_duplicate": false,
+      "param_count": 0,
+      "param_names_sample": [],
+      "round_trip_results": [],
+      "all_round_trips_pass": false,
+      "reapy_path_works": false,
+      "reapy_round_trips_pass": false,
+      "exists_at_index_pass": false,
+      "errors": [
+        "AddByName returned -1 (plugin not found or failed)"
+      ]
+    },
+    {
+      "plugin_name": "Waves L4",
+      "found": false,
+      "fx_add_result": -1,
+      "fx_add_duplicate": false,
+      "param_count": 0,
+      "param_names_sample": [],
+      "round_trip_results": [],
+      "all_round_trips_pass": false,
+      "reapy_path_works": false,
+      "reapy_round_trips_pass": false,
+      "exists_at_index_pass": false,
+      "errors": [
+        "AddByName returned -1 (plugin not found or failed)"
+      ]
+    },
+    {
+      "plugin_name": "ValhallaVintageVerb",
+      "found": true,
+      "fx_add_result": 0,
+      "fx_add_duplicate": false,
+      "param_count": 21,
+      "param_names_sample": [
+        "<error at param 0>",
+        "<error at param 1>",
+        "<error at param 2>",
+        "<error at param 3>",
+        "<error at param 4>",
+        "<error at param 5>",
+        "<error at param 6>",
+        "<error at param 7>",
+        "<error at param 8>",
+        "<error at param 9>"
+      ],
+      "round_trip_results": [
+        {
+          "param_label": "Mix",
+          "param_index": -1,
+          "set_value": 0.3,
+          "get_value": null,
+          "match": false,
+          "error": "Could not find param 'Mix'"
+        },
+        {
+          "param_label": "Decay",
+          "param_index": -1,
+          "set_value": 0.5,
+          "get_value": null,
+          "match": false,
+          "error": "Could not find param 'Decay'"
+        },
+        {
+          "param_label": "Predelay",
+          "param_index": -1,
+          "set_value": 0.2,
+          "get_value": null,
+          "match": false,
+          "error": "Could not find param 'Predelay'"
+        },
+        {
+          "param_label": "Size",
+          "param_index": -1,
+          "set_value": 0.6,
+          "get_value": null,
+          "match": false,
+          "error": "Could not find param 'Size'"
+        }
+      ],
+      "all_round_trips_pass": false,
+      "reapy_path_works": true,
+      "reapy_round_trips_pass": true,
+      "exists_at_index_pass": false,
+      "errors": [
+        "FX at index 0 failed GetFXName check: 'too many values to unpack (expected 2)'"
+      ]
+    }
+  ]
+}

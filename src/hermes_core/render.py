@@ -43,6 +43,62 @@ class RenderManager:
                 return True
         return False
 
+    @staticmethod
+    def _check_output_writable(output_dir: str) -> bool:
+        """Return True if output_dir is writable (exists or can be created)."""
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            test_path = os.path.join(output_dir, ".hermes_write_test")
+            with open(test_path, "w") as f:
+                f.write("")
+            os.remove(test_path)
+            return True
+        except OSError:
+            return False
+
+    def _preflight_check(self, bounds: str, fmt: str, output_dir: str) -> dict:
+        """Run all render preflight checks.
+
+        Returns {"passed": bool, "failures": [{"reason": str, "detail": str}, ...]}.
+        """
+        failures: list[dict] = []
+
+        if bounds not in _VALID_BOUNDS:
+            failures.append({
+                "reason": "invalid_bounds",
+                "detail": f"'{bounds}' not in {_VALID_BOUNDS}",
+            })
+
+        if fmt not in _VALID_FORMATS:
+            failures.append({
+                "reason": "invalid_format",
+                "detail": f"'{fmt}' not in {_VALID_FORMATS}",
+            })
+
+        if not self._can_render():
+            failures.append({
+                "reason": "nothing_to_render",
+                "detail": "Project has no media items on any track",
+            })
+
+        if bounds == "time_selection":
+            start, end = self.get_time_selection_range()
+            if end <= start:
+                failures.append({
+                    "reason": "nothing_to_render",
+                    "detail": f"Time selection is zero-length (start={start}, end={end})",
+                })
+
+        if not self._check_output_writable(output_dir):
+            failures.append({
+                "reason": "output_not_writable",
+                "detail": f"Cannot write to output directory: {output_dir}",
+            })
+
+        if failures:
+            log.warning("Render preflight FAILED: %s", failures)
+        return {"passed": len(failures) == 0, "failures": failures}
+
     # ── Public API ──────────────────────────────────────────
 
     def render_mix(
@@ -58,17 +114,17 @@ class RenderManager:
         Configures REAPER's render settings, triggers a non-modal render,
         and polls until the output file appears or timeout expires.
         """
-        if not bounds or bounds not in _VALID_BOUNDS:
-            raise ValueError(
-                f"Invalid bounds: '{bounds}'. Must be one of {_VALID_BOUNDS}"
-            )
-        if not fmt or fmt not in _VALID_FORMATS:
-            raise ValueError(
-                f"Invalid format: '{fmt}'. Must be one of {_VALID_FORMATS}"
-            )
-
         if not os.path.isdir(output_dir):
             os.makedirs(output_dir)
+
+        # Unified preflight -- catches all known failure paths before render
+        preflight = self._preflight_check(bounds, fmt, output_dir)
+        if not preflight["passed"]:
+            return {
+                "output_path": None,
+                "error": preflight["failures"][0]["reason"],
+                "preflight": preflight,
+            }
 
         api = self._bridge.api
         sink_code = _SINK_CODES[fmt]
@@ -85,16 +141,6 @@ class RenderManager:
         api.GetSetProjectInfo(0, "RENDER_SETTINGS", 0, True)
         if sample_rate > 0:
             api.GetSetProjectInfo(0, "RENDER_SRATE", sample_rate, True)
-
-        # Guard: check project has something to render
-        if not self._can_render():
-            return {"error": "nothing_to_render", "output_path": None}
-
-        # Guard: time_selection must have non-zero length
-        if bounds == "time_selection":
-            start, end = self.get_time_selection_range()
-            if end <= start:
-                return {"error": "nothing_to_render", "output_path": None}
 
         # Trigger non-modal render
         api.Main_OnCommand(42230, 0)

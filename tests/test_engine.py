@@ -52,8 +52,11 @@ class TestHealthCheck:
     def test_delegates_to_bridge(self):
         eng = MixingEngine()
         eng._bridge.health_check = MagicMock(return_value={"reapy_connected": True})
+        eng._bridge._dialog_killer.get_recent_events = MagicMock(return_value=[])
         result = eng.health_check()
-        assert result == {"reapy_connected": True}
+        assert result["reapy_connected"] is True
+        assert "watchdog_enabled" in result
+        assert "recent_dialog_events" in result
 
 
 @pytest.mark.unit

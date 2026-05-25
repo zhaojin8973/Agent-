@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
 
-from hermes_core.bridge import DialogKiller, ReaperBridge
+from hermes_core.bridge import DialogEvent, DialogKiller, ReaperBridge
 
 
 # ══════════════════════════════════════════════════════════════
@@ -211,3 +211,218 @@ class TestBridgeDialogKillerIntegration:
 
         # Assert
         assert not bridge._dialog_killer.is_running
+
+
+# ══════════════════════════════════════════════════════════════
+# Unit: DialogKiller — classification logic
+# ══════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestDialogKillerClassification:
+    """Tests for the three-tier dialog classification system."""
+
+    def test_classify_safe_known_patterns(self):
+        """Titles matching known safe patterns return 'safe'."""
+        killer = DialogKiller(interval=10.0)  # long interval, won't fire on its own
+        assert killer._classify("Nothing to render") == "safe"
+        assert killer._classify("Render path invalid!") == "safe"
+        assert killer._classify("Render failed: some reason") == "safe"
+        assert killer._classify("missing output directory") == "safe"
+
+    def test_classify_diagnosis_patterns(self):
+        """Titles matching diagnosis patterns return 'diagnosis'."""
+        killer = DialogKiller(interval=10.0)
+        assert killer._classify("Plugin missing: Waves RVox") == "diagnosis"
+        assert killer._classify("Authorization failed") == "diagnosis"
+        assert killer._classify("iLok license error") == "diagnosis"
+        assert killer._classify("Media offline") == "diagnosis"
+        assert killer._classify("WaveShell scan") == "diagnosis"
+
+    def test_classify_unknown_dialog(self):
+        """Titles matching no known pattern return 'unknown'."""
+        killer = DialogKiller(interval=10.0)
+        assert killer._classify("Some unexpected dialog") == "unknown"
+        assert killer._classify("REAPER v7.73") == "unknown"
+
+    def test_classify_case_insensitive(self):
+        """Classification is case-insensitive."""
+        killer = DialogKiller(interval=10.0)
+        assert killer._classify("nothing TO render") == "safe"
+        assert killer._classify("PLUGIN MISSING") == "diagnosis"
+
+    def test_pick_button_safe_prefers_ok(self):
+        """For safe dialogs, prefers OK > Close > Continue > Yes."""
+        killer = DialogKiller(interval=10.0)
+        assert killer._pick_button(["Cancel", "OK", "Help"], "safe") == "OK"
+        assert killer._pick_button(["Close", "Help"], "safe") == "Close"
+        assert killer._pick_button(["Continue"], "safe") == "Continue"
+        assert killer._pick_button(["Yes", "No"], "safe") == "Yes"
+        assert killer._pick_button(["Help"], "safe") == ""
+
+    def test_pick_button_diagnosis_conservative(self):
+        """For diagnosis dialogs, only picks OK or Close."""
+        killer = DialogKiller(interval=10.0)
+        assert killer._pick_button(["OK", "Cancel"], "diagnosis") == "OK"
+        assert killer._pick_button(["Close"], "diagnosis") == "Close"
+        assert killer._pick_button(["Continue", "Help"], "diagnosis") == ""
+
+    def test_set_rules_override_patterns(self):
+        """set_rules() allows custom safe/diagnosis patterns."""
+        killer = DialogKiller(interval=10.0)
+        killer.set_rules(
+            safe_patterns=["custom safe msg"],
+            diagnosis_patterns=["custom diag msg"],
+        )
+        assert killer._classify("custom safe msg here") == "safe"
+        assert killer._classify("custom diag msg error") == "diagnosis"
+        # Old patterns no longer match
+        assert killer._classify("Nothing to render") == "unknown"
+
+
+# ══════════════════════════════════════════════════════════════
+# Unit: DialogKiller — events & lifecycle
+# ══════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestDialogKillerEvents:
+    """Tests for DialogEvent recording and retrieval."""
+
+    def test_dialog_event_defaults(self):
+        """DialogEvent has sensible defaults."""
+        event = DialogEvent(has_modal=False)
+        assert event.has_modal is False
+        assert event.window_title == ""
+        assert event.buttons == []
+        assert event.text_hits == []
+        assert event.action_taken == "none"
+        assert event.timestamp == 0.0
+
+    def test_dialog_event_full_record(self):
+        """DialogEvent stores all fields correctly."""
+        event = DialogEvent(
+            has_modal=True,
+            window_title="Nothing to render",
+            buttons=["OK"],
+            text_hits=["Nothing to render"],
+            action_taken="clicked_ok",
+            timestamp=1716600000.0,
+        )
+        assert event.has_modal is True
+        assert event.window_title == "Nothing to render"
+        assert event.action_taken == "clicked_ok"
+
+    def test_get_recent_events_initially_empty(self):
+        """get_recent_events() returns empty list when no events recorded."""
+        killer = DialogKiller(interval=10.0)
+        assert killer.get_recent_events() == []
+
+    def test_dialog_killer_inspect_windows_no_output(self):
+        """When AppleScript returns empty, inspect returns empty list."""
+        killer = DialogKiller(interval=10.0)
+        with patch.object(
+            killer, "_run_osascript", return_value=""
+        ):
+            windows = killer._inspect_windows()
+            assert windows == []
+
+    def test_dialog_killer_inspect_windows_parses_output(self):
+        """Correctly parses AppleScript output into (title, buttons) tuples."""
+        killer = DialogKiller(interval=10.0)
+        fake_output = "Nothing to render:::OK|Close|;;;Plugin missing:::OK|;;;"
+        with patch.object(
+            killer, "_run_osascript", return_value=fake_output
+        ):
+            windows = killer._inspect_windows()
+            assert len(windows) == 2
+            assert windows[0] == ("Nothing to render", ["OK", "Close"])
+            assert windows[1] == ("Plugin missing", ["OK"])
+
+    def test_inspect_skips_main_reaper_window(self):
+        """Main REAPER window (title contains 'REAPER v') is never reported.
+
+        The AppleScript already filters these, so inspect_windows only
+        sees non-main dialogs.
+        """
+        killer = DialogKiller(interval=10.0)
+        # Simulate AS output where only non-main windows remain
+        fake_output = "Error Dialog:::OK|;;;"
+        with patch.object(
+            killer, "_run_osascript", return_value=fake_output
+        ):
+            windows = killer._inspect_windows()
+            assert len(windows) == 1
+            assert "REAPER v" not in windows[0][0]
+
+    def test_dismiss_safe_dialog_records_event(self):
+        """Dismissing a safe dialog records an event and increments count."""
+        killer = DialogKiller(interval=10.0)
+        fake_output = "Nothing to render:::OK|Close|;;;"
+        with patch.object(
+            killer, "_run_osascript", side_effect=[
+                fake_output,  # _inspect_windows
+                "",           # _click_button (failed)
+                "",           # _AS_DISMISS fallback
+            ]
+        ):
+            killer._dismiss_dialogs()
+            events = killer.get_recent_events()
+            assert len(events) == 1
+            assert events[0].window_title == "Nothing to render"
+            assert events[0].has_modal is True
+            assert killer.killed_count == 1
+
+    def test_dismiss_unknown_dialog_skipped(self):
+        """Unknown dialogs are NOT dismissed and do NOT increment killed_count."""
+        killer = DialogKiller(interval=10.0)
+        fake_output = "Bizarre Unknown Popup:::Yes|No|;;;"
+        with patch.object(
+            killer, "_run_osascript", return_value=fake_output
+        ):
+            killer._dismiss_dialogs()
+            events = killer.get_recent_events()
+            assert len(events) == 1
+            assert events[0].action_taken == "skipped_unknown"
+            assert killer.killed_count == 0, (
+                "unknown dialogs must not increment killed_count"
+            )
+
+    def test_killed_count_only_increments_on_confirmed_close(self):
+        """killed_count increments only for safe+dismissed or diagnosis+clicked."""
+        killer = DialogKiller(interval=10.0)
+
+        # Unknown dialog -- should NOT increment
+        with patch.object(
+            killer, "_run_osascript",
+            return_value="Unknown Title:::OK|;;;"
+        ):
+            killer._dismiss_dialogs()
+            assert killer.killed_count == 0
+
+        # Safe dialog with click -- SHOULD increment
+        with patch.object(
+            killer, "_run_osascript", side_effect=[
+                "Nothing to render:::OK|;;;",  # _inspect_windows
+                "clicked:OK",                  # _click_button
+            ]
+        ):
+            killer._dismiss_dialogs()
+            assert killer.killed_count == 1
+
+    def test_event_buffer_does_not_grow_unbounded(self):
+        """Events list is capped at max_events."""
+        killer = DialogKiller(interval=10.0, max_events=3)
+        for i in range(5):
+            output = f"Error {i}:::OK|;;;"
+            with patch.object(
+                killer, "_run_osascript", return_value=output
+            ):
+                killer._dismiss_dialogs()
+        assert len(killer._events) <= 3
+
+    def test_set_rules_partial_override(self):
+        """set_rules with only safe_patterns leaves diagnosis intact, and vice versa."""
+        killer = DialogKiller(interval=10.0)
+        killer.set_rules(safe_patterns=["custom only"])
+        assert killer._classify("custom only dialog") == "safe"
+        assert killer._classify("Nothing to render") == "unknown"  # old safe gone
+        assert killer._classify("Plugin missing") == "diagnosis"   # diag unchanged

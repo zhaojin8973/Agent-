@@ -287,44 +287,36 @@ class TestRenderMixValidation:
     """Tests for RenderManager.render_mix() input validation."""
 
     def test_rejects_invalid_bounds(self):
-        """render_mix raises ValueError for unrecognized bounds strings."""
-        # Arrange
+        """render_mix returns preflight error for unrecognized bounds strings."""
         mock_bridge, _ = _make_bridge()
         manager = RenderManager(mock_bridge)
-
-        # Act & Assert
-        with pytest.raises(ValueError, match=r"(?i)bounds|invalid|unknown"):
-            manager.render_mix("/tmp/output", bounds="loop_region")
+        result = manager.render_mix("/tmp/output", bounds="loop_region")
+        assert result.get("error") == "invalid_bounds"
+        assert result["preflight"]["passed"] is False
 
     def test_rejects_invalid_format(self):
-        """render_mix raises ValueError for unrecognized format strings."""
-        # Arrange
+        """render_mix returns preflight error for unrecognized format strings."""
         mock_bridge, _ = _make_bridge()
         manager = RenderManager(mock_bridge)
-
-        # Act & Assert
-        with pytest.raises(ValueError, match=r"(?i)format|fmt|invalid|unknown"):
-            manager.render_mix("/tmp/output", fmt="aiff")
+        result = manager.render_mix("/tmp/output", fmt="aiff")
+        assert result.get("error") == "invalid_format"
+        assert result["preflight"]["passed"] is False
 
     def test_rejects_empty_bounds_string(self):
-        """render_mix rejects an empty string for bounds."""
-        # Arrange
+        """render_mix returns preflight error for empty bounds string."""
         mock_bridge, _ = _make_bridge()
         manager = RenderManager(mock_bridge)
-
-        # Act & Assert
-        with pytest.raises(ValueError, match=r"(?i)bounds|invalid|unknown|empty"):
-            manager.render_mix("/tmp/output", bounds="")
+        result = manager.render_mix("/tmp/output", bounds="")
+        assert result.get("error") == "invalid_bounds"
+        assert result["preflight"]["passed"] is False
 
     def test_rejects_empty_format_string(self):
-        """render_mix rejects an empty string for fmt."""
-        # Arrange
+        """render_mix returns preflight error for empty format string."""
         mock_bridge, _ = _make_bridge()
         manager = RenderManager(mock_bridge)
-
-        # Act & Assert
-        with pytest.raises(ValueError, match=r"(?i)format|fmt|invalid|unknown|empty"):
-            manager.render_mix("/tmp/output", fmt="")
+        result = manager.render_mix("/tmp/output", fmt="")
+        assert result.get("error") == "invalid_format"
+        assert result["preflight"]["passed"] is False
 
     def test_accepts_valid_bounds_values(self, tmp_path):
         """render_mix accepts 'entire_project' and 'time_selection' bounds."""
@@ -616,7 +608,12 @@ class TestRenderMixFilesystem:
         manager = RenderManager(mock_bridge)
 
         # Act -- file does not exist for the first two polls, then appears
-        with patch("os.path.exists", side_effect=[False, False, True]):
+        calls = []
+        def fake_exists(path):
+            calls.append(path)
+            return len(calls) >= 3
+
+        with patch("os.path.exists", side_effect=fake_exists):
             with patch("time.sleep", return_value=None):
                 result = manager.render_mix(str(output_dir), timeout=30.0)
 
@@ -1064,3 +1061,136 @@ class TestRenderMixRejection:
         assert result.get("output_path") is None, (
             f"Expected output_path=None, got: {result}"
         )
+
+
+# ══════════════════════════════════════════════════════════════
+# Unit: Preflight checks
+# ══════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestPreflight:
+    """Tests for the unified _preflight_check() method."""
+
+    def test_preflight_all_passed(self, tmp_path):
+        """Returns passed=True when all checks succeed."""
+        mock_bridge, _ = _make_bridge()
+        output_dir = tmp_path / "renders"
+        output_dir.mkdir()
+        manager = RenderManager(mock_bridge)
+        result = manager._preflight_check("entire_project", "wav", str(output_dir))
+        assert result["passed"] is True
+        assert result["failures"] == []
+
+    def test_preflight_invalid_bounds(self, tmp_path):
+        """Returns failure for invalid bounds value."""
+        mock_bridge, _ = _make_bridge()
+        output_dir = tmp_path / "renders"
+        output_dir.mkdir()
+        manager = RenderManager(mock_bridge)
+        result = manager._preflight_check("invalid_bounds_xyz", "wav", str(output_dir))
+        assert result["passed"] is False
+        reasons = [f["reason"] for f in result["failures"]]
+        assert "invalid_bounds" in reasons
+
+    def test_preflight_invalid_format(self, tmp_path):
+        """Returns failure for invalid format value."""
+        mock_bridge, _ = _make_bridge()
+        output_dir = tmp_path / "renders"
+        output_dir.mkdir()
+        manager = RenderManager(mock_bridge)
+        result = manager._preflight_check("entire_project", "ogg", str(output_dir))
+        assert result["passed"] is False
+        reasons = [f["reason"] for f in result["failures"]]
+        assert "invalid_format" in reasons
+
+    def test_preflight_empty_project(self, tmp_path):
+        """Returns nothing_to_render when project has no media items."""
+        mock_bridge, mock_api = _make_bridge(
+            CountTracks=MagicMock(return_value=0),
+        )
+        output_dir = tmp_path / "renders"
+        output_dir.mkdir()
+        manager = RenderManager(mock_bridge)
+        result = manager._preflight_check("entire_project", "wav", str(output_dir))
+        assert result["passed"] is False
+        reasons = [f["reason"] for f in result["failures"]]
+        assert "nothing_to_render" in reasons
+
+    def test_preflight_zero_time_selection(self, tmp_path):
+        """Returns nothing_to_render when time_selection bounds is zero-length."""
+        mock_bridge, mock_api = _make_bridge(
+            GetSetLoopTimeRange=MagicMock(side_effect=[5.0, 5.0]),  # start == end
+        )
+        output_dir = tmp_path / "renders"
+        output_dir.mkdir()
+        manager = RenderManager(mock_bridge)
+        result = manager._preflight_check("time_selection", "wav", str(output_dir))
+        assert result["passed"] is False
+        reasons = [f["reason"] for f in result["failures"]]
+        assert "nothing_to_render" in reasons
+
+    def test_preflight_time_selection_passes_when_valid(self, tmp_path):
+        """Passes for time_selection with positive length."""
+        mock_bridge, mock_api = _make_bridge(
+            GetSetLoopTimeRange=MagicMock(side_effect=[0.0, 10.0]),
+        )
+        output_dir = tmp_path / "renders"
+        output_dir.mkdir()
+        manager = RenderManager(mock_bridge)
+        result = manager._preflight_check("time_selection", "wav", str(output_dir))
+        assert result["passed"] is True
+
+    @pytest.mark.unit
+    class TestCheckOutputWritable:
+        """Tests for _check_output_writable()."""
+
+        def test_writable_directory(self, tmp_path):
+            """Returns True for a writable directory."""
+            output_dir = tmp_path / "writable"
+            output_dir.mkdir()
+            assert RenderManager._check_output_writable(str(output_dir)) is True
+
+        def test_creates_directory_if_needed(self, tmp_path):
+            """Returns True after creating a missing directory."""
+            output_dir = tmp_path / "new_dir"
+            assert not output_dir.exists()
+            result = RenderManager._check_output_writable(str(output_dir))
+            assert result is True
+            assert output_dir.exists()
+
+        def test_unwritable_path(self, tmp_path):
+            """Returns False when path cannot be written to (e.g. /dev/null/dir)."""
+            assert RenderManager._check_output_writable("/dev/null/subdir") is False
+
+    def test_render_mix_includes_preflight_on_failure(self, tmp_path):
+        """When preflight fails, render_mix returns error + preflight detail."""
+        mock_bridge, mock_api = _make_bridge(
+            CountTracks=MagicMock(return_value=0),
+        )
+        output_dir = tmp_path / "renders"
+        output_dir.mkdir()
+        manager = RenderManager(mock_bridge)
+        result = manager.render_mix(
+            str(output_dir), bounds="entire_project", fmt="wav"
+        )
+        assert result["error"] == "nothing_to_render"
+        assert "preflight" in result
+        assert result["preflight"]["passed"] is False
+
+    def test_preflight_multiple_failures(self, tmp_path):
+        """Multiple failures are all reported."""
+        mock_bridge, mock_api = _make_bridge(
+            CountTracks=MagicMock(return_value=0),
+            GetSetLoopTimeRange=MagicMock(side_effect=[2.0, 1.0]),  # end < start
+        )
+        output_dir = tmp_path / "renders"
+        output_dir.mkdir()
+        manager = RenderManager(mock_bridge)
+        result = manager._preflight_check("invalid", "xyz", str(output_dir))
+        assert result["passed"] is False
+        # At least 3 failures: invalid_bounds + invalid_format + nothing_to_render
+        assert len(result["failures"]) >= 3
+        reasons = {f["reason"] for f in result["failures"]}
+        assert "invalid_bounds" in reasons
+        assert "invalid_format" in reasons
+        assert "nothing_to_render" in reasons

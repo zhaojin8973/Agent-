@@ -27,14 +27,15 @@ class MixingEngine:
         result = eng.render_mix("/tmp/output")
     """
 
-    def __init__(self):
-        self._bridge = ReaperBridge()
+    def __init__(self, watchdog: bool = False):
+        self._bridge = ReaperBridge(dialog_killer=watchdog)
         self._tracks = TrackManager(self._bridge)
         self._bus = BusManager(self._bridge)
         self._fx = FxManager(self._bridge)
         self._send = SendManager(self._bridge)
         self._render = RenderManager(self._bridge)
         self._normalizer = Normalizer(self._bridge)
+        self._watchdog_enabled = watchdog
 
     # ── Context manager ──────────────────────────────────
 
@@ -44,13 +45,25 @@ class MixingEngine:
         return self
 
     def __exit__(self, *args):
+        if self._watchdog_enabled and self._bridge._dialog_killer.is_running:
+            self._bridge._dialog_killer.stop()
         return False
 
     # ── Scene 1: Connection & health ─────────────────────
 
     def health_check(self) -> dict:
         """Return health status of the REAPER connection."""
-        return self._bridge.health_check()
+        result = self._bridge.health_check()
+        result["watchdog_enabled"] = self._watchdog_enabled
+        result["recent_dialog_events"] = [
+            {
+                "window_title": e.window_title,
+                "action_taken": e.action_taken,
+                "timestamp": e.timestamp,
+            }
+            for e in self._bridge._dialog_killer.get_recent_events()[-20:]
+        ]
+        return result
 
     # ── Scene 2: Project & tracks ────────────────────────
 
