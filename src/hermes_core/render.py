@@ -145,8 +145,8 @@ class RenderManager:
         # Trigger non-modal render
         api.Main_OnCommand(42230, 0)
 
-        # Poll for output file
-        output_path = os.path.join(output_dir, "render.wav")
+        # Poll for output file (extension varies by format)
+        output_path = os.path.join(output_dir, f"render.{fmt}")
         start = time.time()
         while not os.path.exists(output_path):
             if time.time() - start > timeout:

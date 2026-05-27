@@ -85,6 +85,17 @@ class Normalizer:
                 success=False,
             )
 
+        # 2. Skip tracks without audio items — nothing to normalize
+        if info.item_count == 0:
+            return NormalizeResult(
+                track_index=track_index,
+                track_name=info.name,
+                original_lufs=0.0,
+                target_lufs=target_lufs,
+                gain_applied_db=0.0,
+                success=False,
+            )
+
         # 2. Save project state so we can restore after measurement
         solo_backup = self._backup_solo_state()
         saved_start, saved_end = self._render.get_time_selection_range()

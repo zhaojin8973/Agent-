@@ -4,6 +4,7 @@ Depends only on bridge.py.
 """
 
 import os
+import math
 import logging
 import wave
 from dataclasses import dataclass
@@ -160,8 +161,10 @@ class TrackManager:
                 duration = wf.getnframes() / wf.getframerate() if wf.getframerate() > 0 else 1.0
             rpr = self._bridge.rpr
             api = rpr.reascript_api
-            # Create a real PCM source from the file
             pcm_source = api.PCM_Source_CreateFromFile(file_path)
+            if pcm_source is None:
+                log.warning("import_media: PCM_Source_CreateFromFile returned None for %s", file_path)
+                return False
             proj = rpr.Project()
             tr = proj.tracks[track_index]
             item = tr.add_item(start=position, length=duration)
@@ -210,7 +213,7 @@ class TrackManager:
 
     @staticmethod
     def _db_to_norm(db: float) -> float:
-        if db <= -150:
+        if not math.isfinite(db) or db <= -150:
             return 0.0
         return 10.0 ** (db / 20.0)
 
@@ -218,5 +221,4 @@ class TrackManager:
     def _norm_to_db(norm: float) -> float:
         if norm <= 0.0:
             return -150.0
-        import math
         return 20.0 * math.log10(norm)

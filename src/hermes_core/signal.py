@@ -66,7 +66,7 @@ class SignalAnalyzer:
 
     @staticmethod
     def _read_pcm(file_path: str) -> tuple[np.ndarray, int]:
-        """Read WAV, return (mono_float64, sample_rate). Handles 16/24-bit PCM."""
+        """Read WAV, return (mono_float64, sample_rate). Handles 16/24-bit PCM and 32-bit float."""
         with wave.open(file_path, "rb") as wf:
             sw = wf.getsampwidth()
             sr = wf.getframerate()
@@ -88,8 +88,10 @@ class SignalAnalyzer:
             )
             i32[i32 >= 8388608] -= 16777216
             pcm = i32.astype(np.float64) / 8388608.0
+        elif sw == 4:
+            pcm = np.frombuffer(raw, dtype=np.float32).astype(np.float64)
         else:
-            raise ValueError(f"Unsupported sample width: {sw} (only 16/24-bit PCM)")
+            raise ValueError(f"Unsupported sample width: {sw} (only 16/24-bit PCM and 32-bit float)")
 
         pcm = pcm.reshape(-1, nch)
         if nch >= 2:
@@ -143,26 +145,26 @@ class SignalAnalyzer:
         return float(10.0 * math.log10(max(integrated_power, 1e-13))) + _LUFS_CALIBRATION
 
     @staticmethod
+    def _biquad_hp(x: np.ndarray, fc: float, sample_rate: int) -> np.ndarray:
+        """First-order high-pass via bilinear transform of H(s)=s/(s+wc)."""
+        if len(x) < 2:
+            return x.copy()
+        w = 2.0 * math.pi * fc / sample_rate
+        k = w / 2.0
+        b0 = 1.0 / (1.0 + k)
+        b1 = -b0
+        a1 = (k - 1.0) / (1.0 + k)
+        y = np.zeros_like(x)
+        y[0] = x[0]
+        for i in range(1, len(x)):
+            y[i] = b0 * x[i] + b1 * x[i - 1] - a1 * y[i - 1]
+        return y
+
+    @staticmethod
     def _k_weight(pcm: np.ndarray, sample_rate: int) -> np.ndarray:
         """Apply K-weighting: pre-emphasis (38 Hz HP) + RLB (100 Hz HP) via bilinear IIR."""
-        if len(pcm) < 2:
-            return pcm.copy()
-
-        def _biquad_hp(x, fc):
-            """First-order high-pass via bilinear transform of H(s)=s/(s+wc)."""
-            w = 2.0 * math.pi * fc / sample_rate
-            k = w / 2.0
-            b0 = 1.0 / (1.0 + k)
-            b1 = -b0
-            a1 = (k - 1.0) / (1.0 + k)
-            y = np.zeros_like(x)
-            y[0] = x[0]
-            for i in range(1, len(x)):
-                y[i] = b0 * x[i] + b1 * x[i - 1] - a1 * y[i - 1]
-            return y
-
-        stage1 = _biquad_hp(pcm, 38.0)
-        return _biquad_hp(stage1, 100.0)
+        stage1 = SignalAnalyzer._biquad_hp(pcm, 38.0, sample_rate)
+        return SignalAnalyzer._biquad_hp(stage1, 100.0, sample_rate)
 
     # ── True Peak (BS.1770-4 Annex 2) ─────────────────────────
 

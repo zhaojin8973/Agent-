@@ -16,7 +16,7 @@ _MODE_VALUES = {"post-fader": 0, "pre-fx": 1, "pre-fader": 3}
 
 def _db_to_norm(db: float) -> float:
     """Convert dB to REAPER normalized send volume (0..1)."""
-    if db <= -150:
+    if not math.isfinite(db) or db <= -150:
         return 0.0
     return 10 ** (db / 20)
 

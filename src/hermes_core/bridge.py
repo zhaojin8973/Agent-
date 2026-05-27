@@ -81,16 +81,30 @@ tell application "System Events"
         repeat with w in windows
             set winName to name of w
             if (winName does not contain "REAPER v") and (winName is not "") then
-                set buttonList to ""
-                try
-                    repeat with b in buttons of w
-                        set btnName to name of b
-                        if btnName is not "" then
-                            set buttonList to buttonList & btnName & "|"
-                        end if
-                    end repeat
-                end try
-                set output to output & winName & ":::" & buttonList & ";;;"
+                -- Skip REAPER floating tool windows (not modal dialogs)
+                if (winName does not start with "FX:") and ¬
+                   (winName does not start with "Routing") and ¬
+                   (winName does not contain "Track Manager") and ¬
+                   (winName does not contain "Media Explorer") and ¬
+                   (winName does not contain "Performance Meter") and ¬
+                   (winName does not contain "Virtual MIDI") and ¬
+                   (winName does not contain "Region/Marker") and ¬
+                   (winName does not contain "Undo History") and ¬
+                   (winName does not contain "Screenset") and ¬
+                   (winName does not contain "Action List") and ¬
+                   (winName does not contain "Preferences") and ¬
+                   (winName does not contain "Project Settings") then
+                    set buttonList to ""
+                    try
+                        repeat with b in buttons of w
+                            set btnName to name of b
+                            if btnName is not "" then
+                                set buttonList to buttonList & btnName & "|"
+                            end if
+                        end repeat
+                    end try
+                    set output to output & winName & ":::" & buttonList & ";;;"
+                end if
             end if
         end repeat
         return output
@@ -268,15 +282,29 @@ class DialogKiller:
                         return b
         return ""
 
+    @staticmethod
+    def _escape_applescript_string(s: str) -> str:
+        """Escape a string for safe embedding in an AppleScript string literal.
+
+        Escapes backslash, double-quote, and strips control characters that
+        could be used for AppleScript injection (line continuation ¬, etc.).
+        """
+        s = s.replace("\\", "\\\\")
+        s = s.replace('"', '\\"')
+        s = s.replace("\n", "").replace("\r", "").replace("\t", " ")
+        return s
+
     def _click_button(self, title_fragment: str, button_match: str) -> str:
         """Click a specific button in a window matching title_fragment.
 
         Returns the clicked button name or empty string.
         """
-        safe_title = title_fragment.replace('"', '\\"')
-        safe_button = button_match.replace('"', '\\"')
-        script = _AS_CLICK_BUTTON.format(
-            title_fragment=safe_title, button_match=safe_button
+        safe_title = self._escape_applescript_string(title_fragment)
+        safe_button = self._escape_applescript_string(button_match)
+        script = _AS_CLICK_BUTTON.replace(
+            "{title_fragment}", safe_title
+        ).replace(
+            "{button_match}", safe_button
         )
         result = self._run_osascript(script)
         if result.startswith("clicked:"):
@@ -416,8 +444,6 @@ class ReaperBridge:
                 result["audio_running"] = bool(self._api.Audio_IsRunning())
             except Exception:
                 pass
-        elif self.connect():
-            return self.health_check()
         return result
 
     # ── Properties ──────────────────────────────────────────

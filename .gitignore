@@ -4,5 +4,6 @@ __pycache__/
 .DS_Store
 *.egg-info/
 .pytest_cache/
+.claude/
 Hermes 测试/
 .coverage

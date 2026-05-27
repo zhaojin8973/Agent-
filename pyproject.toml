@@ -1,9 +1,16 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
 [project]
 name = "hermes-core"
 version = "0.1.0"
 description = "REAPER DAW automation - lean 3-layer engine"
-requires-python = ">=3.11"
-dependencies = ["python-reapy>=0.10", "numpy"]
+requires-python = ">=3.11,<3.14"
+dependencies = ["python-reapy>=0.10", "numpy>=1.24"]
 
 [project.optional-dependencies]
 test = ["pytest>=8", "pytest-cov>=6"]
@@ -11,4 +18,4 @@ test = ["pytest>=8", "pytest-cov>=6"]
 [tool.pytest.ini_options]
 markers = ["unit: no REAPER required", "integration: requires running REAPER"]
 testpaths = ["tests"]
-addopts = ["-v", "--tb=short"]
+addopts = ["-v", "--tb=short", "--cov=src/hermes_core", "--cov-report=term-missing"]
