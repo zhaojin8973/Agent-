@@ -11,8 +11,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hermes_core.normalize import Normalizer, NormalizeResult
 from hermes_core.track import TrackInfo
 from hermes_core.signal import SignalReport
+from hermes_core.bridge import ReaperBridge
+from hermes_core.track import TrackManager
+from tests.conftest import require_reaper, clean_project, make_test_wav
 
 
 # ══════════════════════════════════════════════════════════════
@@ -573,3 +577,34 @@ class TestNormalizeAll:
         assert len(results) == 2
         assert results[0].success is True
         assert results[1].success is False
+
+
+@pytest.mark.integration
+class TestNormalizerIntegration:
+    def test_normalize_track_with_audio(self, tmp_path):
+        require_reaper()
+        bridge = ReaperBridge()
+        bridge.connect()
+        clean_project(bridge)
+        tm = TrackManager(bridge)
+        norm = Normalizer(bridge)
+
+        idx = tm.create(name="NormTest")
+        wav = make_test_wav(tmp_path / "norm_test.wav", duration_sec=2.0)
+        tm.import_media(idx, str(wav))
+
+        result = norm.normalize_track(idx, target_lufs=-14.0, duration=1.0)
+        assert result.success is True
+        assert result.track_name == "NormTest"
+
+    def test_normalize_skips_empty_track(self):
+        require_reaper()
+        bridge = ReaperBridge()
+        bridge.connect()
+        clean_project(bridge)
+        tm = TrackManager(bridge)
+        norm = Normalizer(bridge)
+
+        idx = tm.create(name="Empty")
+        result = norm.normalize_track(idx)
+        assert result.success is False

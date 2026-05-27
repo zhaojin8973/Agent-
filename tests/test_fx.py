@@ -5,6 +5,9 @@ from unittest.mock import MagicMock, PropertyMock
 import pytest
 
 from hermes_core.fx import FxManager, _extract_string
+from hermes_core.bridge import ReaperBridge
+from hermes_core.track import TrackManager
+from tests.conftest import require_reaper, clean_project
 
 
 def _mock_fx_list(fx_count=1):
@@ -409,4 +412,93 @@ class TestExtractString:
 
     def test_returns_empty_for_unrecognized_type(self):
         assert _extract_string(123) == ""
+
+
+@pytest.mark.integration
+class TestFxIntegration:
+    def test_add_builtin_fx(self):
+        require_reaper()
+        bridge = ReaperBridge()
+        bridge.connect()
+        clean_project(bridge)
+        tm = TrackManager(bridge)
+        fm = FxManager(bridge)
+
+        idx = tm.create(name="FxTest")
+        fx_idx = fm.add(idx, "ReaEQ")
+        assert fx_idx >= 0
+
+        chain = fm.get_chain(idx)
+        assert len(chain) == 1
+        assert "ReaEQ" in chain[0]["name"]
+
+    def test_remove_fx(self):
+        require_reaper()
+        bridge = ReaperBridge()
+        bridge.connect()
+        clean_project(bridge)
+        tm = TrackManager(bridge)
+        fm = FxManager(bridge)
+
+        idx = tm.create(name="RmTest")
+        fm.add(idx, "ReaEQ")
+        assert len(fm.get_chain(idx)) == 1
+        fm.remove(idx, 0)
+        assert len(fm.get_chain(idx)) == 0
+
+    def test_set_and_get_param(self):
+        require_reaper()
+        bridge = ReaperBridge()
+        bridge.connect()
+        clean_project(bridge)
+        tm = TrackManager(bridge)
+        fm = FxManager(bridge)
+
+        idx = tm.create(name="ParamTest")
+        fx_idx = fm.add(idx, "ReaEQ")
+        fm.set_param(idx, fx_idx, 0, 0.25)
+        val = fm.get_param(idx, fx_idx, 0)
+        assert abs(val - 0.25) < 0.1
+
+    def test_set_enabled(self):
+        require_reaper()
+        bridge = ReaperBridge()
+        bridge.connect()
+        clean_project(bridge)
+        tm = TrackManager(bridge)
+        fm = FxManager(bridge)
+
+        idx = tm.create(name="BypassTest")
+        fm.add(idx, "ReaEQ")
+        fm.set_enabled(idx, 0, False)
+        chain = fm.get_chain(idx)
+        assert chain[0]["enabled"] is False
+        fm.set_enabled(idx, 0, True)
+        assert fm.get_chain(idx)[0]["enabled"] is True
+
+    def test_get_param_list(self):
+        require_reaper()
+        bridge = ReaperBridge()
+        bridge.connect()
+        clean_project(bridge)
+        tm = TrackManager(bridge)
+        fm = FxManager(bridge)
+
+        idx = tm.create()
+        fm.add(idx, "ReaEQ")
+        plist = fm.get_param_list(idx, 0)
+        assert len(plist) > 0
+        assert all("name" in p and "value" in p for p in plist)
+
+    def test_add_nonexistent_fx_returns_minus_one(self):
+        require_reaper()
+        bridge = ReaperBridge()
+        bridge.connect()
+        clean_project(bridge)
+        tm = TrackManager(bridge)
+        fm = FxManager(bridge)
+
+        idx = tm.create()
+        result = fm.add(idx, "NoSuchPlugin_XYZ123")
+        assert result == -1
 

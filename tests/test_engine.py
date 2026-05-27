@@ -10,6 +10,7 @@ from hermes_core.engine import MixingEngine
 from hermes_core.track import TrackManager, TrackInfo
 from hermes_core.bus import BusManager
 from hermes_core.fx import FxManager
+from tests.conftest import require_reaper, clean_project, make_test_wav
 from hermes_core.send import SendManager
 from hermes_core.render import RenderManager
 from hermes_core.signal import SignalAnalyzer, SignalReport
@@ -450,3 +451,56 @@ class TestFullPipeline:
 
             audit = eng.audit_mix(result["output_path"])
             assert audit["passed"]
+
+
+@pytest.mark.integration
+class TestEngineIntegration:
+    def test_full_pipeline_render_and_audit(self, tmp_path):
+        require_reaper()
+        eng = MixingEngine()
+        eng._bridge.connect()
+
+        eng.create_project(sample_rate=48000)
+
+        wav1 = make_test_wav(tmp_path / "kick.wav", duration_sec=1.0, frequency=80.0)
+        wav2 = make_test_wav(tmp_path / "snare.wav", duration_sec=1.0, frequency=200.0)
+
+        imported = eng.import_stems([str(wav1), str(wav2)])
+        assert len(imported) == 2
+        assert all(r["success"] for r in imported)
+
+        eng.apply_gain(0, -3.0)
+        eng.add_fx(0, "ReaEQ")
+
+        bus_idx = eng.create_bus("DrumBus", [0, 1])
+        assert bus_idx >= 0
+
+        result = eng.render_mix(str(tmp_path), verify=True)
+        assert result.get("output_path") is not None
+        assert "signal_check" in result
+
+        audit = eng.audit_mix(result["output_path"])
+        assert audit["passed"] is True
+
+    def test_health_check_and_track_listing(self):
+        require_reaper()
+        eng = MixingEngine()
+        eng._bridge.connect()
+        eng.create_project()
+
+        eng.import_stems([])
+        health = eng.health_check()
+        assert health["reapy_connected"] is True
+
+        tracks = eng.list_tracks()
+        assert isinstance(tracks, list)
+
+    def test_render_rejects_empty_project(self, tmp_path):
+        require_reaper()
+        eng = MixingEngine()
+        eng._bridge.connect()
+        eng.create_project()
+
+        result = eng.render_mix(str(tmp_path), verify=False)
+        assert result.get("output_path") is None
+        assert "error" in result

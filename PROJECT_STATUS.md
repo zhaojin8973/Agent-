@@ -11,7 +11,7 @@ metadata:
 
 **更新日期**: 2026-05-27
 **版本**: 0.1.0
-**最新提交**: 即将提交 (test coverage 87%→89%, +18 tests)
+**最新提交**: 即将提交 (集成测试 31 个，总计 282 tests)
 
 ---
 
@@ -119,19 +119,19 @@ hermes-core 是 REAPER DAW 的精益三层 Python 自动化引擎，目标是非
 | 文件 | 测试数 | 覆盖率 |
 |---|---|---|
 | test_bridge.py | 33 | 76% |
-| test_bus.py | 12 | 87% |
-| test_engine.py | 34 | 99% |
-| test_fx.py | 40 | 81% |
-| test_normalize.py | 18 | 98% |
+| test_bus.py | 16 | 87% |
+| test_engine.py | 37 | 99% |
+| test_fx.py | 46 | 81% |
+| test_normalize.py | 20 | 98% |
 | test_render.py | 53 | 100% |
-| test_send.py | 17 | 88% |
+| test_send.py | 22 | 88% |
 | test_signal.py | 21 | 93% |
-| test_track.py | 26 | 84% |
-| **总计** | **251** | **89%** |
+| test_track.py | 34 | 84% |
+| **总计** | **282** | **89%** |
 
-- 全部为单元测试（mock REAPER）
+- 单元测试: 251 个（mock REAPER）
+- 集成测试: 31 个（需要 REAPER 运行）
 - 0 个测试 skip
-- 3 个集成测试需要在 REAPER 可用时运行
 
 ---
 
@@ -140,7 +140,12 @@ hermes-core 是 REAPER DAW 的精益三层 Python 自动化引擎，目标是非
 1. **REAPER Python 兼容性**：Python 3.14 不兼容 REAPER 7.73，必须使用 3.13
 2. **DialogKiller 仅 macOS**：依赖 AppleScript，不支持 Windows/Linux
 3. **reaper-kb.ini 残留**：有指向 Python 3.14 和旧项目的 reapy 脚本引用
-4. **集成测试不足**：除 render 外，所有 L2 模块缺少真实 REAPER 集成测试
+
+## 八、上次发现的严重 Bug（已修复）
+
+1. `render.py`: `GetSetLoopTimeRange` → `GetSet_LoopTimeRange`（API 名称缺下划线）
+2. `render.py`: `get_time_selection_range` 返回值未解包（应解包 5 元组）
+3. `render.py`: `get_time_selection_range` 第二次调用使用了错误的 `isLoop=True`
 
 ---
 

@@ -41,9 +41,9 @@ def _make_bridge(**api_overrides):
         mock_api.GetTrack = MagicMock(return_value=MagicMock())
     if "CountTrackMediaItems" not in api_overrides:
         mock_api.CountTrackMediaItems = MagicMock(return_value=1)
-    if "GetSetLoopTimeRange" not in api_overrides:
-        # Two calls: start=0.0, end=10.0 → valid non-zero time selection
-        mock_api.GetSetLoopTimeRange = MagicMock(side_effect=[0.0, 10.0])
+    if "GetSet_LoopTimeRange" not in api_overrides:
+        # Return 5-tuple: (retval, isSet, startOut, endOut, allowautoseekOut)
+        mock_api.GetSet_LoopTimeRange = MagicMock(return_value=(True, False, 0.0, 10.0, False))
     for attr, val in api_overrides.items():
         setattr(mock_api, attr, val)
     mock_bridge.api = mock_api
@@ -262,7 +262,7 @@ class TestGetTimeSelectionRange:
 
     def test_returns_tuple_of_floats(self):
         mock_bridge, mock_api = _make_bridge(
-            GetSetLoopTimeRange=MagicMock(side_effect=[1.0, 5.0])
+            GetSet_LoopTimeRange=MagicMock(return_value=(True, False, 1.0, 5.0, False))
         )
         manager = RenderManager(mock_bridge)
         start, end = manager.get_time_selection_range()
@@ -271,11 +271,11 @@ class TestGetTimeSelectionRange:
 
     def test_queries_reaper_for_start_and_end(self):
         mock_bridge, mock_api = _make_bridge(
-            GetSetLoopTimeRange=MagicMock(return_value=0.0)
+            GetSet_LoopTimeRange=MagicMock(return_value=(True, False, 3.0, 8.0, False))
         )
         manager = RenderManager(mock_bridge)
         manager.get_time_selection_range()
-        assert mock_api.GetSetLoopTimeRange.call_count >= 2
+        assert mock_api.GetSet_LoopTimeRange.call_count == 1
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1038,7 +1038,7 @@ class TestRenderMixRejection:
             GetSetProjectInfo_String=MagicMock(
                 side_effect=_render_config_side_effect()
             ),
-            GetSetLoopTimeRange=MagicMock(return_value=5.0),
+            GetSet_LoopTimeRange=MagicMock(return_value=(True, False, 5.0, 5.0, False)),
         )
 
         output_dir = tmp_path / "renders"
@@ -1119,7 +1119,7 @@ class TestPreflight:
     def test_preflight_zero_time_selection(self, tmp_path):
         """Returns nothing_to_render when time_selection bounds is zero-length."""
         mock_bridge, mock_api = _make_bridge(
-            GetSetLoopTimeRange=MagicMock(side_effect=[5.0, 5.0]),  # start == end
+            GetSet_LoopTimeRange=MagicMock(return_value=(True, False, 5.0, 5.0, False)),  # start == end
         )
         output_dir = tmp_path / "renders"
         output_dir.mkdir()
@@ -1132,7 +1132,7 @@ class TestPreflight:
     def test_preflight_time_selection_passes_when_valid(self, tmp_path):
         """Passes for time_selection with positive length."""
         mock_bridge, mock_api = _make_bridge(
-            GetSetLoopTimeRange=MagicMock(side_effect=[0.0, 10.0]),
+            GetSet_LoopTimeRange=MagicMock(return_value=(True, False, 0.0, 10.0, False)),
         )
         output_dir = tmp_path / "renders"
         output_dir.mkdir()
@@ -1181,7 +1181,7 @@ class TestPreflight:
         """Multiple failures are all reported."""
         mock_bridge, mock_api = _make_bridge(
             CountTracks=MagicMock(return_value=0),
-            GetSetLoopTimeRange=MagicMock(side_effect=[2.0, 1.0]),  # end < start
+            GetSet_LoopTimeRange=MagicMock(return_value=(True, False, 2.0, 1.0, False)),  # end < start
         )
         output_dir = tmp_path / "renders"
         output_dir.mkdir()

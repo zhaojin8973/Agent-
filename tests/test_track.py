@@ -5,6 +5,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from hermes_core.track import TrackManager, TrackInfo
+from hermes_core.bridge import ReaperBridge
+from tests.conftest import require_reaper, clean_project, make_test_wav
 
 
 def _mock_bridge(**api_overrides):
@@ -246,3 +248,114 @@ class TestDbConversion:
     def test_norm_to_db_handles_zero(self):
         mgr = TrackManager(_mock_bridge())
         assert mgr._norm_to_db(0.0) == -150.0
+
+
+# ══════════════════════════════════════════════════════════════
+# Integration tests (require running REAPER)
+# ══════════════════════════════════════════════════════════════
+
+@pytest.mark.integration
+class TestTrackIntegration:
+    def test_create_and_get_track(self):
+        require_reaper()
+        bridge = ReaperBridge()
+        bridge.connect()
+        clean_project(bridge)
+        mgr = TrackManager(bridge)
+
+        idx = mgr.create(name="IntTest")
+        info = mgr.get(idx)
+        assert info is not None
+        assert info.name == "IntTest"
+        assert info.fx_count >= 0
+
+    def test_set_volume_and_pan(self):
+        require_reaper()
+        bridge = ReaperBridge()
+        bridge.connect()
+        clean_project(bridge)
+        mgr = TrackManager(bridge)
+
+        idx = mgr.create(name="VolTest")
+        mgr.set_volume(idx, -6.0)
+        mgr.set_pan(idx, 0.5)
+        info = mgr.get(idx)
+        assert info is not None
+        assert abs(info.volume_db - (-6.0)) < 1.0
+        assert abs(info.pan - 0.5) < 0.1
+
+    def test_set_mute_and_solo(self):
+        require_reaper()
+        bridge = ReaperBridge()
+        bridge.connect()
+        clean_project(bridge)
+        mgr = TrackManager(bridge)
+
+        idx = mgr.create(name="MuteTest")
+        mgr.set_mute(idx, True)
+        info = mgr.get(idx)
+        assert info is not None
+        assert info.mute is True
+        mgr.set_mute(idx, False)
+        assert mgr.get(idx).mute is False
+
+    def test_import_media(self, tmp_path):
+        require_reaper()
+        bridge = ReaperBridge()
+        bridge.connect()
+        clean_project(bridge)
+        mgr = TrackManager(bridge)
+
+        idx = mgr.create(name="MediaTest")
+        wav = make_test_wav(tmp_path / "test.wav", duration_sec=0.5)
+        ok = mgr.import_media(idx, str(wav))
+        assert ok is True
+        info = mgr.get(idx)
+        assert info is not None
+        assert info.item_count >= 1
+
+    def test_list_all_tracks(self):
+        require_reaper()
+        bridge = ReaperBridge()
+        bridge.connect()
+        clean_project(bridge)
+        mgr = TrackManager(bridge)
+
+        mgr.create(name="A")
+        mgr.create(name="B")
+        tracks = mgr.list_all()
+        assert len(tracks) == 2
+
+    def test_count_tracks(self):
+        require_reaper()
+        bridge = ReaperBridge()
+        bridge.connect()
+        clean_project(bridge)
+        mgr = TrackManager(bridge)
+
+        assert mgr.count() == 0
+        mgr.create()
+        assert mgr.count() == 1
+
+    def test_delete_track(self):
+        require_reaper()
+        bridge = ReaperBridge()
+        bridge.connect()
+        clean_project(bridge)
+        mgr = TrackManager(bridge)
+
+        idx = mgr.create(name="DelMe")
+        assert mgr.count() == 1
+        mgr.delete(idx)
+        assert mgr.count() == 0
+
+    def test_import_nonexistent_file(self, tmp_path):
+        require_reaper()
+        bridge = ReaperBridge()
+        bridge.connect()
+        clean_project(bridge)
+        mgr = TrackManager(bridge)
+
+        idx = mgr.create()
+        ok = mgr.import_media(idx, str(tmp_path / "nonexistent.wav"))
+        assert ok is False

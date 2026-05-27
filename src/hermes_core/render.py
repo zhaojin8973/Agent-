@@ -161,13 +161,12 @@ class RenderManager:
         if end < start:
             return
         api = self._bridge.api
-        api.GetSetLoopTimeRange(True, False, start, end, False)
+        api.GetSet_LoopTimeRange(True, False, start, end, False)
 
     def get_time_selection_range(self) -> tuple[float, float]:
         """Return (start, end) of the current time selection in seconds."""
         api = self._bridge.api
-        start = api.GetSetLoopTimeRange(False, False, 0, 0, False)
-        end = api.GetSetLoopTimeRange(False, True, 0, 0, False)
+        _, _, start, end, _ = api.GetSet_LoopTimeRange(False, False, 0, 0, False)
         return (start, end)
 
     def get_render_settings(self) -> dict:
