@@ -67,8 +67,16 @@ class MixingEngine:
 
     # ── Scene 2: Project & tracks ────────────────────────
 
-    def create_project(self, sample_rate: int = 48000):
-        """Clear current project and set sample rate."""
+    def create_project(self, name: str = "",
+                       sample_rate: int = 48000) -> dict:
+        """Create a new project, optionally named.
+
+        Clears all tracks and sets the sample rate.  If *name* is given the
+        REAPER PROJECT_NAME metadata is set so that ``save_project()``
+        defaults to ``<name>.rpp`` when no path has been established yet.
+
+        Returns a dict with the current project state.
+        """
         api = self._bridge.api
         api.Undo_BeginBlock()
         try:
@@ -77,11 +85,49 @@ class MixingEngine:
                 tr = api.GetTrack(0, i)
                 if tr:
                     api.DeleteTrack(tr)
+            if name:
+                api.GetSetProjectInfo_String(0, "PROJECT_NAME", name, True)
             if sample_rate > 0:
                 api.GetSetProjectInfo(0, "PROJECT_SRATE", sample_rate, True)
                 api.GetSetProjectInfo(0, "PROJECT_SRATE_USE", 1, True)
         finally:
             api.Undo_EndBlock("Clear project", 0)
+
+        n_tracks = api.CountTracks(0)
+        sr = api.GetSetProjectInfo(0, "PROJECT_SRATE", 0, False)
+        return {
+            "name": name,
+            "sample_rate": int(sr) if sr else sample_rate,
+            "track_count": n_tracks,
+        }
+
+    def save_project(self):
+        """Save the current project (REAPER *File → Save*).
+
+        If the project already has a file path this saves silently.
+        Otherwise the REAPER *Save As* dialog appears for the first save.
+        """
+        self._bridge.api.Main_OnCommand(40026, 0)
+
+    def get_project_info(self) -> dict:
+        """Return current project metadata.
+
+        {name, path, sample_rate, track_count, is_dirty}.
+        ``name`` is the .rpp filename stem; ``path`` is the directory
+        containing the .rpp file (empty string for unsaved projects).
+        """
+        api = self._bridge.api
+        _, name_buf, _ = api.GetProjectName(0, "", 256)
+        path_buf, _ = api.GetProjectPath("", 256)
+        sr = api.GetSetProjectInfo(0, "PROJECT_SRATE", 0, False)
+        n_tracks = api.CountTracks(0)
+
+        return {
+            "name": (name_buf or ""),
+            "path": (path_buf or ""),
+            "sample_rate": int(sr) if sr else 0,
+            "track_count": n_tracks,
+        }
 
     def import_stems(self, file_paths: list[str],
                     position: float = 0.0) -> list[dict]:

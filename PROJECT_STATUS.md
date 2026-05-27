@@ -92,7 +92,7 @@ hermes-core 是 REAPER DAW 的精益三层 Python 自动化引擎，目标是非
 
 ### L3: engine.py
 - [x] 场景 1: 连接与健康检查
-- [x] 场景 2: 创建项目 + 导入 stems
+- [x] 场景 2: 创建项目（命名/采样率/返回状态）+ 导入 stems + **保存工程 (Ctrl+S)** + **获取工程信息**
 - [x] 场景 3: 增益分级（track_fader）
 - [x] 场景 4: FX 添加与查询
 - [x] 场景 5: 总线创建 + 混响发送
@@ -120,17 +120,17 @@ hermes-core 是 REAPER DAW 的精益三层 Python 自动化引擎，目标是非
 |---|---|---|
 | test_bridge.py | 33 | 76% |
 | test_bus.py | 16 | 87% |
-| test_engine.py | 37 | 99% |
+| test_engine.py | 42 | 94% |
 | test_fx.py | 46 | 81% |
 | test_normalize.py | 20 | 98% |
 | test_render.py | 53 | 100% |
 | test_send.py | 22 | 88% |
 | test_signal.py | 21 | 93% |
 | test_track.py | 34 | 84% |
-| **总计** | **282** | **89%** |
+| **总计** | **292** | **89%** |
 
-- 单元测试: 251 个（mock REAPER）
-- 集成测试: 31 个（需要 REAPER 运行）
+- 单元测试: 256 个（mock REAPER）
+- 集成测试: 36 个（需要 REAPER 运行）
 - 0 个测试 skip
 
 ---
