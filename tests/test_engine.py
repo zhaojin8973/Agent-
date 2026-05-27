@@ -46,6 +46,13 @@ class TestContextManager:
         eng = MixingEngine()
         eng.__exit__(None, None, None)
 
+    def test_exit_with_watchdog_stops_killer(self):
+        eng = MixingEngine(watchdog=True)
+        eng._bridge._dialog_killer = MagicMock()
+        eng._bridge._dialog_killer.is_running = True
+        eng.__exit__(None, None, None)
+        eng._bridge._dialog_killer.stop.assert_called_once()
+
 
 @pytest.mark.unit
 class TestHealthCheck:

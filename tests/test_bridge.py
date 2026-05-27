@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
 
-from hermes_core.bridge import DialogEvent, DialogKiller, ReaperBridge
+from hermes_core.bridge import DialogEvent, DialogKiller, ReaperBridge, _extract_reaper_string
 
 
 # ══════════════════════════════════════════════════════════════
@@ -426,3 +426,34 @@ class TestDialogKillerEvents:
         assert killer._classify("custom only dialog") == "safe"
         assert killer._classify("Nothing to render") == "unknown"  # old safe gone
         assert killer._classify("Plugin missing") == "diagnosis"   # diag unchanged
+
+
+# ══════════════════════════════════════════════════════════════
+# Unit: _extract_reaper_string
+# ══════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestExtractReaperString:
+    def test_returns_str_directly(self):
+        assert _extract_reaper_string("hello") == "hello"
+
+    def test_decodes_bytes(self):
+        assert _extract_reaper_string(b"world") == "world"
+
+    def test_skips_parenthetical_reaper_strings(self):
+        """REAPER returns strings like '(0)' as placeholders — skip them."""
+        assert _extract_reaper_string(("(0)", "", "VST: ReaEQ")) == "VST: ReaEQ"
+
+    def test_returns_last_valid_str_from_tuple(self):
+        """reversed iteration: returns last non-parenthetical str from tuple."""
+        # reversed(("(0)", "first", "last")) → "last" matches first
+        assert _extract_reaper_string(("(0)", "first", "last")) == "last"
+
+    def test_returns_empty_when_only_parenthetical(self):
+        assert _extract_reaper_string(("(0)", "(1)", "")) == ""
+
+    def test_decodes_bytes_in_tuple(self):
+        assert _extract_reaper_string(("(0)", b"\x00", b"FX Name")) == "FX Name"
+
+    def test_returns_empty_for_unrecognized(self):
+        assert _extract_reaper_string(42) == ""

@@ -76,6 +76,16 @@ def _gen_24bit_stereo_wav(filepath, samples, sample_rate=48000):
         wf.writeframes(packed)
 
 
+def _gen_32bit_float_wav(filepath, samples, sample_rate=48000):
+    """Write a 32-bit float stereo WAV from float64 samples in [-1, 1]."""
+    f32 = samples.astype(np.float32)
+    with wave.open(str(filepath), "wb") as wf:
+        wf.setnchannels(2)
+        wf.setsampwidth(4)  # 32-bit float = 4 bytes
+        wf.setframerate(sample_rate)
+        wf.writeframes(f32.tobytes())
+
+
 # ══════════════════════════════════════════════════════════════
 # Tests: _read_pcm
 # ══════════════════════════════════════════════════════════════
@@ -194,6 +204,39 @@ class TestReadPcm:
         assert np.all(pcm[0:50] < 0), "negative samples corrupted"
         assert np.all(pcm[100:150] > 0), "positive samples corrupted"
         assert np.allclose(pcm, mono, atol=1.0 / 8388607.0 * 2)
+
+    def test_read_pcm_32bit_float(self, tmp_path):
+        """_read_pcm correctly decodes a 32-bit float stereo WAV to mono float64."""
+        sr = 44100
+        duration = 0.1
+        mono_sine = _sine(440.0, duration, sr, amplitude=0.7)
+        stereo = _make_stereo(mono_sine)
+        wav_path = tmp_path / "test_32bit_float.wav"
+        _gen_32bit_float_wav(wav_path, stereo, sample_rate=sr)
+
+        pcm, out_sr = SignalAnalyzer._read_pcm(str(wav_path))
+
+        assert out_sr == sr
+        assert pcm.ndim == 1
+        assert len(pcm) == len(mono_sine)
+        assert pcm.dtype == np.float64
+        # 32-bit float preserves amplitude with near-lossless precision
+        assert np.allclose(pcm, mono_sine, atol=1e-6)
+
+    def test_read_pcm_32bit_float_silence(self, tmp_path):
+        """_read_pcm handles 32-bit float WAV containing near-silence."""
+        sr = 48000
+        n = 100
+        mono = np.full(n, 1e-10, dtype=np.float64)
+        stereo = _make_stereo(mono)
+        wav_path = tmp_path / "test_32bit_silence.wav"
+        _gen_32bit_float_wav(wav_path, stereo, sample_rate=sr)
+
+        pcm, out_sr = SignalAnalyzer._read_pcm(str(wav_path))
+
+        assert out_sr == sr
+        assert len(pcm) == n
+        assert np.allclose(pcm, mono, atol=1e-8)
 
 
 # ══════════════════════════════════════════════════════════════
