@@ -5,6 +5,7 @@ a single entry point for Hermes acceptance scenarios.
 
 import logging
 import os
+from datetime import datetime
 
 from hermes_core.bridge import ReaperBridge
 from hermes_core.track import TrackManager, TrackInfo
@@ -36,6 +37,7 @@ class MixingEngine:
         self._render = RenderManager(self._bridge)
         self._normalizer = Normalizer(self._bridge)
         self._watchdog_enabled = watchdog
+        self._project_path: str | None = None
 
     # ── Context manager ──────────────────────────────────
 
@@ -67,16 +69,29 @@ class MixingEngine:
 
     # ── Scene 2: Project & tracks ────────────────────────
 
-    def create_project(self, name: str = "",
-                       sample_rate: int = 48000) -> dict:
-        """Create a new project, optionally named.
+    def _safe_project_path(self, output_dir: str, name: str) -> tuple[str, bool]:
+        """Return (path, conflict_renamed) for ``{output_dir}/{name}.rpp``.
 
-        Clears all tracks and sets the sample rate.  If *name* is given the
-        REAPER PROJECT_NAME metadata is set so that ``save_project()``
-        defaults to ``<name>.rpp`` when no path has been established yet.
-
-        Returns a dict with the current project state.
+        If the target already exists a timestamp suffix is appended to avoid
+        overwriting a previous project.
         """
+        os.makedirs(output_dir, exist_ok=True)
+        target = os.path.join(output_dir, f"{name}.rpp")
+        if not os.path.exists(target):
+            return target, False
+        ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        alt = os.path.join(output_dir, f"{name}_{ts}.rpp")
+        log.info("Project file exists — renamed to %s", alt)
+        return alt, True
+
+    def create_project(self, name: str, output_dir: str,
+                       sample_rate: int = 48000) -> dict:
+        """Create a named project and save it to *output_dir* without dialogs.
+
+        Returns ``{name, path, sample_rate, track_count, conflict_renamed}``.
+        """
+        safe_path, conflict_renamed = self._safe_project_path(output_dir, name)
+
         api = self._bridge.api
         api.Undo_BeginBlock()
         try:
@@ -85,36 +100,59 @@ class MixingEngine:
                 tr = api.GetTrack(0, i)
                 if tr:
                     api.DeleteTrack(tr)
-            if name:
-                api.GetSetProjectInfo_String(0, "PROJECT_NAME", name, True)
+            api.GetSetProjectInfo_String(0, "PROJECT_NAME", name, True)
             if sample_rate > 0:
                 api.GetSetProjectInfo(0, "PROJECT_SRATE", sample_rate, True)
                 api.GetSetProjectInfo(0, "PROJECT_SRATE_USE", 1, True)
         finally:
             api.Undo_EndBlock("Clear project", 0)
 
-        n_tracks = api.CountTracks(0)
-        sr = api.GetSetProjectInfo(0, "PROJECT_SRATE", 0, False)
+        api.Main_SaveProjectEx(0, safe_path, 0)
+        self._project_path = safe_path
+
         return {
             "name": name,
-            "sample_rate": int(sr) if sr else sample_rate,
-            "track_count": n_tracks,
+            "path": safe_path,
+            "sample_rate": sample_rate,
+            "track_count": 0,
+            "conflict_renamed": conflict_renamed,
         }
 
-    def save_project(self):
-        """Save the current project (REAPER *File → Save*).
+    def save_project(self) -> dict:
+        """Silently save to the current project path via ``Main_SaveProjectEx``.
 
-        If the project already has a file path this saves silently.
-        Otherwise the REAPER *Save As* dialog appears for the first save.
+        Raises ``RuntimeError`` when no project path has been established
+        (i.e. ``create_project`` was never called).
         """
-        self._bridge.api.Main_OnCommand(40026, 0)
+        if not self._project_path:
+            raise RuntimeError(
+                "No project path — call create_project(name, output_dir) first"
+            )
+        self._bridge.api.Main_SaveProjectEx(0, self._project_path, 0)
+        return {"path": self._project_path, "saved_at": datetime.now().isoformat()}
+
+    def save_checkpoint(self, label: str = "") -> dict:
+        """Save a timestamped copy without touching the main project file.
+
+        Use before risky operations (adding FX, destructive edits) so you
+        can always return to a known-good state.
+        """
+        if not self._project_path:
+            raise RuntimeError(
+                "No project path — call create_project(name, output_dir) first"
+            )
+        base = os.path.splitext(self._project_path)[0]
+        ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        suffix = f"_{label}_{ts}" if label else f"_{ts}"
+        checkpoint_path = f"{base}_checkpoint{suffix}.rpp"
+
+        self._bridge.api.Main_SaveProjectEx(0, checkpoint_path, 0)
+        return {"checkpoint_path": checkpoint_path, "main_path": self._project_path}
 
     def get_project_info(self) -> dict:
         """Return current project metadata.
 
-        {name, path, sample_rate, track_count, is_dirty}.
-        ``name`` is the .rpp filename stem; ``path`` is the directory
-        containing the .rpp file (empty string for unsaved projects).
+        ``{name, path, sample_rate, track_count}``.
         """
         api = self._bridge.api
         _, name_buf, _ = api.GetProjectName(0, "", 256)

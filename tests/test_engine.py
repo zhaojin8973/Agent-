@@ -77,12 +77,15 @@ class TestCreateProject:
         eng._bridge.api.Undo_BeginBlock = MagicMock()
         eng._bridge.api.Undo_EndBlock = MagicMock()
         eng._bridge.api.GetSetProjectInfo = MagicMock()
+        eng._bridge.api.GetSetProjectInfo_String = MagicMock()
+        eng._bridge.api.Main_SaveProjectEx = MagicMock()
 
-        eng.create_project(sample_rate=48000)
+        eng.create_project(name="Test", output_dir="/tmp/test", sample_rate=48000)
 
         assert eng._bridge.api.DeleteTrack.call_count == 5
         eng._bridge.api.Undo_BeginBlock.assert_called_once()
         eng._bridge.api.GetSetProjectInfo.assert_called()
+        eng._bridge.api.Main_SaveProjectEx.assert_called_once()
 
     def test_skips_null_tracks(self):
         eng = MixingEngine()
@@ -94,14 +97,16 @@ class TestCreateProject:
         eng._bridge.api.Undo_BeginBlock = MagicMock()
         eng._bridge.api.Undo_EndBlock = MagicMock()
         eng._bridge.api.GetSetProjectInfo = MagicMock()
+        eng._bridge.api.GetSetProjectInfo_String = MagicMock()
+        eng._bridge.api.Main_SaveProjectEx = MagicMock()
 
-        eng.create_project(sample_rate=48000)
+        eng.create_project(name="Test", output_dir="/tmp/test", sample_rate=48000)
         assert eng._bridge.api.DeleteTrack.call_count == 2
 
 
 @pytest.mark.unit
 class TestProjectManagement:
-    """Tests for create_project (named), save_project, and get_project_info."""
+    """Tests for create_project, save_project, save_checkpoint, get_project_info."""
 
     def test_create_project_with_name(self):
         eng = MixingEngine()
@@ -112,17 +117,22 @@ class TestProjectManagement:
         eng._bridge.api.Undo_EndBlock = MagicMock()
         eng._bridge.api.GetSetProjectInfo = MagicMock(return_value=44100)
         eng._bridge.api.GetSetProjectInfo_String = MagicMock()
+        eng._bridge.api.Main_SaveProjectEx = MagicMock()
 
-        result = eng.create_project(name="MyMix", sample_rate=44100)
+        result = eng.create_project(
+            name="MyMix", output_dir="/tmp/mix", sample_rate=44100
+        )
 
         eng._bridge.api.GetSetProjectInfo_String.assert_called_once_with(
             0, "PROJECT_NAME", "MyMix", True
         )
         assert result["name"] == "MyMix"
         assert result["sample_rate"] == 44100
-        assert result["track_count"] == 3
+        assert result["track_count"] == 0
+        assert result["conflict_renamed"] is False
+        eng._bridge.api.Main_SaveProjectEx.assert_called_once()
 
-    def test_create_project_defaults(self):
+    def test_create_project_conflict_renamed(self):
         eng = MixingEngine()
         eng._bridge.api.CountTracks = MagicMock(return_value=0)
         eng._bridge.api.GetTrack = MagicMock()
@@ -131,20 +141,60 @@ class TestProjectManagement:
         eng._bridge.api.Undo_EndBlock = MagicMock()
         eng._bridge.api.GetSetProjectInfo = MagicMock(return_value=48000)
         eng._bridge.api.GetSetProjectInfo_String = MagicMock()
+        eng._bridge.api.Main_SaveProjectEx = MagicMock()
 
-        result = eng.create_project()
+        with patch("os.path.exists", return_value=True), patch("os.makedirs"):
+            result = eng.create_project(
+                name="Existing", output_dir="/tmp/mix"
+            )
 
-        assert result["name"] == ""
-        assert result["sample_rate"] == 48000
-        assert result["track_count"] == 0
+        assert result["conflict_renamed"] is True
 
-    def test_save_project_calls_main_oncommand(self):
+    def test_save_project_raises_without_project(self):
         eng = MixingEngine()
-        eng._bridge.api.Main_OnCommand = MagicMock()
+        with pytest.raises(RuntimeError, match="No project path"):
+            eng.save_project()
 
-        eng.save_project()
+    def test_save_project_silent(self):
+        eng = MixingEngine()
+        eng._bridge.api.Main_SaveProjectEx = MagicMock()
+        eng._project_path = "/tmp/mix/Test.rpp"
 
-        eng._bridge.api.Main_OnCommand.assert_called_once_with(40026, 0)
+        result = eng.save_project()
+
+        eng._bridge.api.Main_SaveProjectEx.assert_called_once_with(
+            0, "/tmp/mix/Test.rpp", 0
+        )
+        assert result["path"] == "/tmp/mix/Test.rpp"
+        assert "saved_at" in result
+
+    def test_save_checkpoint_creates_copy(self):
+        eng = MixingEngine()
+        eng._bridge.api.Main_SaveProjectEx = MagicMock()
+        eng._project_path = "/tmp/mix/Test.rpp"
+
+        result = eng.save_checkpoint(label="FX完成")
+
+        assert "checkpoint" in result["checkpoint_path"]
+        assert result["main_path"] == "/tmp/mix/Test.rpp"
+        # Main file path should NOT change after checkpoint
+        eng._bridge.api.Main_SaveProjectEx.assert_called_once()
+        assert eng._bridge.api.Main_SaveProjectEx.call_args[0][0] == 0
+        assert "FX完成" in eng._bridge.api.Main_SaveProjectEx.call_args[0][1]
+
+    def test_save_checkpoint_without_label(self):
+        eng = MixingEngine()
+        eng._bridge.api.Main_SaveProjectEx = MagicMock()
+        eng._project_path = "/tmp/mix/Test.rpp"
+
+        result = eng.save_checkpoint()
+
+        assert "checkpoint" in result["checkpoint_path"]
+
+    def test_save_checkpoint_raises_without_project(self):
+        eng = MixingEngine()
+        with pytest.raises(RuntimeError, match="No project path"):
+            eng.save_checkpoint()
 
     def test_get_project_info(self):
         eng = MixingEngine()
@@ -517,7 +567,7 @@ class TestFullPipeline:
                 duration_sec=1.0, sample_rate=48000,
             ),
         ):
-            eng.create_project()
+            eng.create_project(name="TestProj", output_dir="/tmp/pj")
             imported = eng.import_stems(["/tmp/kick.wav", "/tmp/snare.wav"])
             assert len(imported) == 2
 
@@ -539,7 +589,7 @@ class TestProjectManagementIntegration:
         eng = MixingEngine()
         eng._bridge.connect()
 
-        eng.create_project(name="HermesTest", sample_rate=44100)
+        eng.create_project(name="HermesTest", output_dir="/tmp/hermes_test", sample_rate=44100)
         info = eng.get_project_info()
 
         assert info["track_count"] == 0
@@ -550,7 +600,7 @@ class TestProjectManagementIntegration:
         eng = MixingEngine()
         eng._bridge.connect()
 
-        result = eng.create_project(name="ReturnTest", sample_rate=48000)
+        result = eng.create_project(name="ReturnTest", output_dir="/tmp/pj", sample_rate=48000)
 
         assert result["name"] == "ReturnTest"
         assert result["sample_rate"] == 48000
@@ -561,7 +611,7 @@ class TestProjectManagementIntegration:
         eng = MixingEngine()
         eng._bridge.connect()
 
-        eng.create_project(name="ImportInfo", sample_rate=48000)
+        eng.create_project(name="ImportInfo", output_dir="/tmp/pj", sample_rate=48000)
         wav = make_test_wav(tmp_path / "test.wav")
         eng.import_stems([str(wav)])
 
@@ -574,7 +624,7 @@ class TestProjectManagementIntegration:
         eng = MixingEngine()
         eng._bridge.connect()
 
-        eng.create_project(name="SaveTest")
+        eng.create_project(name="SaveTest", output_dir="/tmp/hermes_test")
         # First save may open dialog - just verify no exception
         try:
             eng.save_project()
@@ -585,7 +635,7 @@ class TestProjectManagementIntegration:
         eng = MixingEngine()
         eng._bridge.connect()
 
-        eng.create_project(sample_rate=48000)
+        eng.create_project(name='TestProj', output_dir="/tmp/pj", sample_rate=48000)
 
         wav1 = make_test_wav(tmp_path / "kick.wav", duration_sec=1.0, frequency=80.0)
         wav2 = make_test_wav(tmp_path / "snare.wav", duration_sec=1.0, frequency=200.0)
@@ -611,7 +661,7 @@ class TestProjectManagementIntegration:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
-        eng.create_project()
+        eng.create_project(name="TestProj", output_dir="/tmp/pj")
 
         eng.import_stems([])
         health = eng.health_check()
@@ -624,7 +674,7 @@ class TestProjectManagementIntegration:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
-        eng.create_project()
+        eng.create_project(name="TestProj", output_dir="/tmp/pj")
 
         result = eng.render_mix(str(tmp_path), verify=False)
         assert result.get("output_path") is None
