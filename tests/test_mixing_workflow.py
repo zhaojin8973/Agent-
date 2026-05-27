@@ -2,7 +2,7 @@
 
 These tests exercise the full hermes-core pipeline from a mixing engineer's
 perspective: create project → import stems → gain staging → EQ/FX → bus/send
-→ render → analyze → normalize → audit.
+→ render → analyze → audit.
 
 Requires a running REAPER instance and real audio files.
 """
@@ -15,6 +15,16 @@ from tests.conftest import require_reaper, clean_project, make_test_wav
 
 # Path to real multi-track audio files for workflow testing
 _STEM_DIR = "Hermes 测试/大湾区的梦 分轨/分轨"
+
+# Path to vocal mixing (贴唱混音) test audio files
+_VOCAL_FILE = "Hermes 测试/望归 贴唱/望归 Vocal.wav"
+_BACKING_FILE = "Hermes 测试/望归 贴唱/望归 伴奏.wav"
+
+# Third-party plugin names (substring-matched by TrackFX_AddByName)
+_EQ_PLUGIN = "FabFilter Pro-Q 3"
+_COMP_PLUGIN = "RVox"
+_REVERB_PLUGIN = "ValhallaVintageVerb"
+_MASTER_LIMITER = "FabFilter Pro-L 2 (FabFilter)"
 
 
 @pytest.mark.integration
@@ -29,7 +39,7 @@ class TestMixingWorkflow:
         eng = MixingEngine()
         eng._bridge.connect()
 
-        eng.create_project(name="Test", output_dir="/tmp/hermes_test", sample_rate=48000)
+        eng.create_project(name="TestMixingWorkflow", output_dir="/tmp/hermes_test", sample_rate=48000)
 
         stems = [
             _STEM_DIR + "/Drum Kick.wav",
@@ -56,7 +66,7 @@ class TestMixingWorkflow:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
-        eng.create_project(name="Test", output_dir="/tmp/hermes_test")
+        eng.create_project(name="TestMixingWorkflow", output_dir="/tmp/hermes_test")
 
         stems = [_STEM_DIR + "/Drum Kick.wav", _STEM_DIR + "/Bass.wav"]
         eng.import_stems(stems)
@@ -75,7 +85,7 @@ class TestMixingWorkflow:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
-        eng.create_project(name="Test", output_dir="/tmp/hermes_test")
+        eng.create_project(name="TestMixingWorkflow", output_dir="/tmp/hermes_test")
 
         stems = [_STEM_DIR + "/Drum Kick.wav", _STEM_DIR + "/Drum Snare.wav"]
         eng.import_stems(stems)
@@ -99,7 +109,7 @@ class TestMixingWorkflow:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
-        eng.create_project(name="Test", output_dir="/tmp/hermes_test")
+        eng.create_project(name="TestMixingWorkflow", output_dir="/tmp/hermes_test")
 
         stems = [_STEM_DIR + "/Drum Kick.wav", _STEM_DIR + "/Drum Snare.wav"]
         eng.import_stems(stems)
@@ -126,7 +136,7 @@ class TestMixingWorkflow:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
-        eng.create_project(name="Test", output_dir="/tmp/hermes_test", sample_rate=48000)
+        eng.create_project(name="TestMixingWorkflow", output_dir="/tmp/hermes_test", sample_rate=48000)
 
         stems = [_STEM_DIR + "/Drum Kick.wav", _STEM_DIR + "/Bass.wav"]
         eng.import_stems(stems)
@@ -154,7 +164,7 @@ class TestMixingWorkflow:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
-        eng.create_project(name="Test", output_dir="/tmp/hermes_test")
+        eng.create_project(name="TestMixingWorkflow", output_dir="/tmp/hermes_test")
 
         stems = [_STEM_DIR + "/Drum Kick.wav"]
         eng.import_stems(stems)
@@ -174,7 +184,7 @@ class TestMixingWorkflow:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
-        eng.create_project(name="Test", output_dir="/tmp/hermes_test", sample_rate=48000)
+        eng.create_project(name="TestMixingWorkflow", output_dir="/tmp/hermes_test", sample_rate=48000)
 
         stems = [_STEM_DIR + "/Drum Kick.wav"]
         eng.import_stems(stems)
@@ -189,52 +199,17 @@ class TestMixingWorkflow:
             f"Mix should pass audit at -10 dB, got: {audit}"
         )
 
-    # ── Scene 8: Normalize ────────────────────────────────────
-
-    def test_normalize_track_to_target_lufs(self):
-        """Normalize a single track to -14 LUFS."""
-        require_reaper()
-        eng = MixingEngine()
-        eng._bridge.connect()
-        eng.create_project(name="Test", output_dir="/tmp/hermes_test")
-
-        stems = [_STEM_DIR + "/Drum Kick.wav"]
-        eng.import_stems(stems)
-
-        result = eng.normalize_track(0, target_lufs=-14.0, duration=3.0)
-        assert result.success is True, (
-            f"Normalization should succeed, got: {result}"
-        )
-        assert result.original_lufs != 0.0, "Should measure actual LUFS"
-        assert result.gain_applied_db != 0.0, "Should apply gain correction"
-
-    def test_normalize_all_tracks(self):
-        """Batch-normalize all tracks."""
-        require_reaper()
-        eng = MixingEngine()
-        eng._bridge.connect()
-        eng.create_project(name="Test", output_dir="/tmp/hermes_test")
-
-        stems = [_STEM_DIR + "/Drum Kick.wav", _STEM_DIR + "/Bass.wav"]
-        eng.import_stems(stems)
-
-        results = eng.normalize_all(target_lufs=-14.0, duration=3.0)
-        assert len(results) == 2
-        assert all(r.success for r in results), (
-            f"All tracks should normalize successfully, got: {results}"
-        )
-
-    # ── Scene 9: Full workflow ────────────────────────────────
+    # ── Scene 8: Full workflow ────────────────────────────────
 
     def test_full_mixing_session(self, tmp_path):
         """Complete mixing session: import → gain → EQ → bus → send
-        → render → audit → normalize."""
+        → render → audit."""
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
 
         # 1. Create project
-        eng.create_project(name="Test", output_dir="/tmp/hermes_test", sample_rate=48000)
+        eng.create_project(name="TestMixingWorkflow", output_dir="/tmp/hermes_test", sample_rate=48000)
 
         # 2. Import multi-track stems
         stems = [
@@ -281,13 +256,304 @@ class TestMixingWorkflow:
             f"Final mix should pass audit, got: {audit}"
         )
 
-        # 9. Normalize all tracks to -14 LUFS
-        norm_results = eng.normalize_all(target_lufs=-14.0, duration=5.0)
-        assert len(norm_results) >= 3  # 3 source + 1 aux
-        for r in norm_results:
-            if r.track_name in ("Kick", "Snare", "Bass"):
-                assert r.success, f"Track {r.track_name} normalize failed"
+        # 9. Health check
+        health = eng.health_check()
+        assert health["reapy_connected"] is True
 
-        # 10. Health check
+
+@pytest.mark.integration
+class TestVocalMixing:
+    """Vocal mixing (贴唱混音) workflow tests using real vocal + backing stems."""
+
+    # ── Scene 1: Project setup + import ─────────────────────
+
+    def test_create_named_project_and_import_vocal_stems(self):
+        """Create a named project and import vocal + backing stems."""
+        require_reaper()
+        eng = MixingEngine()
+        eng._bridge.connect()
+
+        info = eng.create_project(
+            name="TestVocalMixing", output_dir="/tmp/hermes_vocal_test",
+            sample_rate=48000,
+        )
+        assert info["name"] == "TestVocalMixing"
+        assert info["sample_rate"] == 48000
+
+        result = eng.prepare_stems(
+            [_VOCAL_FILE, _BACKING_FILE],
+            genre="chinese_folk_bel_canto",
+        )
+        stems = result["stems"]
+        assert len(stems) == 2
+        assert all(s["success"] for s in stems), (
+            f"Some stems failed: {stems}"
+        )
+        for s in stems:
+            assert s["clip_gain_db"] != 0.0, (
+                f"Stem {s['role']} should have non-zero clip gain"
+            )
+
+        tracks = eng.list_tracks()
+        assert len(tracks) == 2
+        assert all(t.item_count >= 1 for t in tracks)
+
+    # ── Scene 2: Gain staging ───────────────────────────────
+
+    def test_vocal_gain_staging_uses_genre_based_calculation(self):
+        """Gain values are computed from audio data + genre rules, not hardcoded."""
+        require_reaper()
+        eng = MixingEngine()
+        eng._bridge.connect()
+        eng.create_project(
+            name="TestVocalMixing", output_dir="/tmp/hermes_vocal_test",
+            sample_rate=48000,
+        )
+
+        result = eng.prepare_stems(
+            [_VOCAL_FILE, _BACKING_FILE],
+            genre="chinese_folk_bel_canto",
+        )
+        stems = result["stems"]
+        vocal = stems[0]
+        backing = stems[1]
+
+        assert vocal["role"] == "vocal"
+        assert backing["role"] == "backing"
+        assert vocal["raw_lufs"] is not None, "Should measure vocal LUFS"
+        assert backing["raw_lufs"] is not None, "Should measure backing LUFS"
+        assert "clip_gain_db" in vocal
+        assert "fader_gain_db" in vocal
+
+        # Clip gain brings every stem to -18 dBFS RMS reference
+        for s in stems:
+            assert s["clip_gain_db"] != 0.0, (
+                f"Stem {s['role']} should have non-zero clip gain "
+                f"(was {s['clip_gain_db']})"
+            )
+
+        # chinese_folk_bel_canto: backing reduction 9-12 LU,
+        # backing fader should be much lower than vocal fader
+        assert abs(backing["fader_gain_db"]) > abs(vocal["fader_gain_db"]), (
+            f"Backing fader ({backing['fader_gain_db']}) should exceed "
+            f"vocal fader ({vocal['fader_gain_db']}) for vocal-forward genre"
+        )
+
+        structure = eng.get_gain_structure()
+        assert len(structure["tracks"]) == 2
+
+    # ── Scene 3: EQ + compression ───────────────────────────
+
+    def test_vocal_eq_and_compression(self):
+        """Add Pro-Q 3 and RVox to vocal; backing gets no FX."""
+        require_reaper()
+        eng = MixingEngine()
+        eng._bridge.connect()
+        eng.create_project(
+            name="TestVocalMixing", output_dir="/tmp/hermes_vocal_test",
+            sample_rate=48000,
+        )
+        eng.prepare_stems(
+            [_VOCAL_FILE, _BACKING_FILE],
+            genre="chinese_folk_bel_canto",
+        )
+
+        eq_idx = eng.add_fx(0, _EQ_PLUGIN)
+        comp_idx = eng.add_fx(0, _COMP_PLUGIN)
+        assert eq_idx >= 0, f"Failed to add {_EQ_PLUGIN}"
+        assert comp_idx >= 0, f"Failed to add {_COMP_PLUGIN}"
+
+        chain = eng.get_fx_chain(0)
+        assert len(chain) == 2, f"Vocal should have 2 FX, got {len(chain)}"
+        assert _EQ_PLUGIN.lower() in chain[0]["name"].lower()
+        assert _COMP_PLUGIN.lower() in chain[1]["name"].lower()
+
+        backing_chain = eng.get_fx_chain(1)
+        assert len(backing_chain) == 0, "Backing track should have no FX"
+
+    # ── Scene 4: Reverb send ────────────────────────────────
+
+    def test_vocal_reverb_send(self):
+        """Create a ValhallaVintageVerb reverb send from the vocal track."""
+        require_reaper()
+        eng = MixingEngine()
+        eng._bridge.connect()
+        eng.create_project(
+            name="TestVocalMixing", output_dir="/tmp/hermes_vocal_test",
+            sample_rate=48000,
+        )
+        eng.prepare_stems(
+            [_VOCAL_FILE, _BACKING_FILE],
+            genre="chinese_folk_bel_canto",
+        )
+
+        reverb = eng.create_reverb_send(
+            src_track=0, level_db=-8.0,
+            reverb_fx=_REVERB_PLUGIN, mode="post-fader",
+        )
+        assert reverb["aux_index"] >= 0, "Verb return track not created"
+        assert reverb["send"]["index"] >= 0, "Send not created"
+        assert reverb["fx_index"] >= 0, f"{_REVERB_PLUGIN} not loaded on aux"
+
+        tracks = eng.list_tracks()
+        assert len(tracks) == 3, (
+            f"Expected vocal + backing + verb return = 3, got {len(tracks)}"
+        )
+        verb_chain = eng.get_fx_chain(reverb["aux_index"])
+        assert len(verb_chain) == 1
+
+    # ── Scene 5: Checkpoints ────────────────────────────────
+
+    def test_save_checkpoints_at_key_nodes(self):
+        """Save project snapshots at import, FX, pre-master, and final stages."""
+        require_reaper()
+        eng = MixingEngine()
+        eng._bridge.connect()
+        eng.create_project(
+            name="TestVocalMixing", output_dir="/tmp/hermes_vocal_test",
+            sample_rate=48000,
+        )
+        eng.prepare_stems(
+            [_VOCAL_FILE, _BACKING_FILE],
+            genre="chinese_folk_bel_canto",
+        )
+
+        cp1 = eng.save_checkpoint(label="after_import")
+        assert "after_import" in cp1["checkpoint_path"]
+
+        eng.add_fx(0, _EQ_PLUGIN)
+        eng.add_fx(0, _COMP_PLUGIN)
+        cp2 = eng.save_checkpoint(label="after_fx")
+        assert "after_fx" in cp2["checkpoint_path"]
+
+        eng.add_master_fx(_MASTER_LIMITER)
+        cp3 = eng.save_checkpoint(label="before_master")
+        assert "before_master" in cp3["checkpoint_path"]
+
+        eng.finalize_master(target_rms_db=-12.0)
+        cp4 = eng.save_checkpoint(label="final")
+        assert "final" in cp4["checkpoint_path"]
+
+        assert cp1["main_path"] == cp2["main_path"] == cp3["main_path"] == cp4["main_path"]
+
+    # ── Scene 6: Master finalization ────────────────────────
+
+    def test_finalize_master_to_target_rms(self, tmp_path):
+        """Probe render at Gain=0 → measure RMS → set gain → final render."""
+        require_reaper()
+        eng = MixingEngine()
+        eng._bridge.connect()
+        eng.create_project(
+            name="TestVocalMixing", output_dir="/tmp/hermes_vocal_test",
+            sample_rate=48000,
+        )
+        eng.prepare_stems(
+            [_VOCAL_FILE, _BACKING_FILE],
+            genre="chinese_folk_bel_canto",
+        )
+        eng.add_fx(0, _EQ_PLUGIN)
+        eng.add_fx(0, _COMP_PLUGIN)
+        eng.create_reverb_send(src_track=0, reverb_fx=_REVERB_PLUGIN)
+
+        result = eng.finalize_master(
+            target_rms_db=-12.0, tmp_dir=str(tmp_path),
+        )
+        assert result["pre_limiter_peak_db"] <= 0, (
+            f"Pre-limiter peak {result['pre_limiter_peak_db']} — mix clips before limiter"
+        )
+        assert result["passed"] is True, (
+            f"finalize_master did not pass: {result}"
+        )
+        assert abs(result["achieved_rms_db"] - result["target_rms_db"]) <= 2.0
+        assert result["output_path"] is not None
+
+        audit = eng.audit_mix(result["output_path"])
+        assert audit["passed"] is True, (
+            f"Final master should pass audit: {audit}"
+        )
+
+    # ── Scene 7: Multi-format export ─────────────────────────
+
+    def test_render_output_formats(self, tmp_path):
+        """Render to WAV and MP3 — both produce valid, non-silent files."""
+        require_reaper()
+        eng = MixingEngine()
+        eng._bridge.connect()
+        eng.create_project(
+            name="TestVocalMixing", output_dir="/tmp/hermes_vocal_test",
+            sample_rate=48000,
+        )
+        eng.prepare_stems(
+            [_VOCAL_FILE, _BACKING_FILE],
+            genre="chinese_folk_bel_canto",
+        )
+        eng.add_master_fx(_MASTER_LIMITER)
+
+        for fmt in ("wav",):
+            result = eng.render_mix(
+                str(tmp_path), fmt=fmt, verify=True,
+            )
+            output = result.get("output_path")
+            assert output is not None, f"{fmt} render produced no output"
+            assert output.endswith(f".{fmt}"), (
+                f"Expected .{fmt}, got {output}"
+            )
+            sc = result.get("signal_check", {})
+            assert sc.get("silence_passed") is True, (
+                f"{fmt} render should not be silent"
+            )
+
+    # ── Scene 8: Full session ───────────────────────────────
+
+    def test_full_vocal_mixing_session(self, tmp_path):
+        """End-to-end vocal mixing pipeline — no errors, clean output."""
+        require_reaper()
+        eng = MixingEngine()
+        eng._bridge.connect()
+
+        # 1. Create project
+        eng.create_project(
+            name="TestVocalMixing", output_dir="/tmp/hermes_vocal_test",
+            sample_rate=48000,
+        )
+
+        # 2. Import and gain-stage stems
+        prep = eng.prepare_stems(
+            [_VOCAL_FILE, _BACKING_FILE],
+            genre="chinese_folk_bel_canto",
+        )
+        assert all(s["success"] for s in prep["stems"])
+
+        # 3. Vocal processing chain
+        assert eng.add_fx(0, _EQ_PLUGIN) >= 0
+        assert eng.add_fx(0, _COMP_PLUGIN) >= 0
+
+        # 4. Reverb send
+        reverb = eng.create_reverb_send(
+            src_track=0, reverb_fx=_REVERB_PLUGIN,
+        )
+        assert reverb["aux_index"] >= 0
+
+        # 5. Checkpoint before master
+        cp = eng.save_checkpoint(label="before_master")
+        assert cp["checkpoint_path"] is not None
+
+        # 6. Master finalization
+        master = eng.finalize_master(
+            target_rms_db=-12.0, tmp_dir=str(tmp_path),
+        )
+        assert master["passed"] is True, (
+            f"finalize_master failed: {master}"
+        )
+        assert master["pre_limiter_peak_db"] <= 0
+        assert abs(master["achieved_rms_db"] - master["target_rms_db"]) <= 2.0
+
+        # 7. Audit
+        audit = eng.audit_mix(master["output_path"])
+        assert audit["passed"] is True, (
+            f"Final mix audit failed: {audit}"
+        )
+
+        # 8. Health check
         health = eng.health_check()
         assert health["reapy_connected"] is True

@@ -3,6 +3,7 @@ RenderManager — REAPER project rendering via Main_OnCommand.
 Depends only on bridge.py.
 """
 
+import base64
 import logging
 import os
 import time
@@ -130,8 +131,11 @@ class RenderManager:
         sink_code = _SINK_CODES[fmt]
         bounds_flag = _BOUNDS_FLAGS[bounds]
 
-        # String config: format + output location
-        api.GetSetProjectInfo_String(0, "RENDER_FORMAT", sink_code, True)
+        # RENDER_FORMAT expects base64(sink_code + b'\x18\x00\x01')
+        fmt_encoded = base64.b64encode(
+            sink_code.encode() + b"\x18\x00\x01"
+        ).decode()
+        api.GetSetProjectInfo_String(0, "RENDER_FORMAT", fmt_encoded, True)
         api.GetSetProjectInfo_String(0, "RENDER_FILE", output_dir, True)
         api.GetSetProjectInfo_String(0, "RENDER_PATTERN", "render", True)
 

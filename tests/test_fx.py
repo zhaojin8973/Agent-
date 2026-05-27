@@ -45,6 +45,17 @@ def _mock_bridge(**api_overrides):
     mock.api.GetTrack = MagicMock(
         side_effect=lambda p, i: f"(MediaTrack*)0x{i+1:016x}" if i >= 0 else None
     )
+    # Raw RPR FX param API used by get_param_list / set_param for master track
+    mock.api.TrackFX_GetNumParams = MagicMock(
+        side_effect=lambda t, fx: 3 if fx == 0 else 0
+    )
+    mock.api.TrackFX_GetParamName = MagicMock(
+        side_effect=lambda t, fx, i, buf, sz: (True, f"Param{i}")
+    )
+    mock.api.TrackFX_GetParam = MagicMock(
+        side_effect=lambda t, fx, i: (True, 0.5)
+    )
+    mock.api.TrackFX_SetParam = MagicMock()
     for attr, val in api_overrides.items():
         setattr(mock.api, attr, val)
     return mock

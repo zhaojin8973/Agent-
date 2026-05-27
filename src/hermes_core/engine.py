@@ -14,9 +14,21 @@ from hermes_core.fx import FxManager
 from hermes_core.send import SendManager
 from hermes_core.render import RenderManager
 from hermes_core.signal import SignalAnalyzer
-from hermes_core.normalize import Normalizer, NormalizeResult
 
 log = logging.getLogger(__name__)
+
+# Genre-based backing track reduction (LU) for prepare_stems.
+# Higher values = backing is more heavily compressed/limited → needs
+# more reduction to create headroom for the lead vocal.
+_GENRE_BACKING_REDUCTION = {
+    "folk":                    (3, 6),    # folk / ballad — wide dynamics
+    "pop":                     (6, 9),    # pop — moderate compression
+    "chinese_folk_bel_canto":  (9, 12),   # Chinese folk / bel canto — vocal-forward
+}
+
+# Standard clip gain reference level (dBFS RMS).
+# -18 dBFS = 0 VU — industry standard for analog-modelled plugin input calibration.
+_CLIP_GAIN_REF_DB: float = -18.0
 
 
 class MixingEngine:
@@ -35,7 +47,6 @@ class MixingEngine:
         self._fx = FxManager(self._bridge)
         self._send = SendManager(self._bridge)
         self._render = RenderManager(self._bridge)
-        self._normalizer = Normalizer(self._bridge)
         self._watchdog_enabled = watchdog
         self._project_path: str | None = None
 
@@ -93,19 +104,36 @@ class MixingEngine:
         safe_path, conflict_renamed = self._safe_project_path(output_dir, name)
 
         api = self._bridge.api
-        api.Undo_BeginBlock()
-        try:
-            num = api.CountTracks(0)
-            for i in range(num - 1, -1, -1):
-                tr = api.GetTrack(0, i)
-                if tr:
-                    api.DeleteTrack(tr)
-            api.GetSetProjectInfo_String(0, "PROJECT_NAME", name, True)
-            if sample_rate > 0:
-                api.GetSetProjectInfo(0, "PROJECT_SRATE", sample_rate, True)
-                api.GetSetProjectInfo(0, "PROJECT_SRATE_USE", 1, True)
-        finally:
-            api.Undo_EndBlock("Clear project", 0)
+
+        # Delete all tracks via reapy's high-level API.
+        # The raw DeleteTrack API is unreliable on ARM64.
+        proj = self._bridge.rpr.Project()
+        for track in list(proj.tracks):
+            try:
+                track.delete()
+            except Exception:
+                pass
+
+        # Reset master track
+        master = api.GetMasterTrack(0)
+        if master:
+            n_fx = api.TrackFX_GetCount(master)
+            for i in range(n_fx - 1, -1, -1):
+                api.TrackFX_Delete(master, i)
+            api.SetMediaTrackInfo_Value(master, "D_VOL", 1.0)
+            api.SetMediaTrackInfo_Value(master, "B_MUTE", 0.0)
+            api.SetMediaTrackInfo_Value(master, "I_SOLO", 0.0)
+            api.SetMediaTrackInfo_Value(master, "D_PAN", 0.0)
+
+        api.GetSetProjectInfo_String(0, "PROJECT_NAME", name, True)
+        if sample_rate > 0:
+            api.GetSetProjectInfo(0, "PROJECT_SRATE", sample_rate, True)
+            api.GetSetProjectInfo(0, "PROJECT_SRATE_USE", 1, True)
+        import base64
+        api.GetSetProjectInfo_String(
+            0, "RENDER_FORMAT",
+            base64.b64encode(b"evaw\x18\x00\x01").decode(), True,
+        )
 
         api.Main_SaveProjectEx(0, safe_path, 0)
         self._project_path = safe_path
@@ -200,7 +228,9 @@ class MixingEngine:
         """
         if target == "track_fader":
             self._tracks.set_volume(track_index, gain_db)
-        elif target in ("clip_gain", "master_fader"):
+        elif target == "clip_gain":
+            self._tracks.set_item_volume(track_index, gain_db)
+        elif target in ("master_fader",):
             raise NotImplementedError(
                 f"Gain target '{target}' not yet implemented"
             )
@@ -220,6 +250,153 @@ class MixingEngine:
             })
         return {"tracks": tracks}
 
+    def prepare_stems(
+        self,
+        stem_paths: list[str],
+        *,
+        genre: str = "pop",
+        vocal_indices: list[int] | None = None,
+        backing_indices: list[int] | None = None,
+        vocal_to_backing_lu: float = 4.0,
+    ) -> dict:
+        """Analyse raw stems, apply clip gain to reference level, then
+        balance vocal vs. backing via fader.
+
+        Two-stage gain staging:
+        1. Clip gain — brings every stem to -18 dBFS RMS (0 VU reference).
+           Ensures plugins see consistent input levels across projects.
+        2. Fader — genre-based vocal/backing balance, keeps vocal fader
+           near unity for optimal resolution.
+
+        Returns per-stem analysis so callers can inspect both gains.
+        """
+        # 1. Import stems
+        imported = self.import_stems(stem_paths)
+
+        # 2. Classify roles
+        if vocal_indices is None:
+            vocal_indices = [0]
+        if backing_indices is None:
+            backing_indices = [i for i in range(len(stem_paths))
+                               if i not in vocal_indices]
+
+        # 3. Measure each imported stem and apply clip gain
+        stems_out = []
+        for i, imp in enumerate(imported):
+            if not imp["success"]:
+                stems_out.append({
+                    "path": stem_paths[i],
+                    "role": self._classify_role(i, vocal_indices, backing_indices),
+                    "track_index": imp["track_index"],
+                    "track_name": imp["name"],
+                    "raw_rms_db": None,
+                    "raw_lufs": None,
+                    "raw_peak_db": None,
+                    "clip_gain_db": 0.0,
+                    "adjusted_lufs": None,
+                    "fader_gain_db": 0.0,
+                    "success": False,
+                })
+                continue
+
+            try:
+                ana = SignalAnalyzer.analyze(stem_paths[i])
+                raw_rms_db = ana.rms_db
+                raw_lufs = ana.integrated_lufs
+                raw_peak_db = ana.peak_db
+            except (OSError, ValueError, RuntimeError):
+                raw_rms_db = None
+                raw_lufs = None
+                raw_peak_db = None
+
+            # Stage 1: clip gain to reference level
+            clip_gain_db = 0.0
+            if raw_rms_db is not None:
+                clip_gain_db = _CLIP_GAIN_REF_DB - raw_rms_db
+                # Peak guard — clip gain must not push any sample above 0 dBFS
+                if raw_peak_db is not None and clip_gain_db > 0:
+                    headroom = -raw_peak_db
+                    if clip_gain_db > headroom:
+                        log.info(
+                            "Clip gain %.1f dB capped to %.1f dB — "
+                            "peak %.1f dBFS leaves no headroom",
+                            clip_gain_db, headroom, raw_peak_db,
+                        )
+                        clip_gain_db = headroom
+                self.apply_gain(imp["track_index"], clip_gain_db,
+                                target="clip_gain")
+
+            adjusted_lufs = (
+                raw_lufs + clip_gain_db if raw_lufs is not None else None
+            )
+
+            stems_out.append({
+                "path": stem_paths[i],
+                "role": self._classify_role(i, vocal_indices, backing_indices),
+                "track_index": imp["track_index"],
+                "track_name": imp["name"],
+                "raw_rms_db": raw_rms_db,
+                "raw_lufs": raw_lufs,
+                "raw_peak_db": raw_peak_db,
+                "clip_gain_db": round(clip_gain_db, 1),
+                "adjusted_lufs": (
+                    round(adjusted_lufs, 1) if adjusted_lufs is not None
+                    else None
+                ),
+                "fader_gain_db": 0.0,
+                "success": imp["success"],
+            })
+
+        # 4. Genre-based fader balance using adjusted LUFS
+        reduction = _GENRE_BACKING_REDUCTION.get(
+            genre, _GENRE_BACKING_REDUCTION["pop"]
+        )
+        if isinstance(reduction, tuple):
+            reduction = (reduction[0] + reduction[1]) / 2.0
+
+        backing_lufs_vals = [
+            s["adjusted_lufs"] for i, s in enumerate(stems_out)
+            if i in backing_indices and s["adjusted_lufs"] is not None
+        ]
+        backing_adjusted_lufs = (
+            sum(backing_lufs_vals) / len(backing_lufs_vals)
+            if backing_lufs_vals else -18.0
+        )
+        backing_target_lufs = backing_adjusted_lufs - reduction
+        vocal_target_lufs = backing_target_lufs + vocal_to_backing_lu
+
+        for i, s in enumerate(stems_out):
+            if not s["success"] or s["adjusted_lufs"] is None:
+                continue
+            if i in vocal_indices:
+                target_lufs = vocal_target_lufs
+            elif i in backing_indices:
+                target_lufs = backing_target_lufs
+            else:
+                continue
+            fader_gain_db = target_lufs - s["adjusted_lufs"]
+            s["fader_gain_db"] = round(fader_gain_db, 1)
+            self.apply_gain(s["track_index"], fader_gain_db)
+
+        return {
+            "stems": stems_out,
+            "genre": genre,
+            "genre_reduction_lu": reduction,
+            "backing_adjusted_lufs": round(backing_adjusted_lufs, 1),
+            "backing_target_lufs": round(backing_target_lufs, 1),
+            "vocal_target_lufs": round(vocal_target_lufs, 1),
+            "vocal_to_backing_lu": vocal_to_backing_lu,
+        }
+
+    @staticmethod
+    def _classify_role(idx: int, vocal_indices: list[int],
+                       backing_indices: list[int]) -> str:
+        if idx in vocal_indices:
+            return "vocal"
+        if idx in backing_indices:
+            return "backing"
+        return "other"
+
     def check_headroom(self) -> dict:
         """Check headroom. Without rendering, reports source as unavailable."""
         return {
@@ -237,6 +414,10 @@ class MixingEngine:
     def get_fx_chain(self, track_index: int) -> list[dict]:
         """Return all FX on a track."""
         return self._fx.get_chain(track_index)
+
+    def add_master_fx(self, fx_name: str) -> int:
+        """Add an effect plugin to the master track. Returns FX index."""
+        return self._fx.add_master(fx_name)
 
     # ── Scene 5: Bus & sends ─────────────────────────────
 
@@ -300,28 +481,7 @@ class MixingEngine:
 
         return result
 
-    # ── Scene 7: Loudness normalization ──────────────────
-
-    def normalize_track(self, track_index: int,
-                        target_lufs: float = -14.0,
-                        duration: float = 5.0) -> NormalizeResult:
-        """Normalize a single track to the target LUFS level.
-
-        Renders a snippet, measures integrated LUFS, and applies
-        gain compensation to the track fader.
-        """
-        return self._normalizer.normalize_track(
-            track_index, target_lufs=target_lufs, duration=duration
-        )
-
-    def normalize_all(self, target_lufs: float = -14.0,
-                      duration: float = 5.0) -> list[NormalizeResult]:
-        """Normalize all tracks in the project to the target LUFS level."""
-        return self._normalizer.normalize_all(
-            target_lufs=target_lufs, duration=duration
-        )
-
-    # ── Scene 9: Safety audit ────────────────────────────
+    # ── Scene 7: Safety audit ────────────────────────────
 
     def audit_mix(self, file_path: str) -> dict:
         """Run a full safety audit on a rendered mix file.
@@ -385,4 +545,108 @@ class MixingEngine:
                 "duration_sec": report.duration_sec,
                 "sample_rate": report.sample_rate,
             },
+        }
+
+    # ── Scene 8: Master finalization ───────────────────────
+
+    def finalize_master(
+        self,
+        target_rms_db: float = -12.0,
+        *,
+        limiter_fx: str = "FabFilter Pro-L 2 (FabFilter)",
+        ceiling_db: float = -0.5,
+        tmp_dir: str | None = None,
+    ) -> dict:
+        """Two-pass master finalization via limiter gain staging.
+
+        1. Add *limiter_fx* to master with Gain=0, Ceiling=*ceiling_db*.
+        2. Probe render → measure RMS (dB).
+        3. Gain = target_rms_db - measured_rms_db (dB → dB, linear).
+        4. Apply gain, render final.
+        """
+        import tempfile
+
+        tmp = tmp_dir or tempfile.mkdtemp(prefix="hermes_master_")
+        probe_dir = os.path.join(tmp, "probe")
+        final_dir = os.path.join(tmp, "final")
+
+        # 1. Add limiter
+        fx_idx = self._fx.add_master(limiter_fx)
+        if fx_idx < 0:
+            return {
+                "target_rms_db": target_rms_db,
+                "achieved_rms_db": None,
+                "gain_db": 0.0,
+                "ceiling_db": ceiling_db,
+                "passed": False,
+                "error": f"Failed to add {limiter_fx} to master",
+                "output_path": None,
+                "pre_limiter_peak_db": None,
+            }
+
+        # Pro-L 2 param layout: 0 = Gain (-36..+36 dB), 1 = Ceiling.
+        # Set Ceiling
+        self._fx.set_param(
+            -1, fx_idx, 1,
+            max(0.0, min(1.0, (ceiling_db + 36.0) / 72.0)),
+        )
+        # Gain = 0 dB for probe render
+        self._fx.set_param(-1, fx_idx, 0, 0.5)
+
+        # 2. Probe render
+        probe_result = self.render_mix(probe_dir, verify=True)
+        probe_sc = probe_result.get("signal_check", {})
+        if probe_result.get("output_path") is None:
+            return {
+                "target_rms_db": target_rms_db,
+                "achieved_rms_db": None,
+                "gain_db": 0.0,
+                "ceiling_db": ceiling_db,
+                "passed": False,
+                "error": "Probe render failed",
+                "output_path": None,
+                "pre_limiter_peak_db": None,
+            }
+
+        measured_rms_db = probe_sc.get("rms_db")
+        pre_peak = probe_sc.get("peak_db", 0.0)
+        if measured_rms_db is None:
+            return {
+                "target_rms_db": target_rms_db,
+                "achieved_rms_db": None,
+                "gain_db": 0.0,
+                "ceiling_db": ceiling_db,
+                "passed": False,
+                "error": "Failed to measure RMS from probe",
+                "output_path": None,
+                "pre_limiter_peak_db": pre_peak,
+            }
+
+        # 3. Calculate gain — dB → dB, linear
+        gain_db = target_rms_db - measured_rms_db
+
+        # 4. Apply gain and render final
+        self._fx.set_param(
+            -1, fx_idx, 0,
+            max(0.0, min(1.0, (gain_db + 36.0) / 72.0)),
+        )
+        final_result = self.render_mix(final_dir, verify=True)
+        output_path = final_result.get("output_path")
+        final_sc = final_result.get("signal_check", {})
+        achieved_rms_db = final_sc.get("rms_db")
+
+        passed = (
+            output_path is not None
+            and achieved_rms_db is not None
+            and abs(achieved_rms_db - target_rms_db) <= 2.0
+        )
+
+        return {
+            "target_rms_db": target_rms_db,
+            "achieved_rms_db": achieved_rms_db,
+            "gain_db": round(gain_db, 1),
+            "ceiling_db": ceiling_db,
+            "passed": passed,
+            "pre_limiter_peak_db": pre_peak,
+            "output_path": output_path,
         }

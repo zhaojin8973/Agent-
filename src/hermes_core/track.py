@@ -5,14 +5,73 @@ Depends only on bridge.py.
 
 import os
 import math
+import struct
+import tempfile
 import logging
 import wave
+
+import numpy as np
 from dataclasses import dataclass
 from typing import Optional
 
 from hermes_core.bridge import ReaperBridge
 
 log = logging.getLogger(__name__)
+
+
+def _wav_duration_fallback(file_path: str) -> float:
+    """Get duration from a WAV header when stdlib wave rejects it (e.g. float WAV)."""
+    with open(file_path, "rb") as fh:
+        if fh.read(4) != b"RIFF":
+            return 300.0
+        fh.read(4)  # file size
+        if fh.read(4) != b"WAVE":
+            return 300.0
+        while True:
+            chunk_id = fh.read(4)
+            if len(chunk_id) < 4:
+                break
+            chunk_size = struct.unpack("<I", fh.read(4))[0]
+            if chunk_id == b"fmt ":
+                fmt_data = fh.read(chunk_size)
+                channels = struct.unpack_from("<H", fmt_data, 2)[0]
+                sr = struct.unpack_from("<I", fmt_data, 4)[0]
+                bits = struct.unpack_from("<H", fmt_data, 14)[0] if chunk_size >= 16 else 16
+            elif chunk_id == b"data":
+                nframes = chunk_size // max((channels * bits // 8), 1)
+                return nframes / max(sr, 1)
+            else:
+                fh.read(chunk_size)
+    return 300.0
+
+
+def _convert_to_pcm(file_path: str) -> str:
+    """Convert a float WAV to 16-bit PCM temp file that REAPER can import."""
+    from hermes_core.signal import _read_wav_manual
+    sw, sr, channels, raw = _read_wav_manual(file_path)
+    if sw == 4:
+        pcm_f32 = np.frombuffer(raw, dtype=np.float32)
+    elif sw == 3:
+        padded = np.frombuffer(raw + b"\x00", dtype=np.uint8
+            )[: len(raw) // 3 * 3].reshape(-1, 3)
+        i32 = (padded[:, 0].astype(np.int32) + padded[:, 1].astype(np.int32) * 256
+               + padded[:, 2].astype(np.int32) * 65536)
+        i32[i32 >= 8388608] -= 16777216
+        pcm_f32 = i32.astype(np.float64).astype(np.float32) / 8388608.0
+    else:
+        raise ValueError(f"Cannot convert WAV with sample width {sw}")
+
+    pcm_f32 = pcm_f32.reshape(-1, channels)
+    i16 = (pcm_f32 * 32767.0).clip(-32768, 32767).astype(np.int16)
+
+    fd, tmp_path = tempfile.mkstemp(suffix=".wav", prefix="hermes_pcm_")
+    os.close(fd)
+    with wave.open(tmp_path, "wb") as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(2)
+        wf.setframerate(sr)
+        wf.writeframes(i16.tobytes())
+    return tmp_path
 
 
 @dataclass
@@ -157,11 +216,17 @@ class TrackManager:
         if not os.path.isfile(file_path):
             return False
         try:
-            with wave.open(file_path, "rb") as wf:
-                duration = wf.getnframes() / wf.getframerate() if wf.getframerate() > 0 else 1.0
+            try:
+                with wave.open(file_path, "rb") as wf:
+                    duration = wf.getnframes() / max(wf.getframerate(), 1)
+                import_path = os.path.abspath(file_path)
+            except wave.Error:
+                # Float WAV — convert to 16-bit PCM for import
+                import_path = _convert_to_pcm(file_path)
+                duration = _wav_duration_fallback(file_path)
             rpr = self._bridge.rpr
             api = rpr.reascript_api
-            pcm_source = api.PCM_Source_CreateFromFile(file_path)
+            pcm_source = api.PCM_Source_CreateFromFile(import_path)
             if pcm_source is None:
                 log.warning("import_media: PCM_Source_CreateFromFile returned None for %s", file_path)
                 return False
@@ -208,6 +273,18 @@ class TrackManager:
             return float(api.GetMediaItemInfo_Value(item, "D_POSITION"))
         except Exception:
             return 0.0
+
+    def set_item_volume(self, track_index: int, db: float,
+                        item_index: int = 0):
+        """Set clip gain (item volume) on a media item. Pre-FX, pre-fader."""
+        api = self._bridge.api
+        track = api.GetTrack(0, track_index)
+        if track is None:
+            return
+        item = api.GetTrackMediaItem(track, item_index)
+        if item is None:
+            return
+        api.SetMediaItemInfo_Value(item, "D_VOL", self._db_to_norm(db))
 
     # ── Internal ──────────────────────────────────────────────
 

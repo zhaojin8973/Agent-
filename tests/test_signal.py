@@ -109,11 +109,13 @@ class TestReadPcm:
 
         # Assert
         assert out_sr == sr
-        assert pcm.ndim == 1, f"expected mono (1D) output, got shape {pcm.shape}"
-        assert len(pcm) == len(mono_sine)
+        assert pcm.ndim == 2, f"expected multi-channel (2D) output, got shape {pcm.shape}"
+        assert pcm.shape[1] == 2
+        assert pcm.shape[0] == len(mono_sine)
         assert pcm.dtype == np.float64
         # Values should be close to original (allow rounding from int16)
-        assert np.allclose(pcm, mono_sine, atol=1.0 / 32767.0 * 2)
+        mono_pcm = SignalAnalyzer._to_mono(pcm)
+        assert np.allclose(mono_pcm, mono_sine, atol=1.0 / 32767.0 * 2)
 
     def test_read_pcm_24bit(self, tmp_path):
         """_read_pcm correctly decodes a 24-bit stereo WAV to mono float64."""
@@ -130,14 +132,15 @@ class TestReadPcm:
 
         # Assert
         assert out_sr == sr
-        assert pcm.ndim == 1, f"expected mono (1D) output, got shape {pcm.shape}"
-        assert len(pcm) == len(mono_sine)
+        assert pcm.ndim == 2, f"expected multi-channel (2D) output, got shape {pcm.shape}"
+        assert pcm.shape[0] == len(mono_sine)
         assert pcm.dtype == np.float64
         # 24-bit precision (144 dB dynamic range) — very tight tolerance
-        assert np.allclose(pcm, mono_sine, atol=1.0 / 8388607.0 * 2)
+        mono_pcm = SignalAnalyzer._to_mono(pcm)
+        assert np.allclose(mono_pcm, mono_sine, atol=1.0 / 8388607.0 * 2)
 
     def test_read_pcm_stereo_to_mono(self, tmp_path):
-        """_read_pcm averages stereo channels to mono correctly."""
+        """_to_mono downmixes stereo to mono via standard (L+R)/2."""
         # Arrange
         sr = 48000
         duration = 0.02
@@ -150,16 +153,16 @@ class TestReadPcm:
 
         # Act
         pcm, out_sr = SignalAnalyzer._read_pcm(str(wav_path))
+        mono_pcm = SignalAnalyzer._to_mono(pcm)
 
         # Assert
         assert out_sr == sr
-        assert pcm.ndim == 1
-        assert len(pcm) == len(expected_mono)
-        # Tolerate int16 quantization noise
-        assert np.allclose(pcm, expected_mono, atol=1.0 / 32767.0 * 2)
+        assert pcm.ndim == 2
+        assert len(mono_pcm) == len(expected_mono)
+        assert np.allclose(mono_pcm, expected_mono, atol=1.0 / 32767.0 * 2)
 
     def test_read_pcm_shape_and_rate(self, tmp_path):
-        """_read_pcm returns correct shape (1D mono) and sample rate."""
+        """_read_pcm returns correct multi-channel shape and sample rate."""
         # Arrange
         for dur in [0.01, 0.1, 1.0]:
             sr = 48000
@@ -174,7 +177,7 @@ class TestReadPcm:
 
             # Assert
             assert out_sr == sr, f"sample rate mismatch for dur={dur}"
-            assert pcm.ndim == 1, f"expected 1D for dur={dur}, got shape {pcm.shape}"
+            assert pcm.ndim == 2, f"expected 2D for dur={dur}, got shape {pcm.shape}"
             assert abs(len(pcm) - n) <= 1, f"length mismatch for dur={dur}"
 
     def test_read_pcm_24bit_negative_samples(self, tmp_path):
@@ -197,13 +200,16 @@ class TestReadPcm:
 
         # Assert
         assert out_sr == sr
-        assert pcm.ndim == 1
-        assert len(pcm) == n
+        assert pcm.ndim == 2
+        assert pcm.shape[0] == n
         assert pcm.dtype == np.float64
         # All negative samples should remain negative after decode
-        assert np.all(pcm[0:50] < 0), "negative samples corrupted"
-        assert np.all(pcm[100:150] > 0), "positive samples corrupted"
-        assert np.allclose(pcm, mono, atol=1.0 / 8388607.0 * 2)
+        ch0_neg = pcm[:50, 0]
+        ch0_pos = pcm[100:150, 0]
+        assert np.all(ch0_neg < 0), "negative samples corrupted"
+        assert np.all(ch0_pos > 0), "positive samples corrupted"
+        mono_pcm = SignalAnalyzer._to_mono(pcm)
+        assert np.allclose(mono_pcm, mono, atol=1.0 / 8388607.0 * 2)
 
     def test_read_pcm_32bit_float(self, tmp_path):
         """_read_pcm correctly decodes a 32-bit float stereo WAV to mono float64."""
@@ -217,11 +223,11 @@ class TestReadPcm:
         pcm, out_sr = SignalAnalyzer._read_pcm(str(wav_path))
 
         assert out_sr == sr
-        assert pcm.ndim == 1
-        assert len(pcm) == len(mono_sine)
+        assert pcm.ndim == 2
+        assert pcm.shape[0] == len(mono_sine)
         assert pcm.dtype == np.float64
-        # 32-bit float preserves amplitude with near-lossless precision
-        assert np.allclose(pcm, mono_sine, atol=1e-6)
+        mono_pcm = SignalAnalyzer._to_mono(pcm)
+        assert np.allclose(mono_pcm, mono_sine, atol=1e-6)
 
     def test_read_pcm_32bit_float_silence(self, tmp_path):
         """_read_pcm handles 32-bit float WAV containing near-silence."""
@@ -235,8 +241,9 @@ class TestReadPcm:
         pcm, out_sr = SignalAnalyzer._read_pcm(str(wav_path))
 
         assert out_sr == sr
-        assert len(pcm) == n
-        assert np.allclose(pcm, mono, atol=1e-8)
+        assert pcm.shape[0] == n
+        mono_pcm = SignalAnalyzer._to_mono(pcm)
+        assert np.allclose(mono_pcm, mono, atol=1e-8)
 
 
 # ══════════════════════════════════════════════════════════════

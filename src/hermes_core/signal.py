@@ -4,6 +4,7 @@ Zero REAPER dependency. Core analysis is pure Python + numpy.
 """
 
 import math
+import struct
 import wave
 from dataclasses import dataclass
 
@@ -13,6 +14,50 @@ import numpy as np
 _LUFS_CALIBRATION = -0.691
 # Silence threshold in dBFS
 _SILENCE_THRESHOLD_DB = -60.0
+
+
+def _read_wav_manual(file_path: str) -> tuple[int, int, int, bytes]:
+    """Manually parse a WAV header for formats the stdlib ``wave`` rejects.
+
+    Returns (sample_width, sample_rate, channels, raw_pcm_bytes).
+    Supports 16-bit PCM and 32-bit IEEE float.
+    """
+    with open(file_path, "rb") as fh:
+        riff = fh.read(4)
+        if riff != b"RIFF":
+            raise ValueError("Not a WAV file")
+        fh.read(4)  # file size
+        wave_id = fh.read(4)
+        if wave_id != b"WAVE":
+            raise ValueError("Not a WAV file")
+
+        fmt_tag = 0
+        channels = 1
+        sr = 44100
+        bits_per_sample = 16
+
+        while True:
+            chunk_id = fh.read(4)
+            if len(chunk_id) < 4:
+                break
+            chunk_size = struct.unpack("<I", fh.read(4))[0]
+            if chunk_id == b"fmt ":
+                fmt_data = fh.read(chunk_size)
+                fmt_tag = struct.unpack_from("<H", fmt_data, 0)[0]
+                channels = struct.unpack_from("<H", fmt_data, 2)[0]
+                sr = struct.unpack_from("<I", fmt_data, 4)[0]
+                if chunk_size >= 16:
+                    bits_per_sample = struct.unpack_from("<H", fmt_data, 14)[0]
+            elif chunk_id == b"data":
+                raw = fh.read(chunk_size)
+                break
+            else:
+                fh.read(chunk_size)
+
+    sw = bits_per_sample // 8
+    if fmt_tag == 3:  # IEEE float
+        sw = 4
+    return sw, sr, channels, raw
 
 
 @dataclass
@@ -33,24 +78,39 @@ class SignalAnalyzer:
 
     @staticmethod
     def analyze(file_path: str) -> SignalReport:
-        """Read a WAV file and return a full SignalReport."""
+        """Read a WAV file and return a full SignalReport.
+
+        Multi-channel files are measured with power-preserving channel
+        averaging for RMS and LUFS (per ITU-R BS.1770-4).
+        """
         pcm, sample_rate = SignalAnalyzer._read_pcm(file_path)
-        n = len(pcm)
-        duration = n / sample_rate
+        if pcm.size == 0:
+            return SignalReport(
+                rms_db=-200.0, peak_db=-200.0, integrated_lufs=-120.0,
+                true_peak_dbtp=-120.0, clip_count=0, clip_passed=True,
+                silence_passed=True, duration_sec=0.0, sample_rate=sample_rate,
+            )
 
-        abs_pcm = np.abs(pcm)
-        peak_linear = float(np.max(abs_pcm)) if n > 0 else 0.0
-        peak_db = 20.0 * math.log10(max(peak_linear, 1e-10))
+        n_samples = pcm.shape[0]
+        duration = n_samples / sample_rate
 
-        rms_linear = float(np.sqrt(np.mean(pcm ** 2))) if n > 0 else 0.0
+        # RMS — power over all samples and channels
+        rms_linear = float(np.sqrt(np.mean(pcm ** 2)))
         rms_db = 20.0 * math.log10(max(rms_linear, 1e-10))
+
+        # Peak — max absolute value across all channels
+        abs_pcm = np.abs(pcm)
+        peak_linear = float(np.max(abs_pcm))
+        peak_db = 20.0 * math.log10(max(peak_linear, 1e-10))
 
         clip_count = int(np.sum(abs_pcm >= 0.999))
         clip_passed = clip_count == 0
         silence_passed = rms_db > _SILENCE_THRESHOLD_DB
 
         integrated_lufs = SignalAnalyzer._compute_lufs(pcm, sample_rate)
-        true_peak_dbtp = SignalAnalyzer._compute_true_peak(pcm)
+
+        mono = SignalAnalyzer._to_mono(pcm)
+        true_peak_dbtp = SignalAnalyzer._compute_true_peak(mono)
 
         return SignalReport(
             rms_db=round(rms_db, 1),
@@ -66,13 +126,25 @@ class SignalAnalyzer:
 
     @staticmethod
     def _read_pcm(file_path: str) -> tuple[np.ndarray, int]:
-        """Read WAV, return (mono_float64, sample_rate). Handles 16/24-bit PCM and 32-bit float."""
-        with wave.open(file_path, "rb") as wf:
-            sw = wf.getsampwidth()
-            sr = wf.getframerate()
-            nch = wf.getnchannels()
-            nframes = wf.getnframes()
-            raw = wf.readframes(nframes)
+        """Read WAV, return (multi-channel_float64, sample_rate).
+
+        Returns ``(n_samples, n_channels)`` shaped array.  The caller is
+        responsible for downmixing when mono is needed.
+
+        Handles 16/24-bit PCM and 32-bit float.  Falls back to a manual
+        header parse when the stdlib ``wave`` module rejects float WAVs.
+        """
+        # Try stdlib wave first (handles 16/24-bit PCM cleanly)
+        try:
+            with wave.open(file_path, "rb") as wf:
+                sw = wf.getsampwidth()
+                sr = wf.getframerate()
+                nch = wf.getnchannels()
+                nframes = wf.getnframes()
+                raw = wf.readframes(nframes)
+        except wave.Error:
+            # Manual parse for float WAVs (format tag 3)
+            sw, sr, nch, raw = _read_wav_manual(file_path)
 
         if sw == 2:
             pcm = np.frombuffer(raw, dtype=np.int16).astype(np.float64) / 32768.0
@@ -94,36 +166,48 @@ class SignalAnalyzer:
             raise ValueError(f"Unsupported sample width: {sw} (only 16/24-bit PCM and 32-bit float)")
 
         pcm = pcm.reshape(-1, nch)
-        if nch >= 2:
-            pcm = np.mean(pcm, axis=1)
-        else:
-            pcm = pcm.flatten()
 
         return pcm.astype(np.float64), sr
+
+    @staticmethod
+    def _to_mono(pcm: np.ndarray) -> np.ndarray:
+        """Downmix multi-channel to mono via standard (L+R) / nch."""
+        if pcm.ndim == 1:
+            return pcm
+        return np.mean(pcm, axis=1)
 
     # ── LUFS (ITU-R BS.1770-4) ──────────────────────────────
 
     @staticmethod
     def _compute_lufs(pcm: np.ndarray, sample_rate: int) -> float:
-        """Integrated LUFS with K-weighting, 400ms blocks, absolute and relative gates."""
-        if len(pcm) == 0:
+        """Integrated LUFS with per-channel K-weighting (ITU-R BS.1770-4)."""
+        if pcm.size == 0:
             return -120.0
 
-        k_weighted = SignalAnalyzer._k_weight(pcm, sample_rate)
+        if pcm.ndim == 1:
+            pcm = pcm.reshape(-1, 1)
+        nch = pcm.shape[1]
+
+        # K-weight each channel independently
+        k_weighted = [
+            SignalAnalyzer._k_weight(pcm[:, ch], sample_rate) for ch in range(nch)
+        ]
+        # Power-average across channels per sample
+        kw = np.sqrt(np.mean([kw_ch ** 2 for kw_ch in k_weighted], axis=0))
 
         block_samples = int(0.4 * sample_rate)
         hop = block_samples // 4
-        if block_samples == 0 or len(k_weighted) < block_samples:
-            mean_sq = np.mean(k_weighted ** 2)
+        if block_samples == 0 or len(kw) < block_samples:
+            mean_sq = np.mean(kw ** 2)
             return float(10.0 * math.log10(max(mean_sq, 1e-13))) + _LUFS_CALIBRATION
 
         block_power = []
-        for start in range(0, len(k_weighted) - block_samples + 1, hop):
-            block = k_weighted[start : start + block_samples]
+        for start in range(0, len(kw) - block_samples + 1, hop):
+            block = kw[start : start + block_samples]
             block_power.append(float(np.mean(block ** 2)))
 
         if not block_power:
-            mean_sq = np.mean(k_weighted ** 2)
+            mean_sq = np.mean(kw ** 2)
             return float(10.0 * math.log10(max(mean_sq, 1e-13))) + _LUFS_CALIBRATION
 
         # Absolute gate: -70 LUFS

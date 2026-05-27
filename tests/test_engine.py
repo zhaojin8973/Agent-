@@ -14,7 +14,6 @@ from tests.conftest import require_reaper, clean_project, make_test_wav
 from hermes_core.send import SendManager
 from hermes_core.render import RenderManager
 from hermes_core.signal import SignalAnalyzer, SignalReport
-from hermes_core.normalize import NormalizeResult
 
 
 @pytest.mark.unit
@@ -69,40 +68,24 @@ class TestHealthCheck:
 
 @pytest.mark.unit
 class TestCreateProject:
-    def test_deletes_all_tracks(self):
+    def test_deletes_all_tracks_via_reapy(self):
         eng = MixingEngine()
-        eng._bridge.api.CountTracks = MagicMock(return_value=5)
-        eng._bridge.api.GetTrack = MagicMock(return_value="(MediaTrack*)0x1")
-        eng._bridge.api.DeleteTrack = MagicMock()
-        eng._bridge.api.Undo_BeginBlock = MagicMock()
-        eng._bridge.api.Undo_EndBlock = MagicMock()
+        # Mock reapy track list
+        mock_track = MagicMock()
+        eng._bridge.rpr.Project = MagicMock(return_value=MagicMock(
+            tracks=[mock_track, mock_track, mock_track, mock_track, mock_track]))
+        eng._bridge.api.GetMasterTrack = MagicMock(return_value="(MediaTrack*)0x0")
+        eng._bridge.api.TrackFX_GetCount = MagicMock(return_value=0)
+        eng._bridge.api.SetMediaTrackInfo_Value = MagicMock()
         eng._bridge.api.GetSetProjectInfo = MagicMock()
         eng._bridge.api.GetSetProjectInfo_String = MagicMock()
         eng._bridge.api.Main_SaveProjectEx = MagicMock()
 
         eng.create_project(name="Test", output_dir="/tmp/test", sample_rate=48000)
 
-        assert eng._bridge.api.DeleteTrack.call_count == 5
-        eng._bridge.api.Undo_BeginBlock.assert_called_once()
+        assert mock_track.delete.call_count == 5
         eng._bridge.api.GetSetProjectInfo.assert_called()
         eng._bridge.api.Main_SaveProjectEx.assert_called_once()
-
-    def test_skips_null_tracks(self):
-        eng = MixingEngine()
-        eng._bridge.api.CountTracks = MagicMock(return_value=3)
-        eng._bridge.api.GetTrack = MagicMock(
-            side_effect=["(MediaTrack*)0x1", None, "(MediaTrack*)0x3"]
-        )
-        eng._bridge.api.DeleteTrack = MagicMock()
-        eng._bridge.api.Undo_BeginBlock = MagicMock()
-        eng._bridge.api.Undo_EndBlock = MagicMock()
-        eng._bridge.api.GetSetProjectInfo = MagicMock()
-        eng._bridge.api.GetSetProjectInfo_String = MagicMock()
-        eng._bridge.api.Main_SaveProjectEx = MagicMock()
-
-        eng.create_project(name="Test", output_dir="/tmp/test", sample_rate=48000)
-        assert eng._bridge.api.DeleteTrack.call_count == 2
-
 
 @pytest.mark.unit
 class TestProjectManagement:
@@ -123,7 +106,7 @@ class TestProjectManagement:
             name="MyMix", output_dir="/tmp/mix", sample_rate=44100
         )
 
-        eng._bridge.api.GetSetProjectInfo_String.assert_called_once_with(
+        eng._bridge.api.GetSetProjectInfo_String.assert_any_call(
             0, "PROJECT_NAME", "MyMix", True
         )
         assert result["name"] == "MyMix"
@@ -272,10 +255,11 @@ class TestApplyGain:
         eng.apply_gain(3, -3.0)
         eng._tracks.set_volume.assert_called_once_with(3, -3.0)
 
-    def test_clip_gain_raises_not_implemented(self):
+    def test_clip_gain_delegates_to_track_manager(self):
         eng = MixingEngine()
-        with pytest.raises(NotImplementedError, match="clip_gain"):
-            eng.apply_gain(0, -6.0, target="clip_gain")
+        eng._tracks = MagicMock()
+        eng.apply_gain(0, -6.0, target="clip_gain")
+        eng._tracks.set_item_volume.assert_called_once_with(0, -6.0)
 
     def test_master_fader_raises_not_implemented(self):
         eng = MixingEngine()
@@ -487,51 +471,6 @@ class TestAuditMix:
 
         assert result["passed"] is False
         assert "error" in result
-
-
-@pytest.mark.unit
-class TestNormalizeTrack:
-    def test_delegates_to_normalizer(self):
-        eng = MixingEngine()
-        eng._normalizer.normalize_track = MagicMock(
-            return_value=NormalizeResult(
-                track_index=0, track_name="Kick",
-                original_lufs=-20.0, target_lufs=-14.0,
-                gain_applied_db=6.0, success=True,
-            )
-        )
-        result = eng.normalize_track(0, target_lufs=-14.0, duration=5.0)
-        eng._normalizer.normalize_track.assert_called_once_with(
-            0, target_lufs=-14.0, duration=5.0
-        )
-        assert result.success is True
-        assert result.gain_applied_db == 6.0
-
-    def test_normalize_track_defaults(self):
-        eng = MixingEngine()
-        eng._normalizer.normalize_track = MagicMock(
-            return_value=NormalizeResult(
-                track_index=0, track_name="",
-                original_lufs=0, target_lufs=-14.0,
-                gain_applied_db=0, success=False,
-            )
-        )
-        eng.normalize_track(0)
-        eng._normalizer.normalize_track.assert_called_once_with(
-            0, target_lufs=-14.0, duration=5.0
-        )
-
-
-@pytest.mark.unit
-class TestNormalizeAll:
-    def test_delegates_to_normalizer(self):
-        eng = MixingEngine()
-        eng._normalizer.normalize_all = MagicMock(return_value=[])
-        result = eng.normalize_all(target_lufs=-16.0, duration=3.0)
-        eng._normalizer.normalize_all.assert_called_once_with(
-            target_lufs=-16.0, duration=3.0
-        )
-        assert result == []
 
 
 @pytest.mark.unit

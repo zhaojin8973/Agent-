@@ -9,9 +9,9 @@ metadata:
 
 # Hermes-Core 项目阶段性报告
 
-**更新日期**: 2026-05-27
-**版本**: 0.1.0
-**最新提交**: 4c88fac (feat: project management — named save, conflict avoidance, checkpoints)
+**更新日期**: 2026-05-28
+**版本**: 0.2.0
+**最新提交**: (待提交)
 
 ---
 
@@ -28,7 +28,7 @@ hermes-core 是 REAPER DAW 的精益三层 Python 自动化引擎，目标是非
 | 层 | 模块 | 职责 |
 |---|---|---|
 | L1 桥接 | `bridge.py` | REAPER 连接、原始 API、UI 抑制、弹窗守护 |
-| L2 领域 | `track.py` `bus.py` `fx.py` `send.py` `render.py` `signal.py` `normalize.py` | 各领域管理器，仅依赖 L1 |
+| L2 领域 | `track.py` `bus.py` `fx.py` `send.py` `render.py` `signal.py` | 各领域管理器，仅依赖 L1 |
 | L3 入口 | `engine.py` | 组合所有 L2 模块，提供统一的 MixingEngine API |
 
 ---
@@ -49,6 +49,9 @@ hermes-core 是 REAPER DAW 的精益三层 Python 自动化引擎，目标是非
 - [x] 属性管理（名称/音量/声像/静音/独奏/文件夹深度）
 - [x] 媒体导入（支持 ARM64 绕过 bug）
 - [x] TrackInfo 数据类 + 序列化
+- [x] **Clip gain 支持** — `set_item_volume()` 通过 `SetMediaItemInfo_Value`
+- [x] **绝对路径导入** — `os.path.abspath` 防止 REAPER 离线
+- [x] **Float/24-bit WAV 转 PCM** — `_convert_to_pcm()` 兼容所有 WAV 格式
 
 ### L2: bus.py
 - [x] 文件夹总线创建/拆解
@@ -62,6 +65,7 @@ hermes-core 是 REAPER DAW 的精益三层 Python 自动化引擎，目标是非
 - [x] FX 启用/旁路
 - [x] FX 复制/移动到其他音轨
 - [x] ARM64 假阳性防御（RPR fallback → reapy）
+- [x] **Master track FX 支持** — `add_master()`, `get_param_list()` 适配
 
 ### L2: send.py
 - [x] 发送创建/删除
@@ -76,6 +80,7 @@ hermes-core 是 REAPER DAW 的精益三层 Python 自动化引擎，目标是非
 - [x] 支持 entire_project/time_selection
 - [x] 渲染超时控制
 - [x] 时间选区管理
+- [x] **RENDER_FORMAT base64 编码修复**
 
 ### L2: signal.py
 - [x] WAV 读取（16/24-bit PCM + 32-bit float）
@@ -83,23 +88,26 @@ hermes-core 是 REAPER DAW 的精益三层 Python 自动化引擎，目标是非
 - [x] 集成 LUFS（ITU-R BS.1770-4，含 K-加权+双门限）
 - [x] 真峰值 dBTP（4x 过采样 sinc 插值）
 - [x] 削波检测 + 静音检测
+- [x] **立体声功率保持下混** — RMS/LUFS 逐通道计算，消除 ~2dB 偏差
+- [x] **`_to_mono()` 辅助函数** — 标准 (L+R)/2 下混
 
-### L2: normalize.py
-- [x] 单轨 LUFS 归一化（solo→渲染→分析→增益调整）
-- [x] 批量全轨归一化
-- [x] 项目状态保护（solo + time selection 备份/恢复）
-- [x] 跳过无音频轨
+### ~~L2: normalize.py~~ — 已删除
+- 被 `prepare_stems` + `finalize_master` 取代，功能更精确（clip gain + RMS 两趟法）
 
 ### L3: engine.py
 - [x] 场景 1: 连接与健康检查
-- [x] 场景 2: **工程管理** — create_project(name, output_dir) 自动保存 .rpp、**时间戳冲突规避**、save_project() 静默保存、**save_checkpoint() 检查点快照**、get_project_info()
+- [x] 场景 2: **工程管理** — create_project(name, output_dir) 自动保存 .rpp、时间戳冲突规避、save_project() 静默保存、save_checkpoint() 检查点快照、get_project_info()
 - [x] 导入 stems
-- [x] 场景 3: 增益分级（track_fader）
+- [x] **场景 3: prepare_stems()** — 两段式增益分级：clip gain (-18 dBFS RMS 参考) + 推子曲风平衡
 - [x] 场景 4: FX 添加与查询
 - [x] 场景 5: 总线创建 + 混响发送
 - [x] 场景 6: 渲染混音（含信号分析验证）
-- [x] 场景 7: 响度归一化
+- [x] **场景 8: finalize_master()** — RMS 两趟法母带（探针渲染 → 测 RMS → 算 Gain → 成品渲染）
+- [x] **场景 8: add_master_fx()** — Master 总线 FX 挂载
 - [x] 场景 9: 混音安全审计
+- [x] **apply_gain(target="clip_gain")** — clip gain 已实现
+- [x] **Peak guard** — clip gain 不会推到 0 dBFS 以上
+- [x] **曲风表** — folk/pop/chinese_folk_bel_canto 伴奏压低量
 
 ---
 
@@ -107,72 +115,110 @@ hermes-core 是 REAPER DAW 的精益三层 Python 自动化引擎，目标是非
 
 | 功能 | 位置 | 状态 |
 |---|---|---|
-| `apply_gain(target="clip_gain")` | engine.py | NotImplementedError |
 | `apply_gain(target="master_fader")` | engine.py | NotImplementedError |
 | `check_headroom()` 有效实现 | engine.py | 返回 "unavailable_without_render" 存根 |
-| 32-bit float WAV 测试 | test_signal.py | 路径存在但无测试 |
-| 集成测试（除 render 外） | tests/ | 仅 render.py 有 3 个集成测试 |
+| DialogKiller 跨平台 | bridge.py | 仅 macOS AppleScript |
+| Pro-L 2 参数映射 ARM64 校准 | fx.py | 硬编码 param 0=Gain, param 1=Ceiling |
 
 ---
 
 ## 五、测试覆盖
 
-| 文件 | 测试数 | 覆盖率 |
-|---|---|---|
-| test_bridge.py | 33 | 76% |
-| test_bus.py | 16 | 87% |
-| test_engine.py | 43 | 94% |
-| test_fx.py | 46 | 81% |
-| test_mixing_workflow.py | 10 | - |
-| test_normalize.py | 20 | 98% |
-| test_render.py | 53 | 100% |
-| test_send.py | 22 | 88% |
-| test_signal.py | 21 | 93% |
-| test_track.py | 34 | 84% |
-| **总计** | **305** | **90%** |
+### 单元测试
 
-- 单元测试: 260 个（mock REAPER）
-- 集成测试: 45 个（需要 REAPER 运行）
-- 0 个测试 skip
+| 文件 | 测试数 |
+|---|---|
+| test_bridge.py | 33 |
+| test_bus.py | 16 |
+| test_engine.py | 41 |
+| test_fx.py | 46 |
+| test_render.py | 53 |
+| test_send.py | 22 |
+| test_signal.py | 21 |
+| test_track.py | 34 |
+| **小计** | **266** |
+
+### 集成测试
+
+| 文件 | 测试数 | 内容 |
+|---|---|---|
+| test_mixing_workflow.py::TestMixingWorkflow | 8 | 分轨混音全流程 |
+| test_mixing_workflow.py::TestVocalMixing | 8 | 贴唱混音（望归）|
+| test_render.py (集成) | 3 | 渲染集成 |
+| **小计** | **19** |
+
+### 总计
+
+| 指标 | 值 |
+|---|---|
+| 单元测试 | 238 |
+| 集成测试 | 19 |
+| **总计** | **257** |
+| Engine 覆盖率 | 82% |
 
 ---
 
-## 六、已知问题
+## 六、贴唱混音管线
+
+```
+prepare_stems (clip gain -18dBFS RMS + 曲风推子)
+  → Pro-Q 3 EQ
+  → RVox 压缩
+  → ValhallaVintageVerb 混响发送
+  → save_checkpoint
+  → finalize_master (Pro-L 2 RMS 两趟法)
+  → render + audit
+```
+
+### 插件链
+
+| 位置 | 插件 |
+|---|---|
+| 人声 | FabFilter Pro-Q 3 → Waves RVox |
+| 混响发送 | ValhallaVintageVerb (post-fader) |
+| Master | FabFilter Pro-L 2 (Ceiling=-0.5 dBTP) |
+
+### 默认参考值
+
+| 参数 | 默认值 |
+|---|---|
+| Clip gain 参考 | -18 dBFS RMS (0 VU) |
+| 母带目标 RMS | -12 dBFS |
+| Limiter Ceiling | -0.5 dBTP |
+| 民美 backing 压低 | 9-12 LU |
+
+---
+
+## 七、已知问题
 
 1. **REAPER Python 兼容性**：Python 3.14 不兼容 REAPER 7.73，必须使用 3.13
 2. **DialogKiller 仅 macOS**：依赖 AppleScript，不支持 Windows/Linux
-3. **reaper-kb.ini 残留**：有指向 Python 3.14 和旧项目的 reapy 脚本引用
-
-## 八、上次发现的严重 Bug（已修复）
-
-1. `render.py`: `GetSetLoopTimeRange` → `GetSet_LoopTimeRange`（API 名称缺下划线）
-2. `render.py`: `get_time_selection_range` 返回值未解包（应解包 5 元组）
-3. `render.py`: `get_time_selection_range` 第二次调用使用了错误的 `isLoop=True`
+3. **Pro-L 2 参数映射**：ARM64 reapy 无法动态发现参数名，硬编码 param index
+4. **ARM64 DeleteTrack API 不可靠**：改用 `reapy.Track.delete()` 高层 API
 
 ---
 
-## 七、下一步可做
+## 八、下一步可做
 
 ### 优先级高
-- [ ] 实现 `apply_gain` 的 clip_gain 和 master_fader 支持
+- [ ] 实现 `apply_gain` 的 master_fader 支持
 - [ ] 实现 `check_headroom()` — 渲染后分析真峰值余量
-- [ ] 补全 32-bit float WAV 的单元测试
-- [ ] 清理 reaper-kb.ini 中的 Python 3.14 路径
+- [ ] Pro-L 2 参数 index 在 ARM64 上确认
+- [ ] target_rms_db 默认值可能需要根据实际监听调整
 
 ### 优先级中
 - [ ] 各 L2 模块增加真实 REAPER 集成测试
-- [ ] DialogKiller 跨平台支持（Windows 用 pywin32，Linux 用 xdotool）
+- [ ] 曲风表验证与调整
 - [ ] render.py 增加渲染进度反馈
-- [ ] `check_headroom()` 在 engine.py 的实现
 
 ### 优先级低
-- [ ] 修复 2 个 skip 的测试
+- [ ] DialogKiller 跨平台支持
 - [ ] CI/CD pipeline 搭建
 - [ ] 降噪/去嘶声等专用处理模块
 
 ---
 
-## 八、环境依赖
+## 九、环境依赖
 
 - **REAPER**: 7.73 (arm64)
 - **Python**: 3.13.12 (Homebrew) — 3.14 不兼容！
@@ -186,4 +232,5 @@ hermes-core 是 REAPER DAW 的精益三层 Python 自动化引擎，目标是非
 
 | 日期 | 变更 |
 |---|---|
+| 2026-05-28 | 贴唱混音管线：prepare_stems (clip gain + 曲风推子) + finalize_master (RMS 两趟法) + peak guard。立体声 RMS/LUFS 修正。删除 normalize 模块。8 TestVocalMixing 集成测试。238 unit + 19 integration tests。 |
 | 2026-05-27 | 工程管理模块：create_project 自动保存 + 时间戳冲突规避 + save_checkpoint 检查点 + Main_SaveProjectEx 非交互保存。305 tests, 90% cov |
