@@ -11,7 +11,7 @@ metadata:
 
 **更新日期**: 2026-05-27
 **版本**: 0.1.0
-**最新提交**: 即将提交 (集成测试 31 个，总计 282 tests)
+**最新提交**: 4c88fac (feat: project management — named save, conflict avoidance, checkpoints)
 
 ---
 
@@ -92,7 +92,8 @@ hermes-core 是 REAPER DAW 的精益三层 Python 自动化引擎，目标是非
 
 ### L3: engine.py
 - [x] 场景 1: 连接与健康检查
-- [x] 场景 2: 创建项目（命名/采样率/返回状态）+ 导入 stems + **保存工程 (Ctrl+S)** + **获取工程信息**
+- [x] 场景 2: **工程管理** — create_project(name, output_dir) 自动保存 .rpp、**时间戳冲突规避**、save_project() 静默保存、**save_checkpoint() 检查点快照**、get_project_info()
+- [x] 导入 stems
 - [x] 场景 3: 增益分级（track_fader）
 - [x] 场景 4: FX 添加与查询
 - [x] 场景 5: 总线创建 + 混响发送
@@ -120,17 +121,18 @@ hermes-core 是 REAPER DAW 的精益三层 Python 自动化引擎，目标是非
 |---|---|---|
 | test_bridge.py | 33 | 76% |
 | test_bus.py | 16 | 87% |
-| test_engine.py | 42 | 94% |
+| test_engine.py | 43 | 94% |
 | test_fx.py | 46 | 81% |
+| test_mixing_workflow.py | 10 | - |
 | test_normalize.py | 20 | 98% |
 | test_render.py | 53 | 100% |
 | test_send.py | 22 | 88% |
 | test_signal.py | 21 | 93% |
 | test_track.py | 34 | 84% |
-| **总计** | **292** | **89%** |
+| **总计** | **305** | **90%** |
 
-- 单元测试: 256 个（mock REAPER）
-- 集成测试: 36 个（需要 REAPER 运行）
+- 单元测试: 260 个（mock REAPER）
+- 集成测试: 45 个（需要 REAPER 运行）
 - 0 个测试 skip
 
 ---
@@ -184,4 +186,4 @@ hermes-core 是 REAPER DAW 的精益三层 Python 自动化引擎，目标是非
 
 | 日期 | 变更 |
 |---|---|
-| 2026-05-27 | 测试覆盖率提升 87%→89%，新增 18 个测试，2 个 skip 修复，32-bit float WAV 测试，_extract_string/_extract_reaper_string 测试 |
+| 2026-05-27 | 工程管理模块：create_project 自动保存 + 时间戳冲突规避 + save_checkpoint 检查点 + Main_SaveProjectEx 非交互保存。305 tests, 90% cov |
