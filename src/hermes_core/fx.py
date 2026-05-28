@@ -33,9 +33,14 @@ def _resolve_param_index(api, track_ptr, fx_index: int, param) -> int:
     name_lower = param.lower()
     n = api.TrackFX_GetNumParams(track_ptr, fx_index)
     for i in range(n):
-        ok, name_buf = api.TrackFX_GetParamName(
+        raw = api.TrackFX_GetParamName(
             track_ptr, fx_index, i, "", 256
         )
+        if isinstance(raw, (tuple, list)):
+            ok = bool(raw[0]) if len(raw) > 0 else False
+            name_buf = raw[4] if len(raw) > 4 else ""
+        else:
+            ok, name_buf = True, raw
         if ok and _extract_string(name_buf).lower() == name_lower:
             return i
     return -1
@@ -211,10 +216,12 @@ class FxManager:
         fx_index: int,
         param: Union[int, str],
         normalized: float,
-    ):
+    ) -> bool:
         """Set an FX parameter by index or name. Normalized value 0.0-1.0.
 
         Master track (index=-1) uses raw RPR; regular tracks use reapy.
+        Returns True if the parameter was set, False if the track or
+        parameter name/index could not be resolved.
         """
         normalized = max(0.0, min(1.0, normalized))
 
@@ -222,22 +229,23 @@ class FxManager:
         if track_index == -1:
             track = self._get_track_ptr(-1)
             if track is None:
-                return
+                return False
             param_idx = _resolve_param_index(
                 self._bridge.api, track, fx_index, param
             )
             if param_idx < 0:
-                return
+                return False
             self._bridge.api.TrackFX_SetParam(
                 track, fx_index, param_idx, normalized
             )
-            return
+            return True
 
         # Regular tracks: use reapy
         track = self._track(track_index)
         if track is None or fx_index < 0 or fx_index >= len(track.fxs):
-            return
+            return False
         track.fxs[fx_index].params[param] = normalized
+        return True
 
     def get_param(
         self,
@@ -292,54 +300,20 @@ class FxManager:
             )
             if isinstance(raw_gpn, (tuple, list)):
                 ok = bool(raw_gpn[0]) if len(raw_gpn) > 0 else False
-                name_buf = raw_gpn[1] if len(raw_gpn) > 1 else ""
+                name_buf = raw_gpn[4] if len(raw_gpn) > 4 else ""
             else:
                 ok, name_buf = True, raw_gpn
             name = _extract_string(name_buf) if ok else f"param_{i}"
 
-            raw_gp = self._bridge.api.TrackFX_GetParam(track, fx_index, i)
+            raw_gp = self._bridge.api.TrackFX_GetParam(track, fx_index, i, 0.0, 0.0)
             if isinstance(raw_gp, (tuple, list)):
                 ok_v = bool(raw_gp[0]) if len(raw_gp) > 0 else False
-                val = raw_gp[1] if len(raw_gp) > 1 else 0.0
+                val = raw_gp[0] if len(raw_gp) > 0 else 0.0
             else:
                 ok_v, val = True, raw_gp
             value = float(val) if ok_v else 0.0
             result.append({"name": name, "value": value})
         return result
-
-    def set_param(
-        self,
-        track_index: int,
-        fx_index: int,
-        param: Union[int, str],
-        normalized: float,
-    ):
-        """Set an FX parameter by index or name. Normalized value 0.0-1.0.
-
-        Master track (index=-1) uses raw RPR API; regular tracks use reapy.
-        """
-        normalized = max(0.0, min(1.0, normalized))
-
-        # Master track: use raw RPR
-        if track_index == -1:
-            track = self._get_track_ptr(-1)
-            if track is None:
-                return
-            param_idx = _resolve_param_index(
-                self._bridge.api, track, fx_index, param
-            )
-            if param_idx < 0:
-                return
-            self._bridge.api.TrackFX_SetParam(
-                track, fx_index, param_idx, normalized
-            )
-            return
-
-        # Regular tracks: use reapy
-        track = self._track(track_index)
-        if track is None or fx_index < 0 or fx_index >= len(track.fxs):
-            return
-        track.fxs[fx_index].params[param] = normalized
 
     # ── State ─────────────────────────────────────────────
 

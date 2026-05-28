@@ -30,6 +30,30 @@ _GENRE_BACKING_REDUCTION = {
 # -18 dBFS = 0 VU — industry standard for analog-modelled plugin input calibration.
 _CLIP_GAIN_REF_DB: float = -18.0
 
+# Default master output RMS target (dBFS).
+# Tune after listening — pop/rock often sits at -12..-10, classical at -18..-14.
+_DEFAULT_TARGET_RMS_DB: float = -12.0
+
+# Pro-L 2 calibrated VST parameter ranges (verified 2026-05-28 via REAPER GUI).
+# Gain: normalized 0.0 = 0 dB, 1.0 = +30 dB (boost only).
+# Output Level: normalized 0.0 = -30 dB, 1.0 = 0 dB.
+# Both share a 30 dB span.
+_PRO_L2_RANGE_DB: float = 30.0
+
+
+def _master_error(target_rms_db: float, ceiling_db: float, error: str) -> dict:
+    """Build a finalize_master error result dict."""
+    return {
+        "target_rms_db": target_rms_db,
+        "achieved_rms_db": None,
+        "gain_db": 0.0,
+        "ceiling_db": ceiling_db,
+        "passed": False,
+        "error": error,
+        "output_path": None,
+        "pre_limiter_peak_db": None,
+    }
+
 
 class MixingEngine:
     """Top-level REAPER mixing engine. Use as context manager for auto-connect.
@@ -258,6 +282,7 @@ class MixingEngine:
         vocal_indices: list[int] | None = None,
         backing_indices: list[int] | None = None,
         vocal_to_backing_lu: float = 4.0,
+        backing_reduction_lu: float | None = None,
     ) -> dict:
         """Analyse raw stems, apply clip gain to reference level, then
         balance vocal vs. backing via fader.
@@ -268,7 +293,9 @@ class MixingEngine:
         2. Fader — genre-based vocal/backing balance, keeps vocal fader
            near unity for optimal resolution.
 
-        Returns per-stem analysis so callers can inspect both gains.
+        When *backing_reduction_lu* is given it bypasses the genre table
+        and uses that exact LU value. Useful for tuning without editing
+        ``_GENRE_BACKING_REDUCTION``.
         """
         # 1. Import stems
         imported = self.import_stems(stem_paths)
@@ -348,11 +375,14 @@ class MixingEngine:
             })
 
         # 4. Genre-based fader balance using adjusted LUFS
-        reduction = _GENRE_BACKING_REDUCTION.get(
-            genre, _GENRE_BACKING_REDUCTION["pop"]
-        )
-        if isinstance(reduction, tuple):
-            reduction = (reduction[0] + reduction[1]) / 2.0
+        if backing_reduction_lu is not None:
+            reduction = backing_reduction_lu
+        else:
+            reduction = _GENRE_BACKING_REDUCTION.get(
+                genre, _GENRE_BACKING_REDUCTION["pop"]
+            )
+            if isinstance(reduction, tuple):
+                reduction = (reduction[0] + reduction[1]) / 2.0
 
         backing_lufs_vals = [
             s["adjusted_lufs"] for i, s in enumerate(stems_out)
@@ -551,7 +581,7 @@ class MixingEngine:
 
     def finalize_master(
         self,
-        target_rms_db: float = -12.0,
+        target_rms_db: float = _DEFAULT_TARGET_RMS_DB,
         *,
         limiter_fx: str = "FabFilter Pro-L 2 (FabFilter)",
         ceiling_db: float = -0.5,
@@ -559,7 +589,7 @@ class MixingEngine:
     ) -> dict:
         """Two-pass master finalization via limiter gain staging.
 
-        1. Add *limiter_fx* to master with Gain=0, Ceiling=*ceiling_db*.
+        1. Add *limiter_fx* to master with Gain=0, Output Level=*ceiling_db*.
         2. Probe render → measure RMS (dB).
         3. Gain = target_rms_db - measured_rms_db (dB → dB, linear).
         4. Apply gain, render final.
@@ -573,63 +603,53 @@ class MixingEngine:
         # 1. Add limiter
         fx_idx = self._fx.add_master(limiter_fx)
         if fx_idx < 0:
-            return {
-                "target_rms_db": target_rms_db,
-                "achieved_rms_db": None,
-                "gain_db": 0.0,
-                "ceiling_db": ceiling_db,
-                "passed": False,
-                "error": f"Failed to add {limiter_fx} to master",
-                "output_path": None,
-                "pre_limiter_peak_db": None,
-            }
+            return _master_error(
+                target_rms_db, ceiling_db,
+                f"Failed to add {limiter_fx} to master",
+            )
 
-        # Pro-L 2 param layout: 0 = Gain (-36..+36 dB), 1 = Ceiling.
-        # Set Ceiling
-        self._fx.set_param(
-            -1, fx_idx, 1,
-            max(0.0, min(1.0, (ceiling_db + 36.0) / 72.0)),
-        )
-        # Gain = 0 dB for probe render
-        self._fx.set_param(-1, fx_idx, 0, 0.5)
+        # Pro-L 2 param formulas (verified 2026-05-28 via REAPER calibration):
+        #   Gain: 0..+30 dB → normalized = gain_db / 30
+        #   Output Level: -30..0 dB → normalized = (ceiling_db + 30) / 30
+        ceiling_norm = max(0.0, min(1.0, (ceiling_db + _PRO_L2_RANGE_DB) / _PRO_L2_RANGE_DB))
+        if not self._fx.set_param(-1, fx_idx, "Output Level", ceiling_norm):
+            return _master_error(
+                target_rms_db, ceiling_db,
+                "Pro-L 2 Output Level param not found — may need calibration",
+            )
+        if not self._fx.set_param(-1, fx_idx, "Gain", 0.0):
+            return _master_error(
+                target_rms_db, ceiling_db,
+                "Pro-L 2 Gain param not found — may need calibration",
+            )
 
         # 2. Probe render
         probe_result = self.render_mix(probe_dir, verify=True)
         probe_sc = probe_result.get("signal_check", {})
         if probe_result.get("output_path") is None:
-            return {
-                "target_rms_db": target_rms_db,
-                "achieved_rms_db": None,
-                "gain_db": 0.0,
-                "ceiling_db": ceiling_db,
-                "passed": False,
-                "error": "Probe render failed",
-                "output_path": None,
-                "pre_limiter_peak_db": None,
-            }
+            return _master_error(
+                target_rms_db, ceiling_db, "Probe render failed",
+            )
 
         measured_rms_db = probe_sc.get("rms_db")
         pre_peak = probe_sc.get("peak_db", 0.0)
         if measured_rms_db is None:
-            return {
-                "target_rms_db": target_rms_db,
-                "achieved_rms_db": None,
-                "gain_db": 0.0,
-                "ceiling_db": ceiling_db,
-                "passed": False,
-                "error": "Failed to measure RMS from probe",
-                "output_path": None,
-                "pre_limiter_peak_db": pre_peak,
-            }
+            return _master_error(
+                target_rms_db, ceiling_db, "Failed to measure RMS from probe",
+            )
 
         # 3. Calculate gain — dB → dB, linear
         gain_db = target_rms_db - measured_rms_db
 
-        # 4. Apply gain and render final
-        self._fx.set_param(
-            -1, fx_idx, 0,
-            max(0.0, min(1.0, (gain_db + 36.0) / 72.0)),
-        )
+        # 4. Apply gain and render final.
+        # Gain range is 0..+30 dB: normalized = gain_db / 30.
+        # If gain_db < 0 (mix too hot), clamp to 0 — Gain cannot attenuate.
+        gain_norm = max(0.0, min(1.0, gain_db / _PRO_L2_RANGE_DB))
+        if not self._fx.set_param(-1, fx_idx, "Gain", gain_norm):
+            return _master_error(
+                target_rms_db, ceiling_db,
+                "Pro-L 2 Gain param not found during final render",
+            )
         final_result = self.render_mix(final_dir, verify=True)
         output_path = final_result.get("output_path")
         final_sc = final_result.get("signal_check", {})
