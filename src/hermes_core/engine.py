@@ -46,6 +46,7 @@ def _master_error(target_rms_db: float, ceiling_db: float, error: str) -> dict:
     return {
         "target_rms_db": target_rms_db,
         "achieved_rms_db": None,
+        "measured_rms_db": None,
         "gain_db": 0.0,
         "ceiling_db": ceiling_db,
         "passed": False,
@@ -585,14 +586,19 @@ class MixingEngine:
         *,
         limiter_fx: str = "FabFilter Pro-L 2 (FabFilter)",
         ceiling_db: float = -0.5,
+        percentile: int = 90,
         tmp_dir: str | None = None,
     ) -> dict:
         """Two-pass master finalization via limiter gain staging.
 
         1. Add *limiter_fx* to master with Gain=0, Output Level=*ceiling_db*.
-        2. Probe render → measure RMS (dB).
+        2. Probe render → measure windowed RMS at *percentile* (P90 default).
         3. Gain = target_rms_db - measured_rms_db (dB → dB, linear).
         4. Apply gain, render final.
+
+        The percentile-based measurement uses the "loud sections" of the
+        song instead of the overall RMS, preventing over-amplification
+        on material with wide dynamic range (quiet verses, loud choruses).
         """
         import tempfile
 
@@ -631,9 +637,12 @@ class MixingEngine:
                 target_rms_db, ceiling_db, "Probe render failed",
             )
 
-        measured_rms_db = probe_sc.get("rms_db")
+        probe_path = probe_result.get("output_path")
+        measured_rms_db = SignalAnalyzer.segment_rms(
+            probe_path, percentile=percentile,
+        )
         pre_peak = probe_sc.get("peak_db", 0.0)
-        if measured_rms_db is None:
+        if measured_rms_db <= -100.0:
             return _master_error(
                 target_rms_db, ceiling_db, "Failed to measure RMS from probe",
             )
@@ -655,15 +664,23 @@ class MixingEngine:
         final_sc = final_result.get("signal_check", {})
         achieved_rms_db = final_sc.get("rms_db")
 
+        # Validate against the P90 of the *final* output — the loud
+        # sections should hit the target, even if the overall RMS is
+        # lower on dynamic material.
+        final_p90 = SignalAnalyzer.segment_rms(
+            output_path, percentile=percentile,
+        ) if output_path else -200.0
+
         passed = (
             output_path is not None
             and achieved_rms_db is not None
-            and abs(achieved_rms_db - target_rms_db) <= 2.0
+            and abs(final_p90 - target_rms_db) <= 2.0
         )
 
         return {
             "target_rms_db": target_rms_db,
             "achieved_rms_db": achieved_rms_db,
+            "measured_rms_db": measured_rms_db,
             "gain_db": round(gain_db, 1),
             "ceiling_db": ceiling_db,
             "passed": passed,

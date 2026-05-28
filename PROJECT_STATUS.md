@@ -10,8 +10,8 @@ metadata:
 # Hermes-Core 项目阶段性报告
 
 **更新日期**: 2026-05-28
-**版本**: 0.2.1
-**最新提交**: 9401722
+**版本**: 0.2.2
+**最新提交**: (pending)
 
 ---
 
@@ -102,7 +102,7 @@ hermes-core 是 REAPER DAW 的精益三层 Python 自动化引擎，目标是非
 - [x] 场景 4: FX 添加与查询
 - [x] 场景 5: 总线创建 + 混响发送
 - [x] 场景 6: 渲染混音（含信号分析验证）
-- [x] **场景 8: finalize_master()** — RMS 两趟法母带（探针渲染 → 测 RMS → 算 Gain → 成品渲染）
+- [x] **场景 8: finalize_master()** — **P90 分段 RMS 两趟法**母带（探针渲染 → P90 分段 RMS → 算 Gain → 成品渲染），防止动态大时副歌被压爆
 - [x] **场景 8: add_master_fx()** — Master 总线 FX 挂载
 - [x] 场景 9: 混音安全审计
 - [x] **apply_gain(target="clip_gain")** — clip gain 已实现
@@ -175,14 +175,14 @@ prepare_stems (clip gain -18dBFS RMS + 曲风推子)
 |---|---|
 | 人声 | FabFilter Pro-Q 3 → Waves RVox |
 | 混响发送 | ValhallaVintageVerb (post-fader) |
-| Master | FabFilter Pro-L 2 (Gain=动态, Output Level=-0.5 dB) |
+| Master | FabFilter Pro-L 2 (Gain=P90动态, Output Level=-0.5 dB) |
 
 ### 默认参考值
 
 | 参数 | 默认值 |
 |---|---|
 | Clip gain 参考 | -18 dBFS RMS (0 VU) |
-| 母带目标 RMS | -12 dBFS |
+| 母带目标 RMS | -12 dBFS（响段 P90 参考） |
 | Limiter Ceiling | -0.5 dBTP |
 | 民美 backing 压低 | 9-12 LU |
 
@@ -194,6 +194,7 @@ prepare_stems (clip gain -18dBFS RMS + 曲风推子)
 2. **DialogKiller 仅 macOS**：依赖 AppleScript，不支持 Windows/Linux
 3. **target_rms_db 默认值**（-12 dBFS）和曲风表参数需要听感验证
 4. **ARM64 REAPER API 元组问题**：`TrackFX_GetParamName`/`TrackFX_GetParam` 返回 6 元素元组，需安全解包。已在 fx.py 中统一处理。
+5. **动态范围大的素材**：P90 分段 RMS 策略可防止响段被压爆，但整体 RMS 可能低于目标。符合预期——待听感验证。
 
 ---
 
@@ -231,6 +232,7 @@ prepare_stems (clip gain -18dBFS RMS + 曲风推子)
 
 | 日期 | 变更 |
 |---|---|
+| 2026-05-28 | **P90 分段 RMS 母带**：`segment_rms()` 窗口化百分位测量替代整体 RMS，防止动态大的素材副歌被压爆。`finalize_master` 新增 `percentile` 参数（默认 90）。pass 校验改为最终输出 P90 RMS vs 目标。结果新增 `measured_rms_db`。8/8 TestVocalMixing 通过。 |
 | 2026-05-28 | Pro-L 2 参数校准：ARM64 元组安全解包 + REAPER GUI 实测归一化公式（Gain 0→+30, Output Level -30→0）。`set_param()` 返回 `-> bool`。`_master_error()` 消除重复代码。`backing_reduction_lu` 覆盖参数。全部 8 TestVocalMixing 通过。 |
 | 2026-05-28 | 贴唱混音管线：prepare_stems (clip gain + 曲风推子) + finalize_master (RMS 两趟法) + peak guard。立体声 RMS/LUFS 修正。删除 normalize 模块。8 TestVocalMixing 集成测试。238 unit + 19 integration tests。 |
 | 2026-05-27 | 工程管理模块：create_project 自动保存 + 时间戳冲突规避 + save_checkpoint 检查点 + Main_SaveProjectEx 非交互保存。305 tests, 90% cov |

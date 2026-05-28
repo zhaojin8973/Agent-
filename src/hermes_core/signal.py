@@ -176,6 +176,52 @@ class SignalAnalyzer:
             return pcm
         return np.mean(pcm, axis=1)
 
+    # ── Segmented RMS ────────────────────────────────────────
+
+    @staticmethod
+    def segment_rms(
+        file_path: str,
+        window_sec: float = 3.0,
+        percentile: int = 90,
+    ) -> float:
+        """Windowed RMS percentile — the "loud section" reference level.
+
+        Splits the audio into *window_sec* slices, computes RMS per slice,
+        discards silent slices (< -60 dBFS), sorts, and returns the value at
+        *percentile* as dBFS.
+
+        Use this instead of overall RMS when you need a gain target that
+        won't over-amplify loud sections on dynamic material.
+        """
+        if not (1 <= percentile <= 100):
+            raise ValueError(f"percentile must be 1-100, got {percentile}")
+
+        pcm, sr = SignalAnalyzer._read_pcm(file_path)
+        if pcm.size == 0:
+            return -200.0
+
+        mono = SignalAnalyzer._to_mono(pcm)
+        window_samples = max(int(window_sec * sr), 1)
+        n = len(mono)
+
+        rms_vals = []
+        for start in range(0, n, window_samples):
+            chunk = mono[start : start + window_samples]
+            if len(chunk) < window_samples // 2:
+                continue  # skip tail fragment
+            rms_lin = float(np.sqrt(np.mean(chunk ** 2)))
+            rms_db = 20.0 * math.log10(max(rms_lin, 1e-10))
+            if rms_db > _SILENCE_THRESHOLD_DB:
+                rms_vals.append(rms_db)
+
+        if not rms_vals:
+            return -200.0
+
+        rms_vals.sort()
+        idx = int(len(rms_vals) * percentile / 100.0)
+        idx = min(idx, len(rms_vals) - 1)
+        return round(rms_vals[idx], 1)
+
     # ── LUFS (ITU-R BS.1770-4) ──────────────────────────────
 
     @staticmethod
