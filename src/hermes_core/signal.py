@@ -176,59 +176,18 @@ class SignalAnalyzer:
             return pcm
         return np.mean(pcm, axis=1)
 
-    # ── Segmented RMS ────────────────────────────────────────
+    # ── Loudness time series (ITU-R BS.1770-4 K-weighting) ───
 
     @staticmethod
-    def segment_rms(
-        file_path: str,
-        window_sec: float = 3.0,
-        percentile: int = 90,
-    ) -> float:
-        """Windowed RMS percentile — the "loud section" reference level.
+    def _loudness_timeseries(pcm: np.ndarray, sample_rate: int) -> "np.ndarray":
+        """Short-term LUFS blocks (400 ms, 75 % overlap) without gating.
 
-        Splits the audio into *window_sec* slices, computes RMS per slice,
-        discards silent slices (< -60 dBFS), sorts, and returns the value at
-        *percentile* as dBFS.
-
-        Use this instead of overall RMS when you need a gain target that
-        won't over-amplify loud sections on dynamic material.
+        Returns *(n_blocks,)* float64 array of linear mean-square power
+        per block after K-weighting and channel power-averaging.
+        Multiply by ``sample_rate`` before calling to avoid duplicate work.
         """
-        if not (1 <= percentile <= 100):
-            raise ValueError(f"percentile must be 1-100, got {percentile}")
-
-        pcm, sr = SignalAnalyzer._read_pcm(file_path)
         if pcm.size == 0:
-            return -200.0
-
-        mono = SignalAnalyzer._to_mono(pcm)
-        window_samples = max(int(window_sec * sr), 1)
-        n = len(mono)
-
-        rms_vals = []
-        for start in range(0, n, window_samples):
-            chunk = mono[start : start + window_samples]
-            if len(chunk) < window_samples // 2:
-                continue  # skip tail fragment
-            rms_lin = float(np.sqrt(np.mean(chunk ** 2)))
-            rms_db = 20.0 * math.log10(max(rms_lin, 1e-10))
-            if rms_db > _SILENCE_THRESHOLD_DB:
-                rms_vals.append(rms_db)
-
-        if not rms_vals:
-            return -200.0
-
-        rms_vals.sort()
-        idx = int(len(rms_vals) * percentile / 100.0)
-        idx = min(idx, len(rms_vals) - 1)
-        return round(rms_vals[idx], 1)
-
-    # ── LUFS (ITU-R BS.1770-4) ──────────────────────────────
-
-    @staticmethod
-    def _compute_lufs(pcm: np.ndarray, sample_rate: int) -> float:
-        """Integrated LUFS with per-channel K-weighting (ITU-R BS.1770-4)."""
-        if pcm.size == 0:
-            return -120.0
+            return np.array([], dtype=np.float64)
 
         if pcm.ndim == 1:
             pcm = pcm.reshape(-1, 1)
@@ -244,21 +203,34 @@ class SignalAnalyzer:
         block_samples = int(0.4 * sample_rate)
         hop = block_samples // 4
         if block_samples == 0 or len(kw) < block_samples:
-            mean_sq = np.mean(kw ** 2)
-            return float(10.0 * math.log10(max(mean_sq, 1e-13))) + _LUFS_CALIBRATION
+            return np.array([float(np.mean(kw ** 2))], dtype=np.float64)
 
-        block_power = []
+        powers = []
         for start in range(0, len(kw) - block_samples + 1, hop):
             block = kw[start : start + block_samples]
-            block_power.append(float(np.mean(block ** 2)))
+            powers.append(float(np.mean(block ** 2)))
 
-        if not block_power:
-            mean_sq = np.mean(kw ** 2)
-            return float(10.0 * math.log10(max(mean_sq, 1e-13))) + _LUFS_CALIBRATION
+        return np.array(powers, dtype=np.float64) if powers else np.array(
+            [float(np.mean(kw ** 2))], dtype=np.float64,
+        )
+
+    @staticmethod
+    def _block_power_to_lufs(power: float) -> float:
+        """Convert linear mean-square block power to LUFS."""
+        return float(10.0 * math.log10(max(power, 1e-13))) + _LUFS_CALIBRATION
+
+    # ── LUFS (ITU-R BS.1770-4) ──────────────────────────────
+
+    @staticmethod
+    def _compute_lufs(pcm: np.ndarray, sample_rate: int) -> float:
+        """Integrated LUFS with per-channel K-weighting and dual gating (ITU-R BS.1770-4)."""
+        powers = SignalAnalyzer._loudness_timeseries(pcm, sample_rate)
+        if len(powers) == 0:
+            return -120.0
 
         # Absolute gate: -70 LUFS
         abs_thresh = 10 ** (-7.0)
-        gated_power = [p for p in block_power if p > abs_thresh]
+        gated_power = [p for p in powers if p > abs_thresh]
 
         if not gated_power:
             return -120.0
@@ -272,7 +244,7 @@ class SignalAnalyzer:
             rel_gated = gated_power
 
         integrated_power = float(np.mean(rel_gated))
-        return float(10.0 * math.log10(max(integrated_power, 1e-13))) + _LUFS_CALIBRATION
+        return SignalAnalyzer._block_power_to_lufs(integrated_power)
 
     @staticmethod
     def _biquad_hp(x: np.ndarray, fc: float, sample_rate: int) -> np.ndarray:

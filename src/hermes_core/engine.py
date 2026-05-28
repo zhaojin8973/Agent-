@@ -14,6 +14,12 @@ from hermes_core.fx import FxManager
 from hermes_core.send import SendManager
 from hermes_core.render import RenderManager
 from hermes_core.signal import SignalAnalyzer
+from hermes_core.loudness_optimizer import (
+    find_optimal_gain,
+    verify_output,
+    load_calibration,
+    generate_report,
+)
 
 log = logging.getLogger(__name__)
 
@@ -32,7 +38,7 @@ _CLIP_GAIN_REF_DB: float = -18.0
 
 # Default master output RMS target (dBFS).
 # Tune after listening — pop/rock often sits at -12..-10, classical at -18..-14.
-_DEFAULT_TARGET_RMS_DB: float = -12.0
+_DEFAULT_TARGET_LUFS: float = -12.0
 
 # Pro-L 2 calibrated VST parameter ranges (verified 2026-05-28 via REAPER GUI).
 # Gain: normalized 0.0 = 0 dB, 1.0 = +30 dB (boost only).
@@ -41,15 +47,16 @@ _DEFAULT_TARGET_RMS_DB: float = -12.0
 _PRO_L2_RANGE_DB: float = 30.0
 
 
-def _master_error(target_rms_db: float, ceiling_db: float, error: str) -> dict:
+def _master_error(target_lufs: float, ceiling_db: float, error: str) -> dict:
     """Build a finalize_master error result dict."""
     return {
-        "target_rms_db": target_rms_db,
-        "achieved_rms_db": None,
-        "measured_rms_db": None,
+        "target_lufs": target_lufs,
+        "achieved_lufs": None,
+        "probe_lufs": None,
         "gain_db": 0.0,
         "ceiling_db": ceiling_db,
         "passed": False,
+        "converged": False,
         "error": error,
         "output_path": None,
         "pre_limiter_peak_db": None,
@@ -582,23 +589,22 @@ class MixingEngine:
 
     def finalize_master(
         self,
-        target_rms_db: float = _DEFAULT_TARGET_RMS_DB,
+        target_lufs: float = _DEFAULT_TARGET_LUFS,
         *,
         limiter_fx: str = "FabFilter Pro-L 2 (FabFilter)",
         ceiling_db: float = -0.5,
-        percentile: int = 90,
+        tolerance: float = 0.3,
         tmp_dir: str | None = None,
     ) -> dict:
-        """Two-pass master finalization via limiter gain staging.
+        """Two-pass master finalization via brickwall-limiter simulation.
 
         1. Add *limiter_fx* to master with Gain=0, Output Level=*ceiling_db*.
-        2. Probe render → measure windowed RMS at *percentile* (P90 default).
-        3. Gain = target_rms_db - measured_rms_db (dB → dB, linear).
-        4. Apply gain, render final.
+        2. Probe render → brickwall simulation + binary search → optimal Gain.
+        3. Apply gain, render final.
+        4. Verify final LUFS against target.
 
-        The percentile-based measurement uses the "loud sections" of the
-        song instead of the overall RMS, preventing over-amplification
-        on material with wide dynamic range (quiet verses, loud choruses).
+        The binary search accounts for limiter nonlinearity directly,
+        so the open-loop formula is no longer needed.
         """
         import tempfile
 
@@ -610,7 +616,7 @@ class MixingEngine:
         fx_idx = self._fx.add_master(limiter_fx)
         if fx_idx < 0:
             return _master_error(
-                target_rms_db, ceiling_db,
+                target_lufs, ceiling_db,
                 f"Failed to add {limiter_fx} to master",
             )
 
@@ -620,70 +626,72 @@ class MixingEngine:
         ceiling_norm = max(0.0, min(1.0, (ceiling_db + _PRO_L2_RANGE_DB) / _PRO_L2_RANGE_DB))
         if not self._fx.set_param(-1, fx_idx, "Output Level", ceiling_norm):
             return _master_error(
-                target_rms_db, ceiling_db,
+                target_lufs, ceiling_db,
                 "Pro-L 2 Output Level param not found — may need calibration",
             )
         if not self._fx.set_param(-1, fx_idx, "Gain", 0.0):
             return _master_error(
-                target_rms_db, ceiling_db,
+                target_lufs, ceiling_db,
                 "Pro-L 2 Gain param not found — may need calibration",
             )
 
         # 2. Probe render
         probe_result = self.render_mix(probe_dir, verify=True)
         probe_sc = probe_result.get("signal_check", {})
+        pre_peak = probe_sc.get("peak_db", 0.0)
         if probe_result.get("output_path") is None:
             return _master_error(
-                target_rms_db, ceiling_db, "Probe render failed",
+                target_lufs, ceiling_db, "Probe render failed",
             )
 
+        # 3. Brickwall simulation + binary search → optimal Gain
         probe_path = probe_result.get("output_path")
-        measured_rms_db = SignalAnalyzer.segment_rms(
-            probe_path, percentile=percentile,
+        cal = load_calibration()
+        search = find_optimal_gain(
+            probe_path,
+            target_lufs=target_lufs,
+            ceiling_dbtp=ceiling_db,
+            tolerance=tolerance,
+            calibration_offset=cal,
         )
-        pre_peak = probe_sc.get("peak_db", 0.0)
-        if measured_rms_db <= -100.0:
+        if not search.converged and search.probe_lufs <= -70:
             return _master_error(
-                target_rms_db, ceiling_db, "Failed to measure RMS from probe",
+                target_lufs, ceiling_db, "Probe is near-silent",
             )
 
-        # 3. Calculate gain — dB → dB, linear
-        gain_db = target_rms_db - measured_rms_db
+        gain_db = search.gain_db
 
         # 4. Apply gain and render final.
-        # Gain range is 0..+30 dB: normalized = gain_db / 30.
-        # If gain_db < 0 (mix too hot), clamp to 0 — Gain cannot attenuate.
         gain_norm = max(0.0, min(1.0, gain_db / _PRO_L2_RANGE_DB))
         if not self._fx.set_param(-1, fx_idx, "Gain", gain_norm):
             return _master_error(
-                target_rms_db, ceiling_db,
+                target_lufs, ceiling_db,
                 "Pro-L 2 Gain param not found during final render",
             )
         final_result = self.render_mix(final_dir, verify=True)
         output_path = final_result.get("output_path")
-        final_sc = final_result.get("signal_check", {})
-        achieved_rms_db = final_sc.get("rms_db")
 
-        # Validate against the P90 of the *final* output — the loud
-        # sections should hit the target, even if the overall RMS is
-        # lower on dynamic material.
-        final_p90 = SignalAnalyzer.segment_rms(
-            output_path, percentile=percentile,
-        ) if output_path else -200.0
+        # 5. Verify
+        achieved_lufs = None
+        passed = output_path is not None
+        if output_path:
+            verify = verify_output(output_path, target_lufs=target_lufs)
+            achieved_lufs = verify.actual_lufs
+            passed = verify.passed
 
-        passed = (
-            output_path is not None
-            and achieved_rms_db is not None
-            and abs(final_p90 - target_rms_db) <= 2.0
+        log.info(
+            "Master report:\n%s",
+            generate_report(search, verify if output_path else None),
         )
 
         return {
-            "target_rms_db": target_rms_db,
-            "achieved_rms_db": achieved_rms_db,
-            "measured_rms_db": measured_rms_db,
-            "gain_db": round(gain_db, 1),
+            "target_lufs": target_lufs,
+            "achieved_lufs": achieved_lufs,
+            "probe_lufs": search.probe_lufs,
+            "gain_db": gain_db,
             "ceiling_db": ceiling_db,
             "passed": passed,
+            "converged": search.converged,
             "pre_limiter_peak_db": pre_peak,
             "output_path": output_path,
         }

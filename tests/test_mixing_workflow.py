@@ -430,7 +430,7 @@ class TestVocalMixing:
         cp3 = eng.save_checkpoint(label="before_master")
         assert "before_master" in cp3["checkpoint_path"]
 
-        eng.finalize_master(target_rms_db=-12.0)
+        eng.finalize_master(target_lufs=-12.0)
         cp4 = eng.save_checkpoint(label="final")
         assert "final" in cp4["checkpoint_path"]
 
@@ -456,7 +456,7 @@ class TestVocalMixing:
         eng.create_reverb_send(src_track=0, reverb_fx=_REVERB_PLUGIN)
 
         result = eng.finalize_master(
-            target_rms_db=-12.0, tmp_dir=str(tmp_path),
+            target_lufs=-12.0, tmp_dir=str(tmp_path),
         )
         assert result["pre_limiter_peak_db"] <= 0, (
             f"Pre-limiter peak {result['pre_limiter_peak_db']} — mix clips before limiter"
@@ -464,10 +464,8 @@ class TestVocalMixing:
         assert result["passed"] is True, (
             f"finalize_master did not pass: {result}"
         )
-        # P90-based gain targets the loud sections, so overall RMS
-        # may be lower on dynamic material. The passed flag already
-        # validates that the final P90 RMS is within tolerance.
-        assert result["measured_rms_db"] is not None
+        assert result["converged"] is True
+        assert result["probe_lufs"] is not None
         assert result["gain_db"] >= 0
         assert result["output_path"] is not None
 
@@ -544,13 +542,14 @@ class TestVocalMixing:
 
         # 6. Master finalization
         master = eng.finalize_master(
-            target_rms_db=-12.0, tmp_dir=str(tmp_path),
+            target_lufs=-12.0, tmp_dir=str(tmp_path),
         )
         assert master["passed"] is True, (
             f"finalize_master failed: {master}"
         )
         assert master["pre_limiter_peak_db"] <= 0
-        assert master["measured_rms_db"] is not None
+        assert master["converged"] is True
+        assert master["probe_lufs"] is not None
         assert master["gain_db"] >= 0
 
         # 7. Audit

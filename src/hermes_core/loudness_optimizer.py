@@ -1,0 +1,258 @@
+"""
+Mastering loudness optimizer — V2.
+
+Uses a brickwall-limiter simulation + binary search to find the optimal
+Pro-L 2 Gain that produces a target integrated LUFS.  The simulation
+accounts for the limiter's nonlinear behaviour so the open-loop formula
+``gain = target - probe`` is no longer needed.
+"""
+
+import json
+import logging
+import math
+from dataclasses import dataclass, asdict
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+import pyloudnorm as pyln
+
+from hermes_core.signal import SignalAnalyzer
+
+log = logging.getLogger(__name__)
+
+_CALIBRATION_FILE = "loudness_calibration.json"
+
+
+# ── data structures ──────────────────────────────────────────
+
+@dataclass
+class LoudnessResult:
+    """Optimal-gain search result."""
+    gain_db: float
+    predicted_lufs: float
+    probe_lufs: float
+    iterations: int
+    converged: bool
+    calibration_applied: float
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class VerifyResult:
+    """Verification of the final render against the LUFS target."""
+    actual_lufs: float
+    target_lufs: float
+    deviation: float
+    passed: bool
+    needs_correction: bool
+    suggested_correction: float
+
+
+# ── brickwall limiter simulation ──────────────────────────────
+
+def _brickwall_limit(
+    audio: np.ndarray,
+    gain_db: float,
+    ceiling_db: float = -0.5,
+) -> np.ndarray:
+    """Apply gain then hard-clip at *ceiling_db*.
+
+    This is the simplest possible limiter model.  Compared to Pro-L 2
+    it lacks lookahead and smooth release, so the waveform differs, but
+    the **integrated LUFS** difference is small (0.3-0.8 LUFS) and
+    systematic — a one-time calibration offset compensates for it.
+    """
+    gain_linear = 10.0 ** (gain_db / 20.0)
+    ceiling_linear = 10.0 ** (ceiling_db / 20.0)
+    limited = np.clip(audio * gain_linear, -ceiling_linear, ceiling_linear)
+    return limited
+
+
+# ── core search engine ────────────────────────────────────────
+
+def find_optimal_gain(
+    probe_path: str,
+    target_lufs: float = -12.0,
+    ceiling_dbtp: float = -0.5,
+    tolerance: float = 0.3,
+    gain_range: tuple[float, float] = (-6.0, 24.0),
+    max_iterations: int = 25,
+    calibration_offset: float = 0.0,
+) -> LoudnessResult:
+    """Binary-search the Gain that makes the brickwall-limited output
+    hit *target_lufs*.
+
+    The function ``f(gain) = LUFS(brickwall( audio × 10^(gain/20) ))``
+    is monotonic, so binary search finds the root in ~log₂(range) steps.
+    """
+    # ── read probe WAV ──
+    pcm, sr = SignalAnalyzer._read_pcm(probe_path)
+    if pcm.size == 0:
+        return LoudnessResult(0.0, -120.0, -120.0, 0, False, 0.0)
+
+    # pyloudnorm expects (samples, channels); _read_pcm returns float64
+    meter = pyln.Meter(sr)
+    probe_lufs = meter.integrated_loudness(pcm)
+    log.info("Probe LUFS (Gain=0): %.1f", probe_lufs)
+
+    if math.isinf(probe_lufs) or probe_lufs < -70:
+        log.warning("Probe is near-silent (LUFS=%.1f) — cannot compute gain", probe_lufs)
+        return LoudnessResult(0.0, probe_lufs, probe_lufs, 0, False, 0.0)
+
+    # ── binary search ──
+    lo, hi = gain_range
+    measured_lufs = probe_lufs
+    iterations = 0
+
+    for i in range(max_iterations):
+        mid = (lo + hi) / 2.0
+        iterations = i + 1
+
+        limited = _brickwall_limit(pcm, mid, ceiling_dbtp)
+        measured_lufs = meter.integrated_loudness(limited)
+
+        log.debug("  iter %d: gain=%+.2f dB → LUFS=%.1f", iterations, mid, measured_lufs)
+
+        if abs(measured_lufs - target_lufs) < tolerance:
+            break
+
+        if measured_lufs < target_lufs:
+            lo = mid
+        else:
+            hi = mid
+
+    final_gain = round((lo + hi) / 2.0 + calibration_offset, 2)
+    converged = abs(measured_lufs - target_lufs) < tolerance
+
+    result = LoudnessResult(
+        gain_db=final_gain,
+        predicted_lufs=float(round(measured_lufs, 1)),
+        probe_lufs=float(round(probe_lufs, 1)),
+        iterations=iterations,
+        converged=bool(converged),
+        calibration_applied=calibration_offset,
+    )
+
+    log.info(
+        "Search done: gain=%+.2f dB, predicted=%.1f LUFS, "
+        "converged=%s, iters=%d",
+        result.gain_db, result.predicted_lufs, result.converged, result.iterations,
+    )
+    return result
+
+
+# ── verification ──────────────────────────────────────────────
+
+def verify_output(
+    final_path: str,
+    target_lufs: float = -12.0,
+    pass_threshold: float = 1.0,
+    damping: float = 0.8,
+) -> VerifyResult:
+    """Check whether the final render hit the LUFS target."""
+    pcm, sr = SignalAnalyzer._read_pcm(final_path)
+    meter = pyln.Meter(sr)
+    actual_lufs = meter.integrated_loudness(pcm)
+
+    deviation = float(actual_lufs - target_lufs)
+    passed = bool(abs(deviation) < pass_threshold)
+    correction = -deviation * damping if not passed else 0.0
+
+    return VerifyResult(
+        actual_lufs=round(actual_lufs, 1),
+        target_lufs=target_lufs,
+        deviation=round(deviation, 2),
+        passed=passed,
+        needs_correction=not passed,
+        suggested_correction=round(correction, 2),
+    )
+
+
+# ── calibration ───────────────────────────────────────────────
+
+def run_calibration(
+    probe_path: str,
+    final_path: str,
+    applied_gain: float,
+    ceiling_dbtp: float = -0.5,
+) -> float:
+    """Measure the systematic offset between brickwall simulation and Pro-L 2.
+
+    Run once after changing limiter style/settings.  The offset is saved
+    to disk and loaded automatically by ``load_calibration()``.
+    """
+    pcm, sr = SignalAnalyzer._read_pcm(probe_path)
+    meter = pyln.Meter(sr)
+
+    sim_lufs = meter.integrated_loudness(_brickwall_limit(pcm, applied_gain, ceiling_dbtp))
+
+    final_pcm, _ = SignalAnalyzer._read_pcm(final_path)
+    actual_lufs = meter.integrated_loudness(final_pcm)
+
+    offset_lufs = actual_lufs - sim_lufs
+    calibration_offset = -offset_lufs
+
+    cal_data = {
+        "calibration_offset_db": round(calibration_offset, 3),
+        "sim_lufs": round(sim_lufs, 2),
+        "actual_lufs": round(actual_lufs, 2),
+        "offset_lufs": round(offset_lufs, 2),
+        "applied_gain_db": applied_gain,
+    }
+
+    Path(_CALIBRATION_FILE).write_text(
+        json.dumps(cal_data, indent=2, ensure_ascii=False),
+    )
+    log.info(
+        "Calibration: sim=%.1f, actual=%.1f, offset=%+.2f LUFS, "
+        "gain_correction=%+.3f dB → saved to %s",
+        sim_lufs, actual_lufs, offset_lufs, calibration_offset, _CALIBRATION_FILE,
+    )
+    return calibration_offset
+
+
+def load_calibration() -> float:
+    """Return the saved calibration offset, or 0.0 if none exists."""
+    path = Path(_CALIBRATION_FILE)
+    if not path.exists():
+        return 0.0
+    data = json.loads(path.read_text())
+    return data.get("calibration_offset_db", 0.0)
+
+
+# ── report ────────────────────────────────────────────────────
+
+def generate_report(
+    result: LoudnessResult,
+    verify: Optional[VerifyResult] = None,
+) -> str:
+    """Human-readable mastering loudness report."""
+    lines = [
+        "═" * 50,
+        "  Mastering Loudness Report",
+        "═" * 50,
+        f"  Probe LUFS       : {result.probe_lufs} LUFS",
+        f"  Target LUFS      : -12.0 LUFS",
+        f"  ─" * 25,
+        f"  Optimal Gain     : {result.gain_db:+.2f} dB",
+        f"  Predicted LUFS   : {result.predicted_lufs} LUFS",
+        f"  Search iters     : {result.iterations}",
+        f"  Converged        : {'Yes' if result.converged else 'No'}",
+        f"  Calibration      : {result.calibration_applied:+.3f} dB",
+    ]
+    if verify:
+        lines += [
+            f"  ─" * 25,
+            f"  Actual LUFS      : {verify.actual_lufs} LUFS",
+            f"  Deviation        : {verify.deviation:+.2f} LUFS",
+            f"  Status           : {'PASS' if verify.passed else 'NEEDS CORRECTION'}",
+        ]
+        if verify.needs_correction:
+            lines.append(
+                f"  Suggested fix    : {verify.suggested_correction:+.2f} dB",
+            )
+    lines.append("═" * 50)
+    return "\n".join(lines)
