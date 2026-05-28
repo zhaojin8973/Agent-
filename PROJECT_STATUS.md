@@ -10,8 +10,8 @@ metadata:
 # Hermes-Core 项目阶段性报告
 
 **更新日期**: 2026-05-28
-**版本**: 0.2.0
-**最新提交**: (待提交)
+**版本**: 0.2.1
+**最新提交**: 9401722
 
 ---
 
@@ -118,7 +118,6 @@ hermes-core 是 REAPER DAW 的精益三层 Python 自动化引擎，目标是非
 | `apply_gain(target="master_fader")` | engine.py | NotImplementedError |
 | `check_headroom()` 有效实现 | engine.py | 返回 "unavailable_without_render" 存根 |
 | DialogKiller 跨平台 | bridge.py | 仅 macOS AppleScript |
-| Pro-L 2 参数映射 ARM64 校准 | fx.py | 硬编码 param 0=Gain, param 1=Ceiling |
 
 ---
 
@@ -176,7 +175,7 @@ prepare_stems (clip gain -18dBFS RMS + 曲风推子)
 |---|---|
 | 人声 | FabFilter Pro-Q 3 → Waves RVox |
 | 混响发送 | ValhallaVintageVerb (post-fader) |
-| Master | FabFilter Pro-L 2 (Ceiling=-0.5 dBTP) |
+| Master | FabFilter Pro-L 2 (Gain=动态, Output Level=-0.5 dB) |
 
 ### 默认参考值
 
@@ -193,8 +192,8 @@ prepare_stems (clip gain -18dBFS RMS + 曲风推子)
 
 1. **REAPER Python 兼容性**：Python 3.14 不兼容 REAPER 7.73，必须使用 3.13
 2. **DialogKiller 仅 macOS**：依赖 AppleScript，不支持 Windows/Linux
-3. **Pro-L 2 参数映射**：ARM64 reapy 无法动态发现参数名，硬编码 param index
-4. **ARM64 DeleteTrack API 不可靠**：改用 `reapy.Track.delete()` 高层 API
+3. **target_rms_db 默认值**（-12 dBFS）和曲风表参数需要听感验证
+4. **ARM64 REAPER API 元组问题**：`TrackFX_GetParamName`/`TrackFX_GetParam` 返回 6 元素元组，需安全解包。已在 fx.py 中统一处理。
 
 ---
 
@@ -203,8 +202,8 @@ prepare_stems (clip gain -18dBFS RMS + 曲风推子)
 ### 优先级高
 - [ ] 实现 `apply_gain` 的 master_fader 支持
 - [ ] 实现 `check_headroom()` — 渲染后分析真峰值余量
-- [ ] Pro-L 2 参数 index 在 ARM64 上确认
-- [ ] target_rms_db 默认值可能需要根据实际监听调整
+- [ ] target_rms_db 默认值根据实际监听调整
+- [ ] 曲风表监听验证
 
 ### 优先级中
 - [ ] 各 L2 模块增加真实 REAPER 集成测试
@@ -232,5 +231,6 @@ prepare_stems (clip gain -18dBFS RMS + 曲风推子)
 
 | 日期 | 变更 |
 |---|---|
+| 2026-05-28 | Pro-L 2 参数校准：ARM64 元组安全解包 + REAPER GUI 实测归一化公式（Gain 0→+30, Output Level -30→0）。`set_param()` 返回 `-> bool`。`_master_error()` 消除重复代码。`backing_reduction_lu` 覆盖参数。全部 8 TestVocalMixing 通过。 |
 | 2026-05-28 | 贴唱混音管线：prepare_stems (clip gain + 曲风推子) + finalize_master (RMS 两趟法) + peak guard。立体声 RMS/LUFS 修正。删除 normalize 模块。8 TestVocalMixing 集成测试。238 unit + 19 integration tests。 |
 | 2026-05-27 | 工程管理模块：create_project 自动保存 + 时间戳冲突规避 + save_checkpoint 检查点 + Main_SaveProjectEx 非交互保存。305 tests, 90% cov |
