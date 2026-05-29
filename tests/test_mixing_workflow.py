@@ -169,6 +169,8 @@ class TestMixingWorkflow:
         stems = [_STEM_DIR + "/Drum Kick.wav"]
         eng.import_stems(stems)
 
+        # Explicitly set zero-length time selection to test rejection.
+        eng._render.set_time_selection(0.0, 0.0)
         result = eng.render_mix(
             str(tmp_path), bounds="time_selection", verify=False
         )
@@ -561,3 +563,78 @@ class TestVocalMixing:
         # 8. Health check
         health = eng.health_check()
         assert health["reapy_connected"] is True
+
+
+# ════════════════════════════════════════════════════════════════
+# PRODUCTION_GAPS features — integration tests
+# ════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.integration
+class TestProductionGapsFeatures:
+    """Integration tests for the PRODUCTION_GAPS safety features."""
+
+    def test_preflight_plugins_detects_installed(self):
+        """preflight_plugins returns empty list for built-in FX."""
+        require_reaper()
+        eng = MixingEngine()
+        eng._bridge.connect()
+        eng.create_project("PreflightTest", "/tmp/hermes_test")
+        missing = eng.preflight_plugins(["ReaEQ", "ReaComp"])
+        assert missing == [], f"Expected all built-in FX found, missing: {missing}"
+
+    def test_preflight_plugins_detects_missing(self):
+        """preflight_plugins returns missing plugins that don't exist."""
+        require_reaper()
+        eng = MixingEngine()
+        eng._bridge.connect()
+        eng.create_project("PreflightTest", "/tmp/hermes_test")
+        missing = eng.preflight_plugins(["DefinitelyNotARealPlugin_XYZ_123"])
+        assert len(missing) == 1
+        assert "DefinitelyNotARealPlugin_XYZ_123" in missing
+
+    def test_on_progress_callback_fires(self):
+        """on_progress receives stage callbacks during finalize_master."""
+        require_reaper()
+        eng = MixingEngine()
+        eng._bridge.connect()
+        eng.create_project("ProgressTest", "/tmp/hermes_test", sample_rate=48000)
+        eng.import_stems([_STEM_DIR + "/Drum Kick.wav"])
+
+        stages = []
+
+        def track(stage, pct):
+            stages.append(stage)
+
+        result = eng.finalize_master(target_lufs=-12.0, on_progress=track)
+        assert "setup" in stages, f"Expected 'setup' stage, got: {stages}"
+        assert "probe_render" in stages
+        assert "search" in stages
+        assert "final_render" in stages
+        assert "verify" in stages
+
+    def test_reset_allows_reuse(self):
+        """reset() clears guards so prepare_stems can be called again."""
+        require_reaper()
+        eng = MixingEngine()
+        eng._bridge.connect()
+        eng.create_project("ResetTest", "/tmp/hermes_test", sample_rate=48000)
+        eng.import_stems([_STEM_DIR + "/Drum Kick.wav"])
+
+        # First call works
+        result1 = eng.prepare_stems(
+            [_STEM_DIR + "/Drum Kick.wav"], genre="pop",
+            vocal_indices=[0],
+        )
+        assert "stems" in result1
+
+        # Second call would fail...
+        # But after reset, it should work again
+        eng.reset()
+        # Re-import and re-prepare
+        eng.import_stems([_STEM_DIR + "/Drum Kick.wav"])
+        result2 = eng.prepare_stems(
+            [_STEM_DIR + "/Drum Kick.wav"], genre="pop",
+            vocal_indices=[0],
+        )
+        assert "stems" in result2

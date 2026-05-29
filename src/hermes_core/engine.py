@@ -5,7 +5,9 @@ a single entry point for Hermes acceptance scenarios.
 
 import logging
 import os
+import time
 from datetime import datetime
+from typing import Callable
 
 from hermes_core.bridge import ReaperBridge
 from hermes_core.track import TrackManager, TrackInfo
@@ -14,6 +16,7 @@ from hermes_core.fx import FxManager
 from hermes_core.send import SendManager
 from hermes_core.render import RenderManager
 from hermes_core.signal import SignalAnalyzer
+from hermes_core.exceptions import ConnectionError as HermesConnectionError
 from hermes_core.loudness_optimizer import (
     find_optimal_gain,
     verify_output,
@@ -58,9 +61,44 @@ def _master_error(target_lufs: float, ceiling_db: float, error: str) -> dict:
         "passed": False,
         "converged": False,
         "error": error,
+        "hint": _friendly_hint(error),
         "output_path": None,
         "pre_limiter_peak_db": None,
     }
+
+
+def _friendly_hint(error: str) -> str:
+    """Return a user-friendly hint for common errors."""
+    hints = {
+        "Probe render failed":
+            "REAPER may be blocked by a modal dialog. Try watchdog=True "
+            "to auto-dismiss dialogs, or check that tracks have media items.",
+        "Probe is near-silent":
+            "The probe render produced near-silent audio. Check that "
+            "the source files are not empty and have audible content.",
+        "Pro-L 2 Output Level param not found":
+            "Pro-L 2 parameter name doesn't match. Verify the plugin is "
+            "installed and named exactly 'FabFilter Pro-L 2 (FabFilter)'. "
+            "Try running preflight_plugins() first.",
+        "Pro-L 2 Gain param not found":
+            "Pro-L 2 Gain parameter not found. Same as above — check "
+            "plugin installation and name.",
+        "Failed to add":
+            "Plugin not found in REAPER. Check the FX name matches "
+            "the REAPER FX browser exactly, including vendor suffix.",
+        "Not a WAV file":
+            "Input file is not a valid WAV. Supported formats: WAV "
+            "(16/24-bit PCM, 32-bit float), FLAC, MP3 via soundfile.",
+        "WAV data chunk not found":
+            "WAV file appears corrupted — data chunk is missing. "
+            "Try re-exporting the file from your DAW.",
+    }
+    for key, hint in hints.items():
+        if key.lower() in error.lower():
+            return hint
+    return "Check the log for details. Common issues: missing plugins, "
+    "unwritable output directory, insufficient disk space, or REAPER "
+    "modal dialogs blocking automation."
 
 
 class MixingEngine:
@@ -81,18 +119,136 @@ class MixingEngine:
         self._render = RenderManager(self._bridge)
         self._watchdog_enabled = watchdog
         self._project_path: str | None = None
+        self._snapshot_project_path: str | None = None  # from GetProjectPath at init
+        self._snapshot_project_name: str | None = None  # from GetProjectName at init
+        # Idempotency guards — prevent double-execution of destructive ops.
+        self._stems_prepared: bool = False
+        self._master_finalized: bool = False
+        self._stems_cache: list[dict] = []
 
     # ── Context manager ──────────────────────────────────
 
     def __enter__(self):
         if not self._bridge.connect():
-            raise ConnectionError("Failed to connect to REAPER bridge")
+            raise HermesConnectionError("Failed to connect to REAPER bridge")
         return self
 
     def __exit__(self, *args):
-        if self._watchdog_enabled and self._bridge._dialog_killer.is_running:
-            self._bridge._dialog_killer.stop()
+        if self._watchdog_enabled and self._bridge.dialog_killer_active:
+            self._bridge.stop_dialog_killer()
         return False
+
+    # ── Undo / state helpers ────────────────────────────────
+
+    def _undo_block(self, label: str, fn: Callable, /, *args, **kwargs):
+        """Wrap *fn* in a REAPER undo block so the user can Ctrl+Z the
+        entire operation as one atomic step.
+        """
+        api = self._bridge.api
+        try:
+            api.Undo_BeginBlock()
+            result = fn(*args, **kwargs)
+            api.Undo_EndBlock(f"Hermes: {label}", -1)
+            return result
+        except Exception:
+            try:
+                api.Undo_EndBlock(f"Hermes: {label} (failed)", 0)
+            except Exception:
+                pass
+            raise
+
+    def _ensure_project_match(self):
+        """Raise ``RuntimeError`` if REAPER's current project has changed
+        since ``create_project()`` was called (e.g. user switched tabs).
+        """
+        if not self._snapshot_project_path and not self._snapshot_project_name:
+            return
+        _, name_buf, _ = self._bridge.api.GetProjectName(0, "", 256)
+        path_buf, _ = self._bridge.api.GetProjectPath("", 256)
+        current_name = (name_buf or "").strip()
+        current_path = (path_buf or "").strip()
+
+        name_changed = (
+            self._snapshot_project_name and current_name
+            and current_name != self._snapshot_project_name
+        )
+        path_changed = (
+            self._snapshot_project_path and current_path
+            and current_path != self._snapshot_project_path
+        )
+
+        if name_changed or path_changed:
+            raise RuntimeError(
+                f"Project mismatch: expected '{self._snapshot_project_name}'"
+                f" at '{self._snapshot_project_path}', "
+                f"REAPER now has '{current_name}' at '{current_path}'. "
+                f"Call create_project() or re-open the expected project."
+            )
+
+    def reset(self):
+        """Clear idempotency guards so the engine can be re-used for a new mix."""
+        self._stems_prepared = False
+        self._master_finalized = False
+        self._stems_cache.clear()
+
+    def preflight_plugins(self, fx_names: list[str]) -> list[str]:
+        """Check which of *fx_names* are available in REAPER.  Returns the
+        list of **missing** plugin names (empty = all present).
+        """
+        missing: list[str] = []
+        for name in fx_names:
+            # Try adding to master then immediately removing.  We must
+            # instantiate (default True) so REAPER actually resolves the
+            # plugin, then clean up to leave no side effects.
+            idx = self._fx.add_master(name)
+            if idx < 0:
+                missing.append(name)
+            else:
+                # Clean up the probe FX — don't leave it on master.
+                try:
+                    master = self._bridge.api.GetMasterTrack(0)
+                    if master:
+                        self._bridge.api.TrackFX_Delete(master, idx)
+                except Exception:
+                    pass
+        return missing
+
+    def apply_profile(self, profile, /, *, vocal_track: int = 0,
+                      backing_tracks: list[int] | None = None):
+        """Apply a :class:`MixingProfile` — add all FX chains and sends.
+
+        This adds plugins to the vocal track(s), creates a reverb bus,
+        and configures the master limiter name for later use in
+        :meth:`finalize_master`.
+        """
+        from hermes_core.profiles import MixingProfile
+        if not isinstance(profile, MixingProfile):
+            raise TypeError(f"Expected MixingProfile, got {type(profile).__name__}")
+
+        self._profile = profile
+
+        # Vocal chain
+        for fx in profile.vocal_chain:
+            idx = self._fx.add(vocal_track, fx.name)
+            for pname, pval in fx.params.items():
+                self._fx.set_param(vocal_track, idx, pname, pval)
+            log.info("Added %s to vocal track %d", fx.name, vocal_track)
+
+        # Backing chain (optional)
+        if backing_tracks and profile.backing_chain:
+            for bt in backing_tracks:
+                for fx in profile.backing_chain:
+                    idx = self._fx.add(bt, fx.name)
+                    for pname, pval in fx.params.items():
+                        self._fx.set_param(bt, idx, pname, pval)
+
+        # Reverb bus
+        if profile.bus_reverb:
+            self.create_reverb_send(
+                vocal_track,
+                level_db=profile.reverb_level_db,
+                reverb_fx=profile.bus_reverb.name,
+            )
 
     # ── Scene 1: Connection & health ─────────────────────
 
@@ -106,7 +262,7 @@ class MixingEngine:
                 "action_taken": e.action_taken,
                 "timestamp": e.timestamp,
             }
-            for e in self._bridge._dialog_killer.get_recent_events()[-20:]
+            for e in self._bridge.get_recent_dialog_events()[-20:]
         ]
         return result
 
@@ -169,6 +325,14 @@ class MixingEngine:
 
         api.Main_SaveProjectEx(0, safe_path, 0)
         self._project_path = safe_path
+        # Snapshot REAPER's view of the project — later operations verify
+        # the user has not manually switched to a different project.
+        _, name_buf, _ = api.GetProjectName(0, "", 256)
+        self._snapshot_project_name = name_buf or ""
+        path_buf, _ = api.GetProjectPath("", 256)
+        self._snapshot_project_path = path_buf or ""
+        # Fresh project — clear all idempotency guards.
+        self.reset()
 
         return {
             "name": name,
@@ -304,7 +468,41 @@ class MixingEngine:
         When *backing_reduction_lu* is given it bypasses the genre table
         and uses that exact LU value. Useful for tuning without editing
         ``_GENRE_BACKING_REDUCTION``.
+
+        This method is **idempotent** — calling it twice on the same
+        engine instance raises ``RuntimeError``.  Call :meth:`reset` to
+        clear the guard for a fresh mix.
         """
+        if self._stems_prepared:
+            raise RuntimeError(
+                "Stems already prepared. Call reset() to start a new mix, "
+                "or create a new project with create_project()."
+            )
+        self._ensure_project_match()
+
+        def _do_prepare():
+            return self._prepare_stems_impl(
+                stem_paths, genre=genre, vocal_indices=vocal_indices,
+                backing_indices=backing_indices,
+                vocal_to_backing_lu=vocal_to_backing_lu,
+                backing_reduction_lu=backing_reduction_lu,
+            )
+
+        result = self._undo_block("Prepare Stems", _do_prepare)
+        self._stems_prepared = True
+        self._stems_cache = result.get("stems", [])
+        return result
+
+    def _prepare_stems_impl(
+        self,
+        stem_paths: list[str],
+        *,
+        genre: str = "pop",
+        vocal_indices: list[int] | None = None,
+        backing_indices: list[int] | None = None,
+        vocal_to_backing_lu: float = 4.0,
+        backing_reduction_lu: float | None = None,
+    ) -> dict:
         # 1. Import stems
         imported = self.import_stems(stem_paths)
 
@@ -352,7 +550,7 @@ class MixingEngine:
                 if raw_peak_db is not None and clip_gain_db > 0:
                     headroom = -raw_peak_db
                     if clip_gain_db > headroom:
-                        log.info(
+                        log.debug(
                             "Clip gain %.1f dB capped to %.1f dB — "
                             "peak %.1f dBFS leaves no headroom",
                             clip_gain_db, headroom, raw_peak_db,
@@ -428,7 +626,7 @@ class MixingEngine:
 
     @staticmethod
     def _classify_role(idx: int, vocal_indices: list[int],
-                       backing_indices: list[int]) -> str:
+                       backing_indices: list[int]) -> str:  # noqa: D401
         if idx in vocal_indices:
             return "vocal"
         if idx in backing_indices:
@@ -595,6 +793,7 @@ class MixingEngine:
         ceiling_db: float = -0.5,
         tolerance: float = 0.3,
         tmp_dir: str | None = None,
+        on_progress: Callable[[str, float], None] | None = None,
     ) -> dict:
         """Two-pass master finalization via brickwall-limiter simulation.
 
@@ -605,9 +804,50 @@ class MixingEngine:
 
         The binary search accounts for limiter nonlinearity directly,
         so the open-loop formula is no longer needed.
+
+        This method is **idempotent** — calling it twice on the same
+        engine instance raises ``RuntimeError``.  Call :meth:`reset` to
+        clear the guard for a fresh mix.
+
+        *on_progress* is an optional callback ``(stage: str, pct: float)``
+        called at each phase for progress reporting.
         """
+        if self._master_finalized:
+            raise RuntimeError(
+                "Master already finalized. Call reset() to start a new mix, "
+                "or create a new project with create_project()."
+            )
+        self._ensure_project_match()
+
+        def _do_finalize():
+            return self._finalize_master_impl(
+                target_lufs, limiter_fx=limiter_fx, ceiling_db=ceiling_db,
+                tolerance=tolerance, tmp_dir=tmp_dir,
+                on_progress=on_progress,
+            )
+
+        result = self._undo_block("Finalize Master", _do_finalize)
+        if result.get("passed"):
+            self._master_finalized = True
+        return result
+
+    def _finalize_master_impl(
+        self,
+        target_lufs: float = _DEFAULT_TARGET_LUFS,
+        *,
+        limiter_fx: str = "FabFilter Pro-L 2 (FabFilter)",
+        ceiling_db: float = -0.5,
+        tolerance: float = 0.3,
+        tmp_dir: str | None = None,
+        on_progress: Callable[[str, float], None] | None = None,
+    ) -> dict:
+        def _progress(stage: str, pct: float):
+            if on_progress:
+                on_progress(stage, pct)
+
         import tempfile
 
+        _progress("setup", 0.0)
         tmp = tmp_dir or tempfile.mkdtemp(prefix="hermes_master_")
         probe_dir = os.path.join(tmp, "probe")
         final_dir = os.path.join(tmp, "final")
@@ -636,6 +876,7 @@ class MixingEngine:
             )
 
         # 2. Probe render
+        _progress("probe_render", 0.15)
         probe_result = self.render_mix(probe_dir, verify=True)
         probe_sc = probe_result.get("signal_check", {})
         pre_peak = probe_sc.get("peak_db", 0.0)
@@ -644,7 +885,8 @@ class MixingEngine:
                 target_lufs, ceiling_db, "Probe render failed",
             )
 
-        # 3. Brickwall simulation + binary search → optimal Gain
+        # 3. Hard-clip model + binary search → optimal Gain
+        _progress("search", 0.35)
         probe_path = probe_result.get("output_path")
         cal = load_calibration()
         search = find_optimal_gain(
@@ -662,6 +904,7 @@ class MixingEngine:
         gain_db = search.gain_db
 
         # 4. Apply gain and render final.
+        _progress("final_render", 0.65)
         gain_norm = max(0.0, min(1.0, gain_db / _PRO_L2_RANGE_DB))
         if not self._fx.set_param(-1, fx_idx, "Gain", gain_norm):
             return _master_error(
@@ -672,6 +915,7 @@ class MixingEngine:
         output_path = final_result.get("output_path")
 
         # 5. Verify
+        _progress("verify", 0.90)
         achieved_lufs = None
         passed = output_path is not None
         if output_path:

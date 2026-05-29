@@ -1,10 +1,11 @@
 """
 Mastering loudness optimizer — V2.
 
-Uses a brickwall-limiter simulation + binary search to find the optimal
-Pro-L 2 Gain that produces a target integrated LUFS.  The simulation
+Uses a hard-clip limiter model + binary search to find the optimal
+Pro-L 2 Gain that produces a target integrated LUFS.  The model
 accounts for the limiter's nonlinear behaviour so the open-loop formula
-``gain = target - probe`` is no longer needed.
+``gain = target - probe`` is no longer needed.  A one-time calibration
+compensates for the systematic offset between hard-clip and Pro-L 2.
 """
 
 import json
@@ -51,19 +52,20 @@ class VerifyResult:
     suggested_correction: float
 
 
-# ── brickwall limiter simulation ──────────────────────────────
+# ── hard-clip limiter model ─────────────────────────────────────
 
-def _brickwall_limit(
+def _hard_clip(
     audio: np.ndarray,
     gain_db: float,
     ceiling_db: float = -0.5,
 ) -> np.ndarray:
-    """Apply gain then hard-clip at *ceiling_db*.
+    """Apply gain then hard-clip at *ceiling_db* via ``np.clip``.
 
-    This is the simplest possible limiter model.  Compared to Pro-L 2
-    it lacks lookahead and smooth release, so the waveform differs, but
-    the **integrated LUFS** difference is small (0.3-0.8 LUFS) and
-    systematic — a one-time calibration offset compensates for it.
+    This is the simplest possible limiter model — it is NOT a brickwall
+    limiter.  Compared to Pro-L 2 it lacks lookahead and smooth release,
+    so the waveform differs, but the **integrated LUFS** difference is
+    small (0.3-0.8 LUFS) and systematic — a one-time calibration offset
+    compensates for it.
     """
     gain_linear = 10.0 ** (gain_db / 20.0)
     ceiling_linear = 10.0 ** (ceiling_db / 20.0)
@@ -111,7 +113,7 @@ def find_optimal_gain(
         mid = (lo + hi) / 2.0
         iterations = i + 1
 
-        limited = _brickwall_limit(pcm, mid, ceiling_dbtp)
+        limited = _hard_clip(pcm, mid, ceiling_dbtp)
         measured_lufs = meter.integrated_loudness(limited)
 
         log.debug("  iter %d: gain=%+.2f dB → LUFS=%.1f", iterations, mid, measured_lufs)
@@ -187,7 +189,7 @@ def run_calibration(
     pcm, sr = SignalAnalyzer._read_pcm(probe_path)
     meter = pyln.Meter(sr)
 
-    sim_lufs = meter.integrated_loudness(_brickwall_limit(pcm, applied_gain, ceiling_dbtp))
+    sim_lufs = meter.integrated_loudness(_hard_clip(pcm, applied_gain, ceiling_dbtp))
 
     final_pcm, _ = SignalAnalyzer._read_pcm(final_path)
     actual_lufs = meter.integrated_loudness(final_pcm)

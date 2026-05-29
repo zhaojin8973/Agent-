@@ -6,31 +6,27 @@ Depends only on bridge.py. No ReaEQ-specific methods. No hardcoded band indices.
 import logging
 from typing import Union
 
-from hermes_core.bridge import ReaperBridge
+from hermes_core.bridge import ReaperBridge, _extract_reaper_string
 
 log = logging.getLogger(__name__)
 
 
-def _extract_string(result) -> str:
-    """Extract a string from REAPER API return variants."""
-    if isinstance(result, str):
-        return result
-    if isinstance(result, bytes):
-        return result.decode("utf-8", errors="replace")
-    if isinstance(result, (tuple, list)):
-        for value in reversed(result):
-            if isinstance(value, str) and value.strip():
-                return value
-            if isinstance(value, bytes) and value.strip():
-                return value.decode("utf-8", errors="replace")
-    return ""
+def _resolve_param_index(api, track_ptr, fx_index: int, param,
+                        cache: dict[str, int] | None = None) -> int:
+    """Resolve a param name or int to a param index. Returns -1 if not found.
 
-
-def _resolve_param_index(api, track_ptr, fx_index: int, param) -> int:
-    """Resolve a param name or int to a param index. Returns -1 if not found."""
+    When *cache* is provided (a dict keyed by lower-case param name) the
+    lookup is served from cache on cache hits, and the cache is populated
+    on misses after a full scan.
+    """
     if isinstance(param, int):
         return param
     name_lower = param.lower()
+
+    # Cache hit — avoid scanning all parameters
+    if cache is not None and name_lower in cache:
+        return cache[name_lower]
+
     n = api.TrackFX_GetNumParams(track_ptr, fx_index)
     for i in range(n):
         raw = api.TrackFX_GetParamName(
@@ -41,7 +37,10 @@ def _resolve_param_index(api, track_ptr, fx_index: int, param) -> int:
             name_buf = raw[4] if len(raw) > 4 else ""
         else:
             ok, name_buf = True, raw
-        if ok and _extract_string(name_buf).lower() == name_lower:
+        resolved = _extract_reaper_string(name_buf) if ok else ""
+        if cache is not None and resolved:
+            cache[resolved.lower()] = i
+        if resolved.lower() == name_lower:
             return i
     return -1
 
@@ -56,6 +55,7 @@ class FxManager:
     def __init__(self, bridge: ReaperBridge):
         self._bridge = bridge
         self._project = None
+        self._param_cache: dict[tuple[int, int], dict[str, int]] = {}
 
     @property
     def bridge(self):
@@ -149,6 +149,9 @@ class FxManager:
         if idx < 0 or n_after <= n_before:
             return -1
 
+        # Invalidate param cache — FX chain indices shifted.
+        self._param_cache.pop((track_index, idx), None)
+
         # ── Defensive check: did the FX *really* load? ──────────
         if self._fx_exists_at_index(track_index, idx):
             return idx
@@ -181,6 +184,7 @@ class FxManager:
         n_after = self._bridge.api.TrackFX_GetCount(track)
         if idx < 0 or n_after <= n_before:
             return -1
+        self._param_cache.pop((-1, idx), None)
         return idx
 
     def remove(self, track_index: int, fx_index: int):
@@ -192,6 +196,7 @@ class FxManager:
         if fx_index < 0 or fx_index >= n:
             return
         self._bridge.api.TrackFX_Delete(track, fx_index)
+        self._param_cache.pop((track_index, fx_index), None)
 
     def get_chain(self, track_index: int) -> list[dict]:
         """Return [{index, name, enabled, param_count}, ...] for all FX."""
@@ -230,8 +235,12 @@ class FxManager:
             track = self._get_track_ptr(-1)
             if track is None:
                 return False
+            cache_key = (-1, fx_index)
+            if cache_key not in self._param_cache:
+                self._param_cache[cache_key] = {}
             param_idx = _resolve_param_index(
-                self._bridge.api, track, fx_index, param
+                self._bridge.api, track, fx_index, param,
+                cache=self._param_cache[cache_key],
             )
             if param_idx < 0:
                 return False
@@ -303,7 +312,7 @@ class FxManager:
                 name_buf = raw_gpn[4] if len(raw_gpn) > 4 else ""
             else:
                 ok, name_buf = True, raw_gpn
-            name = _extract_string(name_buf) if ok else f"param_{i}"
+            name = _extract_reaper_string(name_buf) if ok else f"param_{i}"
 
             raw_gp = self._bridge.api.TrackFX_GetParam(track, fx_index, i, 0.0, 0.0)
             if isinstance(raw_gp, (tuple, list)):

@@ -7,10 +7,31 @@ import base64
 import logging
 import os
 import time
+from enum import IntEnum
 
 from hermes_core.bridge import ReaperBridge
 
 log = logging.getLogger(__name__)
+
+# REAPER Main_OnCommand action ID for the non-modal render dialog.
+_REAPER_RENDER_ACTION = 42230
+
+
+class RenderFormat(IntEnum):
+    """REAPER render output formats (sink codes)."""
+    WAV = 0
+    FLAC = 1
+    MP3 = 2
+
+    @classmethod
+    def _missing_(cls, value):
+        """Accept string lookups like ``RenderFormat("wav")``."""
+        if isinstance(value, str):
+            key = value.upper()
+            if key in cls.__members__:
+                return cls.__members__[key]
+        return None
+
 
 _VALID_BOUNDS = ("entire_project", "time_selection")
 _VALID_FORMATS = ("wav", "flac", "mp3")
@@ -57,6 +78,24 @@ class RenderManager:
         except OSError:
             return False
 
+    @staticmethod
+    def _check_disk_space(output_dir: str, required_mb: float = 500.0) -> dict:
+        """Check that *output_dir* has at least *required_mb* free space.
+
+        Returns ``{"ok": bool, "free_mb": float, "required_mb": float}``.
+        """
+        import shutil
+        try:
+            usage = shutil.disk_usage(output_dir)
+            free_mb = usage.free / (1024 * 1024)
+            return {
+                "ok": free_mb >= required_mb,
+                "free_mb": round(free_mb, 1),
+                "required_mb": required_mb,
+            }
+        except OSError:
+            return {"ok": False, "free_mb": 0.0, "required_mb": required_mb}
+
     def _preflight_check(self, bounds: str, fmt: str, output_dir: str) -> dict:
         """Run all render preflight checks.
 
@@ -94,6 +133,16 @@ class RenderManager:
             failures.append({
                 "reason": "output_not_writable",
                 "detail": f"Cannot write to output directory: {output_dir}",
+            })
+
+        disk = self._check_disk_space(output_dir)
+        if not disk["ok"]:
+            failures.append({
+                "reason": "insufficient_disk_space",
+                "detail": (
+                    f"Only {disk['free_mb']:.0f} MB free, "
+                    f"need at least {disk['required_mb']:.0f} MB"
+                ),
             })
 
         if failures:
@@ -147,7 +196,7 @@ class RenderManager:
             api.GetSetProjectInfo(0, "RENDER_SRATE", sample_rate, True)
 
         # Trigger non-modal render
-        api.Main_OnCommand(42230, 0)
+        api.Main_OnCommand(_REAPER_RENDER_ACTION, 0)
 
         # Poll for output file (extension varies by format)
         output_path = os.path.join(output_dir, f"render.{fmt}")
@@ -158,6 +207,44 @@ class RenderManager:
             time.sleep(0.1)
 
         return {"output_path": output_path}
+
+    def render_with_retry(
+        self,
+        output_dir: str,
+        bounds: str = "entire_project",
+        fmt: str = "wav",
+        sample_rate: int = 0,
+        timeout: float = 120.0,
+        max_retries: int = 3,
+    ) -> dict:
+        """Render with automatic retry on transient failures.
+
+        Returns the first successful result, or the last error.
+        """
+        last_error = None
+        for attempt in range(1, max_retries + 1):
+            result = self.render_mix(
+                output_dir=output_dir,
+                bounds=bounds,
+                fmt=fmt,
+                sample_rate=sample_rate,
+                timeout=timeout,
+            )
+            if result.get("output_path") is not None:
+                if attempt > 1:
+                    log.info("Render succeeded on attempt %d", attempt)
+                return result
+            last_error = result.get("error", "unknown")
+            if attempt < max_retries:
+                delay = 1.0 * (2 ** (attempt - 1))
+                log.warning(
+                    "Render attempt %d failed (%s) — retrying in %.1fs",
+                    attempt, last_error, delay,
+                )
+                time.sleep(delay)
+
+        log.error("Render failed after %d attempts: %s", max_retries, last_error)
+        return {"output_path": None, "error": last_error, "retries_exhausted": True}
 
     def set_time_selection(self, start: float, end: float):
         """Set REAPER's time selection loop range."""

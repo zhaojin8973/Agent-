@@ -5,11 +5,34 @@ Depends only on bridge.py. Does NOT import fx.py.
 
 import math
 import logging
-from typing import Optional
+from enum import IntEnum
+from typing import Optional, Union
 
 from hermes_core.bridge import ReaperBridge
 
 log = logging.getLogger(__name__)
+
+
+class SendMode(IntEnum):
+    """REAPER send modes (I_SENDMODE)."""
+    POST_FADER = 0
+    PRE_FX = 1
+    PRE_FADER = 3
+
+    @classmethod
+    def _missing_(cls, value):
+        """Accept string lookups like ``SendMode("post-fader")``."""
+        if isinstance(value, str):
+            key = value.upper().replace("-", "_")
+            if key in cls.__members__:
+                return cls.__members__[key]
+        return None
+
+
+# REAPER API category constants for track sends/receives/hardware.
+_CATEGORY_SENDS = 0      # track-to-track sends
+_CATEGORY_RECEIVES = 1   # receives
+_CATEGORY_HW_OUT = -1    # hardware outputs
 
 _MODE_VALUES = {"post-fader": 0, "pre-fx": 1, "pre-fader": 3}
 
@@ -42,78 +65,95 @@ class SendManager:
         src: int,
         dest: int,
         level_db: float = 0.0,
-        mode: str = "post-fader",
+        mode: Union[str, SendMode] = SendMode.POST_FADER,
         pan: float = 0.0,
     ) -> dict:
-        """Create a send from src to dest. Returns {category, index}."""
+        """Create a send from src to dest. Returns {category, index}.
+
+        *mode* accepts ``SendMode`` enum values or legacy strings
+        ("post-fader", "pre-fx", "pre-fader").
+        """
         src_track = self._get_track_ptr(src)
         dest_track = self._get_track_ptr(dest)
         if src_track is None or dest_track is None:
             return {"category": -1, "index": -1}
 
-        send_mode = _MODE_VALUES.get(mode, 0)
+        send_mode = SendMode(mode) if not isinstance(mode, SendMode) else mode
         level_db = min(level_db, 12.0)
         idx = self.api.CreateTrackSend(src_track, dest_track)
 
         if idx >= 0:
             vol_norm = _db_to_norm(level_db)
             self.api.SetTrackSendInfo_Value(
-                src_track, send_mode, idx, "D_VOL", vol_norm
+                src_track, _CATEGORY_SENDS, idx, "D_VOL", vol_norm
             )
             self.api.SetTrackSendInfo_Value(
-                src_track, send_mode, idx, "D_PAN", pan
+                src_track, _CATEGORY_SENDS, idx, "D_PAN", pan
             )
             self.api.SetTrackSendInfo_Value(
-                src_track, send_mode, idx, "I_SENDMODE", send_mode
+                src_track, _CATEGORY_SENDS, idx, "I_SENDMODE", int(send_mode)
             )
 
-        return {"category": send_mode, "index": idx}
+        return {"category": _CATEGORY_SENDS, "index": idx}
 
-    def remove(self, src: int, send_idx: int, mode: str = "post-fader"):
-        """Remove a send from a track."""
+    def remove(self, src: int, send_idx: int, mode: Union[str, SendMode] = SendMode.POST_FADER):
+        """Remove a send from a track.
+
+        The *mode* parameter is accepted for API compatibility but is
+        no longer used as the REAPER category — sends are always
+        removed from category 0 (track-to-track sends).
+        """
         src_track = self._get_track_ptr(src)
         if src_track is None:
             return
-        send_mode = _MODE_VALUES.get(mode, 0)
-        self.api.RemoveTrackSend(src_track, send_mode, send_idx)
+        self.api.RemoveTrackSend(src_track, _CATEGORY_SENDS, send_idx)
 
     # ── Properties ────────────────────────────────────────
 
     def set_level(
-        self, src: int, send_idx: int, level_db: float, mode: str = "post-fader"
+        self, src: int, send_idx: int, level_db: float, mode: Union[str, SendMode] = SendMode.POST_FADER
     ):
-        """Set send level in dB."""
+        """Set send level in dB.
+
+        The *mode* parameter is accepted for API compatibility;
+        send category is always 0 (track-to-track sends).
+        """
         src_track = self._get_track_ptr(src)
         if src_track is None:
             return
-        send_mode = _MODE_VALUES.get(mode, 0)
         self.api.SetTrackSendInfo_Value(
-            src_track, send_mode, send_idx, "D_VOL", _db_to_norm(level_db)
+            src_track, _CATEGORY_SENDS, send_idx, "D_VOL", _db_to_norm(level_db)
         )
 
     def set_pan(
-        self, src: int, send_idx: int, pan: float, mode: str = "post-fader"
+        self, src: int, send_idx: int, pan: float, mode: Union[str, SendMode] = SendMode.POST_FADER
     ):
-        """Set send pan (-1.0 to 1.0)."""
+        """Set send pan (-1.0 to 1.0).
+
+        The *mode* parameter is accepted for API compatibility;
+        send category is always 0 (track-to-track sends).
+        """
         pan = max(-1.0, min(1.0, pan))
         src_track = self._get_track_ptr(src)
         if src_track is None:
             return
-        send_mode = _MODE_VALUES.get(mode, 0)
         self.api.SetTrackSendInfo_Value(
-            src_track, send_mode, send_idx, "D_PAN", pan
+            src_track, _CATEGORY_SENDS, send_idx, "D_PAN", pan
         )
 
     def set_mute(
-        self, src: int, send_idx: int, mute: bool, mode: str = "post-fader"
+        self, src: int, send_idx: int, mute: bool, mode: Union[str, SendMode] = SendMode.POST_FADER
     ):
-        """Mute or unmute a send."""
+        """Mute or unmute a send.
+
+        The *mode* parameter is accepted for API compatibility;
+        send category is always 0 (track-to-track sends).
+        """
         src_track = self._get_track_ptr(src)
         if src_track is None:
             return
-        send_mode = _MODE_VALUES.get(mode, 0)
         self.api.SetTrackSendInfo_Value(
-            src_track, send_mode, send_idx, "B_MUTE", 1.0 if mute else 0.0
+            src_track, _CATEGORY_SENDS, send_idx, "B_MUTE", 1.0 if mute else 0.0
         )
 
     # ── Query ─────────────────────────────────────────────
@@ -127,7 +167,7 @@ class SendManager:
             return None
 
         if category is None:
-            for cat in (0, 3, 1):
+            for cat in (_CATEGORY_SENDS, _CATEGORY_HW_OUT):
                 try:
                     n = self.api.GetTrackNumSends(src_track, cat)
                     if send_idx < n:
@@ -169,7 +209,7 @@ class SendManager:
         if src_track is None:
             return []
         result = []
-        for category in (0, 3, 1):
+        for category in (_CATEGORY_SENDS, _CATEGORY_HW_OUT):
             try:
                 n = self.api.GetTrackNumSends(src_track, category)
             except Exception:

@@ -840,6 +840,8 @@ class TestRenderIntegration:
         self._require_reaper()
         bridge = ReaperBridge()
         bridge.connect()
+        from tests.conftest import clean_project
+        clean_project(bridge)
 
         output_dir = tmp_path / "render_empty"
         output_dir.mkdir()
@@ -864,6 +866,8 @@ class TestRenderIntegration:
         self._require_reaper()
         bridge = ReaperBridge()
         bridge.connect()
+        from tests.conftest import clean_project
+        clean_project(bridge)
 
         output_dir = tmp_path / "render_entire"
         output_dir.mkdir()
@@ -885,6 +889,8 @@ class TestRenderIntegration:
         self._require_reaper()
         bridge = ReaperBridge()
         bridge.connect()
+        from tests.conftest import clean_project
+        clean_project(bridge)
 
         output_dir = tmp_path / "render_16bit"
         output_dir.mkdir()
@@ -1194,3 +1200,60 @@ class TestPreflight:
         assert "invalid_bounds" in reasons
         assert "invalid_format" in reasons
         assert "nothing_to_render" in reasons
+
+
+@pytest.mark.unit
+class TestRenderWithRetry:
+    """render_with_retry retries on transient failures."""
+
+    def test_returns_first_success(self):
+        """Returns immediately when first render succeeds."""
+        mock_bridge, mock_api = _make_bridge()
+        manager = RenderManager(mock_bridge)
+        manager.render_mix = MagicMock(return_value={"output_path": "/tmp/ok.wav"})
+        result = manager.render_with_retry("/tmp/out", max_retries=3)
+        assert result["output_path"] == "/tmp/ok.wav"
+        assert manager.render_mix.call_count == 1
+
+    def test_retries_on_failure(self):
+        """Retries when render_mix returns no output_path."""
+        mock_bridge, mock_api = _make_bridge()
+        manager = RenderManager(mock_bridge)
+        manager.render_mix = MagicMock(side_effect=[
+            {"output_path": None, "error": "timeout"},
+            {"output_path": None, "error": "timeout"},
+            {"output_path": "/tmp/third.wav"},
+        ])
+        result = manager.render_with_retry("/tmp/out", max_retries=3)
+        assert result["output_path"] == "/tmp/third.wav"
+        assert manager.render_mix.call_count == 3
+
+    def test_exhausts_retries(self):
+        """Returns last error when all retries exhausted."""
+        mock_bridge, mock_api = _make_bridge()
+        manager = RenderManager(mock_bridge)
+        manager.render_mix = MagicMock(return_value={
+            "output_path": None, "error": "preflight_failed",
+        })
+        result = manager.render_with_retry("/tmp/out", max_retries=2)
+        assert result["output_path"] is None
+        assert result["retries_exhausted"] is True
+        assert manager.render_mix.call_count == 2
+
+
+@pytest.mark.unit
+class TestDiskSpaceCheck:
+    """_check_disk_space preflight guard."""
+
+    def test_sufficient_space(self, tmp_path):
+        """Returns ok=True when free space exceeds requirement."""
+        from hermes_core.render import RenderManager
+        result = RenderManager._check_disk_space(str(tmp_path), required_mb=1.0)
+        assert result["ok"] is True
+        assert result["free_mb"] > 0
+
+    def test_insufficient_space(self):
+        """Returns ok=False when requirement can't be met."""
+        from hermes_core.render import RenderManager
+        result = RenderManager._check_disk_space("/nonexistent_path_xyz", required_mb=1.0)
+        assert result["ok"] is False

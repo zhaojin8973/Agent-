@@ -77,13 +77,9 @@ def _gen_24bit_stereo_wav(filepath, samples, sample_rate=48000):
 
 
 def _gen_32bit_float_wav(filepath, samples, sample_rate=48000):
-    """Write a 32-bit float stereo WAV from float64 samples in [-1, 1]."""
-    f32 = samples.astype(np.float32)
-    with wave.open(str(filepath), "wb") as wf:
-        wf.setnchannels(2)
-        wf.setsampwidth(4)  # 32-bit float = 4 bytes
-        wf.setframerate(sample_rate)
-        wf.writeframes(f32.tobytes())
+    """Write a 32-bit IEEE float stereo WAV via soundfile."""
+    import soundfile as sf
+    sf.write(str(filepath), samples, sample_rate, subtype="FLOAT")
 
 
 # ══════════════════════════════════════════════════════════════

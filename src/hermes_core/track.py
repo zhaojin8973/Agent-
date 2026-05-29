@@ -20,13 +20,24 @@ log = logging.getLogger(__name__)
 
 
 def _wav_duration_fallback(file_path: str) -> float:
-    """Get duration from a WAV header when stdlib wave rejects it (e.g. float WAV)."""
+    """Get duration from a WAV header when stdlib wave rejects it (e.g. float WAV).
+
+    Raises ``ValueError`` when the file cannot be parsed so callers get a
+    clear signal instead of a silent 300-second fallback that would create
+    wrong-length media items on the timeline.
+    """
+    # Initialise to safe defaults in case the ``data`` chunk appears
+    # before the ``fmt `` chunk (WAV spec allows any chunk order).
+    channels = 1
+    sr = 44100
+    bits = 16
+
     with open(file_path, "rb") as fh:
         if fh.read(4) != b"RIFF":
-            return 300.0
+            raise ValueError(f"Not a WAV file (missing RIFF header): {file_path}")
         fh.read(4)  # file size
         if fh.read(4) != b"WAVE":
-            return 300.0
+            raise ValueError(f"Not a WAV file (missing WAVE id): {file_path}")
         while True:
             chunk_id = fh.read(4)
             if len(chunk_id) < 4:
@@ -42,7 +53,7 @@ def _wav_duration_fallback(file_path: str) -> float:
                 return nframes / max(sr, 1)
             else:
                 fh.read(chunk_size)
-    return 300.0
+    raise ValueError(f"WAV data chunk not found in: {file_path}")
 
 
 def _convert_to_pcm(file_path: str) -> str:
@@ -128,41 +139,55 @@ class TrackManager:
         if track:
             api.DeleteTrack(track)
 
+    # ── Generic property accessors ──────────────────────────
+
+    def _get_track_ptr(self, index: int):
+        """Return a raw RPR track pointer or None."""
+        if index < 0:
+            return None
+        track = self._bridge.api.GetTrack(0, index)
+        if track is None:
+            return None
+        return track
+
+    def _get_prop(self, index: int, key: str) -> float:
+        """Read a track property via ``GetMediaTrackInfo_Value``."""
+        tr = self._get_track_ptr(index)
+        if tr is None:
+            return 0.0
+        return float(self._bridge.api.GetMediaTrackInfo_Value(tr, key))
+
+    def _set_prop(self, index: int, key: str, value: float):
+        """Write a track property via ``SetMediaTrackInfo_Value``."""
+        tr = self._get_track_ptr(index)
+        if tr is not None:
+            self._bridge.api.SetMediaTrackInfo_Value(tr, key, value)
+
     # ── Properties ──────────────────────────────────────────
 
     def set_name(self, index: int, name: str):
-        track = self._bridge.api.GetTrack(0, index)
-        if track:
-            self._bridge.api.GetSetMediaTrackInfo_String(track, "P_NAME", name, True)
+        tr = self._get_track_ptr(index)
+        if tr:
+            self._bridge.api.GetSetMediaTrackInfo_String(tr, "P_NAME", name, True)
 
     def set_volume(self, index: int, db: float):
         """Set track fader volume in dB. 0dB = unity."""
-        track = self._bridge.api.GetTrack(0, index)
-        if track:
-            self._bridge.api.SetMediaTrackInfo_Value(track, "D_VOL", self._db_to_norm(db))
+        self._set_prop(index, "D_VOL", self._db_to_norm(db))
 
     def set_pan(self, index: int, pan: float):
         """Set track pan. 0=center, -1=left, 1=right."""
-        track = self._bridge.api.GetTrack(0, index)
-        if track:
-            self._bridge.api.SetMediaTrackInfo_Value(track, "D_PAN", pan)
+        self._set_prop(index, "D_PAN", pan)
 
     def set_mute(self, index: int, mute: bool):
-        track = self._bridge.api.GetTrack(0, index)
-        if track:
-            self._bridge.api.SetMediaTrackInfo_Value(track, "B_MUTE", 1.0 if mute else 0.0)
+        self._set_prop(index, "B_MUTE", 1.0 if mute else 0.0)
 
     def set_solo(self, index: int, solo: bool):
         """Set track solo state."""
-        track = self._bridge.api.GetTrack(0, index)
-        if track:
-            self._bridge.api.SetMediaTrackInfo_Value(track, "I_SOLO", 1.0 if solo else 0.0)
+        self._set_prop(index, "I_SOLO", 1.0 if solo else 0.0)
 
     def set_folder_depth(self, index: int, depth: int):
         """Set folder depth. 0=normal, 1=parent, -1=last child."""
-        track = self._bridge.api.GetTrack(0, index)
-        if track:
-            self._bridge.api.SetMediaTrackInfo_Value(track, "I_FOLDERDEPTH", depth)
+        self._set_prop(index, "I_FOLDERDEPTH", depth)
 
     # ── Query ────────────────────────────────────────────────
 
@@ -215,14 +240,16 @@ class TrackManager:
         """
         if not os.path.isfile(file_path):
             return False
+        import_path = os.path.abspath(file_path)
+        is_temp = False
         try:
             try:
                 with wave.open(file_path, "rb") as wf:
                     duration = wf.getnframes() / max(wf.getframerate(), 1)
-                import_path = os.path.abspath(file_path)
             except wave.Error:
-                # Float WAV — convert to 16-bit PCM for import
+                # Float WAV — convert to 16-bit PCM temp file for import
                 import_path = _convert_to_pcm(file_path)
+                is_temp = True
                 duration = _wav_duration_fallback(file_path)
             rpr = self._bridge.rpr
             api = rpr.reascript_api
@@ -239,6 +266,12 @@ class TrackManager:
         except Exception as e:
             log.warning("import_media failed for %s: %s", file_path, e)
             return False
+        finally:
+            if is_temp and os.path.isfile(import_path):
+                try:
+                    os.unlink(import_path)
+                except OSError:
+                    pass
 
     def import_stems(self, stem_map: dict[str, str],
                      position: float = 0.0) -> list[dict]:

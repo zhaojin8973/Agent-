@@ -1,0 +1,41 @@
+# Hermes-Core Mixing Profile: Vocal Pop
+#
+# Use with:  hermes vocal-mix --profile profiles/vocal_pop.yaml ...
+
+name: "Vocal Pop"
+description: "Standard pop vocal mix — EQ, compression, reverb, limiting"
+
+# ── gain staging ──
+clip_gain_ref_db: -18.0
+target_lufs: -12.0
+ceiling_db: -0.5
+tolerance_lufs: 0.3
+
+# ── vocal processing chain ──
+vocal_chain:
+  - name: "FabFilter Pro-Q 3 (FabFilter)"
+  - name: "Waves RVox (Waves)"
+
+# ── backing (instrumental) processing chain ──
+backing_chain: []
+
+# ── reverb bus ──
+bus_reverb:
+  name: "ValhallaVintageVerb (Valhalla DSP)"
+  params:
+    Mix: 0.25
+reverb_level_db: -8.0
+
+# ── master limiter ──
+master_limiter:
+  name: "FabFilter Pro-L 2 (FabFilter)"
+  params:
+    "Output Level": -0.5
+
+# ── genre backing reduction (LU range) ──
+genre_table:
+  folk:                   [3, 6]
+  pop:                    [6, 9]
+  chinese_folk_bel_canto: [9, 12]
+  rock:                   [6, 10]
+  ballad:                 [3, 5]

@@ -3,6 +3,7 @@ Layer 1: REAPER Bridge — reapy connection and raw API access.
 Zero UI assumption. All operations work without human interaction.
 """
 
+import atexit
 import subprocess
 import threading
 import time
@@ -160,6 +161,7 @@ class DialogKiller:
         self._interval = interval
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        self._lock = threading.Lock()
         self._killed_count = 0
         self._events: list[DialogEvent] = []
         self._max_events = max_events
@@ -206,7 +208,8 @@ class DialogKiller:
 
     def get_recent_events(self) -> list[DialogEvent]:
         """Return a copy of recent dialog events, most recent last."""
-        return list(self._events)
+        with self._lock:
+            return list(self._events)
 
     def set_rules(self, safe_patterns=None, diagnosis_patterns=None):
         """Override the built-in dialog classification patterns.
@@ -372,9 +375,10 @@ class DialogKiller:
                     timestamp=now,
                 )
 
-            self._events.append(event)
-            if len(self._events) > self._max_events:
-                self._events = self._events[-self._max_events:]
+            with self._lock:
+                self._events.append(event)
+                if len(self._events) > self._max_events:
+                    self._events = self._events[-self._max_events:]
 
             log.info(
                 "DialogKiller: %s | %s | %s",
@@ -390,41 +394,22 @@ class ReaperBridge:
     def __init__(self, dialog_killer: bool = True):
         self._api = None
         self._reapy_module = None
-        self._ui_locked = False
+        self._ui_refresh_depth = 0     # nesting-safe counter (was simple bool)
         self._dialog_killer_enabled = dialog_killer
         self._dialog_killer = DialogKiller()
+        atexit.register(self._emergency_cleanup)
 
     # ── Connection ──────────────────────────────────────────
 
-    def connect(self) -> bool:
-        """Connect to a running REAPER instance via reapy."""
-        if self._api is not None:
-            return True
-        try:
-            reapy_mod = _get_reapy()
-            reapy_mod.connect()
-            self._reapy_module = reapy_mod
-            self._api = reapy_mod.reascript_api
-            version = reapy_mod.get_reaper_version()
-            log.info("reapy connected, REAPER v%s", version)
-            # Start dialog killer daemon when enabled
-            if self._dialog_killer_enabled:
-                self._dialog_killer.start()
-                log.info("DialogKiller started")
-            return True
-        except Exception as e:
-            log.error("Failed to connect to REAPER: %s", e)
-            return False
-
     def ensure_connected(self) -> bool:
-        """Ensure we have a live connection; connect if needed."""
+        """Ensure we have a live connection; reconnect with backoff if needed."""
         if self._api is not None:
             try:
                 self._api.GetAppVersion()
                 return True
             except Exception:
                 self._api = None
-        return self.connect()
+        return self.connect() or self.reconnect(max_retries=3, base_delay=1.0)
 
     def health_check(self) -> dict:
         """Return health status of the REAPER connection."""
@@ -465,23 +450,35 @@ class ReaperBridge:
     # ── UI Suppression ──────────────────────────────────────
 
     def lock_ui(self):
-        """PreventUIRefresh(1) — call before batch operations."""
-        if not self._ui_locked and self._api is not None:
+        """PreventUIRefresh(1) — nesting-safe, call before batch operations."""
+        if self._api is not None:
             try:
                 self._api.PreventUIRefresh(1)
-                self._ui_locked = True
+                self._ui_refresh_depth += 1
             except Exception:
                 pass
 
     def unlock_ui(self):
-        """PreventUIRefresh(-1) — call after batch operations."""
-        if self._ui_locked and self._api is not None:
+        """PreventUIRefresh(-1) — nesting-safe, call after batch operations."""
+        if self._ui_refresh_depth > 0 and self._api is not None:
             try:
                 self._api.PreventUIRefresh(-1)
             except Exception:
                 pass
             finally:
-                self._ui_locked = False
+                self._ui_refresh_depth -= 1
+
+    def _emergency_cleanup(self):
+        """atexit hook — unlock REAPER UI even if Python crashes mid-operation."""
+        if self._ui_refresh_depth <= 0:
+            return
+        try:
+            while self._ui_refresh_depth > 0:
+                self._api.PreventUIRefresh(-1)
+                self._ui_refresh_depth -= 1
+            log.warning("Emergency UI unlock: restored %d levels", self._ui_refresh_depth)
+        except Exception:
+            pass
 
     def __enter__(self):
         self.lock_ui()
@@ -489,3 +486,82 @@ class ReaperBridge:
 
     def __exit__(self, *args):
         self.unlock_ui()
+
+    # ── Connection / reconnection ───────────────────────────
+
+    def connect(self) -> bool:
+        """Connect to a running REAPER instance via reapy."""
+        if self._api is not None:
+            return True
+        try:
+            reapy_mod = _get_reapy()
+            reapy_mod.connect()
+            self._reapy_module = reapy_mod
+            self._api = reapy_mod.reascript_api
+            version = reapy_mod.get_reaper_version()
+            log.info("reapy connected, REAPER v%s", version)
+            if not str(version).startswith("7."):
+                log.warning(
+                    "Untested REAPER version %s — tested with 7.73.", version,
+                )
+            # Start dialog killer daemon when enabled
+            if self._dialog_killer_enabled:
+                self._dialog_killer.start()
+                log.info("DialogKiller started")
+            return True
+        except Exception as e:
+            log.error("Failed to connect to REAPER: %s", e)
+            return False
+
+    def reconnect(self, max_retries: int = 3, base_delay: float = 1.0) -> bool:
+        """Reconnect with exponential backoff.  Returns True on success."""
+        self._api = None
+        self._reapy_module = None
+        for attempt in range(1, max_retries + 1):
+            delay = base_delay * (2 ** (attempt - 1))
+            log.info("Reconnect attempt %d/%d (delay %.1fs)", attempt, max_retries, delay)
+            if self.connect():
+                return True
+            if attempt < max_retries:
+                time.sleep(delay)
+        return False
+
+    # ── Safe RPC call with timeout ─────────────────────────
+
+    def call_rpc(self, fn, *args, timeout: float = 30.0, **kwargs):
+        """Call *fn* with a timeout.  Returns ``(ok, result_or_error)``.
+
+        Use this for any RPR call that may hang (FX ops, render, etc.)
+        so the Python process never blocks indefinitely.
+        """
+        import concurrent.futures
+
+        def _target():
+            return fn(*args, **kwargs)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            future = ex.submit(_target)
+            try:
+                result = future.result(timeout=timeout)
+                return (True, result)
+            except concurrent.futures.TimeoutError:
+                log.error("RPC call timed out after %.1fs: %s", timeout, getattr(fn, "__name__", fn))
+                future.cancel()
+                return (False, TimeoutError(f"RPC call timed out after {timeout:.1f}s"))
+            except Exception as exc:
+                return (False, exc)
+
+    # ── Dialog Killer helpers ──────────────────────────────
+
+    def stop_dialog_killer(self):
+        """Stop the background dialog-killer daemon if it is running."""
+        self._dialog_killer.stop()
+
+    def get_recent_dialog_events(self) -> list[DialogEvent]:
+        """Return recent dialog events from the background killer."""
+        return self._dialog_killer.get_recent_events()
+
+    @property
+    def dialog_killer_active(self) -> bool:
+        """True when the dialog-killer daemon thread is alive."""
+        return self._dialog_killer.is_running

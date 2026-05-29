@@ -66,7 +66,15 @@ class TestCreate:
         )
         mgr = SendManager(bridge)
         result = mgr.create(src=0, dest=1, level_db=0.0, mode="pre-fx")
-        assert result["category"] == 1
+        # Category is always 0 (sends), not send_mode.
+        assert result["category"] == 0
+        # I_SENDMODE should still be set to pre-fx (1).
+        sendmode_calls = [
+            c for c in bridge.api.SetTrackSendInfo_Value.call_args_list
+            if c[0][3] == "I_SENDMODE"
+        ]
+        assert len(sendmode_calls) == 1
+        assert sendmode_calls[0][0][4] == 1
 
     def test_create_rejects_invalid_track(self):
         bridge = _mock_bridge(GetTrack=MagicMock(return_value=None))
@@ -157,7 +165,8 @@ class TestListAll:
         )
         mgr = SendManager(bridge)
         result = mgr.list_all(0)
-        assert len(result) == 3
+        # Now iterates over 2 categories (sends + HW outputs) not 3.
+        assert len(result) == 2
         assert all("volume_norm" in r for r in result)
         assert all("index" in r for r in result)
 

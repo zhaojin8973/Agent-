@@ -4,8 +4,8 @@ from unittest.mock import MagicMock, PropertyMock
 
 import pytest
 
-from hermes_core.fx import FxManager, _extract_string
-from hermes_core.bridge import ReaperBridge
+from hermes_core.fx import FxManager
+from hermes_core.bridge import ReaperBridge, _extract_reaper_string
 from hermes_core.track import TrackManager
 from tests.conftest import require_reaper, clean_project
 
@@ -53,7 +53,7 @@ def _mock_bridge(**api_overrides):
         side_effect=lambda t, fx, i, buf, sz: (True, f"Param{i}")
     )
     mock.api.TrackFX_GetParam = MagicMock(
-        side_effect=lambda t, fx, i: (True, 0.5)
+        side_effect=lambda t, fx, i, mn=0.0, mx=0.0: (True, 0.5)
     )
     mock.api.TrackFX_SetParam = MagicMock()
     for attr, val in api_overrides.items():
@@ -407,22 +407,22 @@ class TestAddFallback:
 @pytest.mark.unit
 class TestExtractString:
     def test_returns_str_directly(self):
-        assert _extract_string("hello") == "hello"
+        assert _extract_reaper_string("hello") == "hello"
 
     def test_decodes_bytes(self):
-        assert _extract_string(b"hello") == "hello"
+        assert _extract_reaper_string(b"hello") == "hello"
 
     def test_picks_str_from_tuple(self):
-        assert _extract_string(("(0)", "", "ReaEQ")) == "ReaEQ"
+        assert _extract_reaper_string(("(0)", "", "ReaEQ")) == "ReaEQ"
 
     def test_picks_bytes_from_tuple(self):
-        assert _extract_string(("", b"ReaEQ")) == "ReaEQ"
+        assert _extract_reaper_string(("", b"ReaEQ")) == "ReaEQ"
 
     def test_skips_empty_and_whitespace(self):
-        assert _extract_string(("  ", "")) == ""
+        assert _extract_reaper_string(("  ", "")) == ""
 
     def test_returns_empty_for_unrecognized_type(self):
-        assert _extract_string(123) == ""
+        assert _extract_reaper_string(123) == ""
 
 
 @pytest.mark.integration
