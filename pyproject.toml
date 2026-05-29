@@ -7,7 +7,7 @@ where = ["src"]
 
 [project]
 name = "hermes-core"
-version = "0.1.0"
+version = "0.3.0"
 description = "REAPER DAW automation - lean 3-layer engine"
 requires-python = ">=3.11,<3.14"
 dependencies = ["python-reapy>=0.10", "numpy>=1.24"]

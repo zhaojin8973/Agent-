@@ -11,7 +11,7 @@ metadata:
 
 **更新日期**: 2026-05-29
 **版本**: 0.3.0
-**最新提交**: 1304d33
+**最新提交**: 5e116af
 
 ---
 
@@ -136,13 +136,13 @@ hermes-core 是 REAPER DAW 的精益三层 Python 自动化引擎，目标是非
 |---|---|
 | test_bridge.py | 33 |
 | test_bus.py | 16 |
-| test_engine.py | 41 |
+| test_engine.py | 46 |
 | test_fx.py | 46 |
 | test_render.py | 53 |
 | test_send.py | 22 |
 | test_signal.py | 21 |
 | test_track.py | 34 |
-| **小计** | **266** |
+| **小计** | **268** |
 
 ### 集成测试
 
@@ -157,10 +157,10 @@ hermes-core 是 REAPER DAW 的精益三层 Python 自动化引擎，目标是非
 
 | 指标 | 值 |
 |---|---|
-| 单元测试 | 238 |
+| 单元测试 | 268 |
 | 集成测试 | 19 |
-| **总计** | **257** |
-| Engine 覆盖率 | 82% |
+| **总计** | **287** |
+| Engine 覆盖率 | 82% (REAPER 连接下实测) |
 
 ---
 
