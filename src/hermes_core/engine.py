@@ -546,10 +546,17 @@ _LF_FRQ_TABLE: list[tuple[float, float]] = [
     (1.000, 450),
 ]
 
-_LMF_FRQ_TABLE: list[tuple[float, float]] = [
-    (0.000, 200),
-    (0.260, 500),
-    (0.500, 1000),
+# LMF frequency steps (verified reapy, 2026-05-31).
+# SSL EQ frequency selectors are physically detented — interpolation
+# is meaningless.  Use nearest-neighbour lookup.
+_LMF_FRQ_STEPS: list[tuple[float, float]] = [
+    (0.007, 200),
+    (0.190, 300),
+    (0.237, 420),
+    (0.322, 710),
+    (0.589, 1300),
+    (0.670, 1570),
+    (0.799, 2000),
     (1.000, 2500),
 ]
 
@@ -581,6 +588,8 @@ def _ssleq_freq_norm(target_hz: float, table: list[tuple[float, float]]) -> floa
     """Find the norm value for *target_hz* via interpolation in *table*.
 
     The table is ``[(norm, Hz), …]`` sorted ascending by Hz.
+    SSL EQ frequency is continuous in the VST — interpolation between
+    calibration knots is correct even for detented knobs.
     Values outside the table range are clamped to the nearest endpoint.
     """
     hz_list = [row[1] for row in table]
@@ -616,16 +625,18 @@ def _apply_ssleq_eq(eq_intent: EqIntent) -> dict[str, float]:
     SSL EQ has 4 bands: LF (shelf), LMF (bell), HMF (bell), HF (shelf).
     All values are normalised to 0–1, ready for direct REAPER use.
 
-    Post-comp tonal shaping (additive only):
-    - ``bell`` / ``presence`` → HMF
+    Band assignment by frequency:
+    - ≤ 2 kHz → LMF (200–2500 Hz range, e.g. resonance / mud cuts)
+    - > 2 kHz → HMF (600–7000 Hz range, e.g. presence boost)
     - ``high_shelf`` / ``air`` → HF
     - ``low_shelf`` / ``warmth`` → LF
-    - HPF is **not** applied (handled by pre-comp EQ1).
+    - ``hp`` → HP On/Off + HP Frq
     """
     _LF_GAIN_RANGE = 34.0   # ±17 dB
     _MF_GAIN_RANGE = 40.0   # ±20 dB
     _HF_GAIN_RANGE = 34.0   # ±17 dB
-    _OUT_GAIN_RANGE = 24.0  # ±12 dB
+    _OUT_GAIN_RANGE = 24.0  # +12 dB (boost); cut side is 48.0 (-24 dB) — piecewise
+    _LMF_HMF_BOUNDARY = 2000.0  # Hz — frequencies ≤ this go to LMF, above to HMF
 
     params: dict[str, float] = {
         "Bypass": 0.0,
@@ -659,11 +670,17 @@ def _apply_ssleq_eq(eq_intent: EqIntent) -> dict[str, float]:
             params["HF Frq"] = round(_ssleq_freq_norm(band.freq_hz, _HF_FRQ_TABLE), 10)
 
         elif band.band_type in ("bell", "presence"):
-            # → HMF bell
-            gain_norm = (band.gain_db + _MF_GAIN_RANGE / 2) / _MF_GAIN_RANGE
-            params["HMF Gain"] = round(max(0.0, min(1.0, gain_norm)), 10)
-            params["HMF Frq"] = round(_ssleq_freq_norm(band.freq_hz, _HMF_FRQ_TABLE), 10)
-            params["HMF Q"] = round(_ssleq_q_norm(band.q), 10)
+            # Route by frequency: ≤2kHz → LMF, >2kHz → HMF
+            if band.freq_hz <= _LMF_HMF_BOUNDARY:
+                gain_norm = (band.gain_db + _MF_GAIN_RANGE / 2) / _MF_GAIN_RANGE
+                params["LMF Gain"] = round(max(0.0, min(1.0, gain_norm)), 10)
+                params["LMF Frq"] = round(_ssleq_freq_norm(band.freq_hz, _LMF_FRQ_STEPS), 10)
+                params["LMF Q"] = round(_ssleq_q_norm(band.q), 10)
+            else:
+                gain_norm = (band.gain_db + _MF_GAIN_RANGE / 2) / _MF_GAIN_RANGE
+                params["HMF Gain"] = round(max(0.0, min(1.0, gain_norm)), 10)
+                params["HMF Frq"] = round(_ssleq_freq_norm(band.freq_hz, _HMF_FRQ_TABLE), 10)
+                params["HMF Q"] = round(_ssleq_q_norm(band.q), 10)
 
         elif band.band_type == "low_shelf":
             # → LF shelf (optional low warmth)
@@ -676,12 +693,17 @@ def _apply_ssleq_eq(eq_intent: EqIntent) -> dict[str, float]:
             params["HP On/Off"] = 1.0
             params["HP Frq"] = round(_ssleq_freq_norm(band.freq_hz, _HP_FRQ_TABLE), 10)
 
-    # Output level: check total boost, compensate
+    # Output level: check total boost, compensate.
+    # SSL EQ Output Gain is piecewise-linear (verified reapy, 2026-05-31):
+    #   boost side: norm = (dB + 12) / 24   0 .. +12 dB
+    #   cut side:   norm = (dB + 24) / 48   -24 .. 0 dB
     total_boost = sum(max(0.0, b.gain_db) for b in eq_intent.bands)
     if total_boost > 0.0:
-        # Attenuate output to protect headroom (post-comp, safe to trim)
         out_db = -total_boost
-        out_norm = (out_db + _OUT_GAIN_RANGE / 2) / _OUT_GAIN_RANGE
+        if out_db >= 0:
+            out_norm = (out_db + 12.0) / 24.0
+        else:
+            out_norm = (out_db + 24.0) / 48.0
         params["Gain"] = round(max(0.0, min(1.0, out_norm)), 10)
 
     return params
