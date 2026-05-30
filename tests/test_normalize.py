@@ -246,3 +246,105 @@ class TestRegistryIntegrity:
                 assert phys == sorted(phys), (
                     f"'{name}.{pname}' table not sorted by physical value"
                 )
+
+
+# ════════════════════════════════════════════════════════════
+# EQ parameter normalisation (Pro-Q 3 + ReaEQ)
+# ════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestProQ3Normalize:
+    """Pro-Q 3 params are pre-normalised by _apply_proq3_eq().  The registry
+    acts as a 0–1 pass-through for all Pro-Q 3 parameters."""
+
+    PLUGIN = "FabFilter Pro-Q 3 (FabFilter)"
+
+    def test_pass_through_params(self):
+        """All Pro-Q 3 params are 0–1 pass-through."""
+        for n in range(1, 9):
+            for suffix in ("Used", "Enabled", "Frequency", "Gain", "Q", "Shape"):
+                param = f"Band {n} {suffix}"
+                assert normalize_param(self.PLUGIN, param, 0.0) == 0.0
+                assert normalize_param(self.PLUGIN, param, 0.5) == 0.5
+                assert normalize_param(self.PLUGIN, param, 1.0) == 1.0
+
+    def test_output_level_registered(self):
+        """Output Level is a global Pro-Q 3 param."""
+        assert normalize_param(self.PLUGIN, "Output Level", 0.5) == 0.5
+
+    def test_band_9_not_registered(self):
+        """Band 9 should NOT be registered (only 8 bands)."""
+        with pytest.raises(UnregisteredParamError):
+            normalize_param(self.PLUGIN, "Band 9 Frequency", 0.5)
+
+
+@pytest.mark.unit
+class TestReaEQNormalize:
+    """ReaEQ fallback EQ parameter normalisation."""
+
+    PLUGIN = "ReaEQ (Cockos)"
+
+    def test_freq_linear(self):
+        """ReaEQ Freq: 20-20000 Hz linear."""
+        result = normalize_param(self.PLUGIN, "Band 1 Freq", 10010.0)
+        assert result == pytest.approx(0.5, abs=0.01)
+
+    def test_gain_extremes(self):
+        """ReaEQ: -24 to +24 dB."""
+        assert normalize_param(self.PLUGIN, "Band 1 Gain", -24.0) == 0.0
+        assert normalize_param(self.PLUGIN, "Band 1 Gain", 24.0) == 1.0
+
+    def test_q_extremes(self):
+        """ReaEQ: 0.01 to 10.0."""
+        assert normalize_param(self.PLUGIN, "Band 1 Q", 0.01) == 0.0
+        assert normalize_param(self.PLUGIN, "Band 1 Q", 10.0) == 1.0
+
+    def test_all_4_bands_registered(self):
+        """Bands 1-4 should all be registered."""
+        for n in range(1, 5):
+            for suffix in ("Freq", "Gain", "Q", "Type", "Enabled"):
+                param = f"Band {n} {suffix}"
+                result = normalize_param(self.PLUGIN, param, 0.0)
+                assert 0.0 <= result <= 1.0
+
+    def test_band_5_not_registered(self):
+        """ReaEQ only registers 4 bands."""
+        with pytest.raises(UnregisteredParamError):
+            normalize_param(self.PLUGIN, "Band 5 Freq", 1000.0)
+
+
+@pytest.mark.unit
+class TestEQBatchNormalize:
+    """Batch EQ — all values from _apply_proq3_eq already 0–1."""
+
+    PLUGIN = "FabFilter Pro-Q 3 (FabFilter)"
+
+    def test_proq3_full_band_all_01(self):
+        """_apply_proq3_eq outputs are all within [0, 1]."""
+        from hermes_core.engine import _apply_proq3_eq
+        from hermes_core.loudness_optimizer import EqIntent, EqBandIntent
+
+        band = EqBandIntent(
+            band_type="bell", freq_hz=3000.0, gain_db=2.5, q=1.0,
+            reason="test",
+        )
+        intent = EqIntent(bands=[band], spectral_tilt="neutral", mud_detected=False)
+        params = _apply_proq3_eq(intent)
+        for pname, pval in params.items():
+            assert 0.0 <= pval <= 1.0, f"{pname}={pval:.4f} not in [0,1]"
+        # Output Level should be included and compensate for boost
+        assert "Output Level" in params
+        # +2.5 dB boost → -2.5 dB output trim for headroom protection
+        assert params["Output Level"] == pytest.approx((-2.5 + 36) / 72)
+
+    def test_proq3_empty_intent_disables_bands(self):
+        """Empty intent → bands disabled, Output Level still set."""
+        from hermes_core.engine import _apply_proq3_eq
+        from hermes_core.loudness_optimizer import EqIntent
+
+        intent = EqIntent(bands=[], spectral_tilt="neutral", mud_detected=False)
+        params = _apply_proq3_eq(intent)
+        for n in range(1, 9):
+            assert params.get(f"Band {n} Enabled") == 0.0
+        assert params["Output Level"] == 0.5

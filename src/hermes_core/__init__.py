@@ -24,8 +24,9 @@ from hermes_core.normalize import (
     normalize_param,
     normalize_params,
 )
-from hermes_core.loudness_optimizer import CompressionIntent
+from hermes_core.loudness_optimizer import CompressionIntent, EqIntent, EqBandIntent
 from hermes_core.dag import AudioNode, SendNode, ChainExecutor
+from hermes_core.spectrum import SpectrumAnalyzer, SpectrumReport
 
 __all__ = [
     "ReaperBridge",
@@ -58,10 +59,15 @@ __all__ = [
     "PLUGIN_REGISTRY",
     "normalize_param",
     "normalize_params",
-    # Compression
+    # Compression & EQ intents
     "CompressionIntent",
+    "EqIntent",
+    "EqBandIntent",
     # DAG / AudioNode pipeline
     "AudioNode",
     "SendNode",
     "ChainExecutor",
+    # Spectrum analysis
+    "SpectrumAnalyzer",
+    "SpectrumReport",
 ]

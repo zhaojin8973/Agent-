@@ -100,6 +100,7 @@ class FXPreset:
     fx_type: str = ""                   # "vca" | "fet" | "opto" | "rvox" | "eq" | "reverb" | "limiter" | ""
     params: dict[str, float] = field(default_factory=dict)
     alternatives: list[str] = field(default_factory=list)
+    eq_position: str = "solo"           # "pre" | "post" | "solo" — only meaningful for EQ slots
 
 
 @dataclass
@@ -220,3 +221,36 @@ class MixingProfile:
             names.append(self.bus_reverb.name)
         names.append(self.master_limiter.name)
         return list(dict.fromkeys(names))  # preserve order, dedupe
+
+
+# ── default vocal chain ──────────────────────────────────────────
+
+
+def get_default_vocal_chain() -> list[FXPreset]:
+    """Return the default 4-node vocal processing chain.
+
+    ``Pro-Q 3 (pre-EQ, subtractive) → CLA-1176 (peak control)
+    → SSL EQ (post-EQ, additive) → RVox (final balance)``
+
+    This is the recommended starting point for vocal mixing.
+    """
+    return [
+        FXPreset(
+            name="VST3: FabFilter Pro-Q 3 (FabFilter)",
+            fx_type="eq",
+            eq_position="pre",
+        ),
+        FXPreset(
+            name="VST3: CLA-1176 (Waves)",
+            fx_type="fet",
+        ),
+        FXPreset(
+            name="VST3: SSLEQ Mono (Waves)",
+            fx_type="eq",
+            eq_position="post",
+        ),
+        FXPreset(
+            name="VST3: RVox (Waves)",
+            fx_type="rvox",
+        ),
+    ]

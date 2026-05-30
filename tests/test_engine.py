@@ -15,7 +15,7 @@ from hermes_core.engine import (
     _apply_rvox_params,
 )
 from hermes_core.track import TrackManager, TrackInfo
-from hermes_core.loudness_optimizer import CompressionIntent
+from hermes_core.loudness_optimizer import CompressionIntent, EqIntent, EqBandIntent
 from hermes_core.bus import BusManager
 from hermes_core.fx import FxManager
 from tests.conftest import require_reaper, clean_project, make_test_wav
@@ -1018,3 +1018,375 @@ class TestWetCache:
         eng._reverb_send_node.params = {}
         result = eng._cache_reverb_wet("/tmp/cache")
         assert result is None
+
+
+# ══════════════════════════════════════════════════════════════
+# EQ auto-derivation integration tests
+# ══════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestDeriveEQIntent:
+    """Verify :func:`_derive_eq_intent` produces correct EqIntent from SpectrumReport."""
+
+    def test_produces_hpf_every_time(self):
+        """Every derived EQ must include exactly one HPF band."""
+        from hermes_core.engine import _derive_eq_intent
+        from hermes_core.spectrum import SpectrumReport
+
+        report = SpectrumReport(
+            band_energy_db={"sub": -50, "low": -30, "low_mid": -25,
+                            "mid": -20, "high_mid": -22, "presence": -24, "air": -35},
+            spectral_tilt_db_per_octave=-1.5,
+            resonances=[], mud_ratio_db=-5.0, presence_deficit_db=4.0,
+            air_level_db=-35.0,
+        )
+        intent = _derive_eq_intent(report, role="vocal", genre="pop")
+        hpf = [b for b in intent.bands if b.band_type == "hp"]
+        assert len(hpf) == 1
+
+    def test_no_mud_cut_when_clean(self):
+        """Low mud_ratio → no 350 Hz cut."""
+        from hermes_core.engine import _derive_eq_intent
+        from hermes_core.spectrum import SpectrumReport
+
+        report = SpectrumReport(
+            band_energy_db={"sub": -50, "low": -30, "low_mid": -25,
+                            "mid": -20, "high_mid": -22, "presence": -24, "air": -35},
+            spectral_tilt_db_per_octave=-1.5,
+            resonances=[], mud_ratio_db=1.0, presence_deficit_db=1.0,
+            air_level_db=-25.0,
+        )
+        intent = _derive_eq_intent(report, role="vocal", genre="pop")
+        cuts = [b for b in intent.bands if b.gain_db < 0 and abs(b.freq_hz - 350) < 5]
+        assert len(cuts) == 0
+
+    def test_spectral_tilt_metadata(self):
+        """EqIntent.spectral_tilt reflects the report's tilt."""
+        from hermes_core.engine import _derive_eq_intent
+        from hermes_core.spectrum import SpectrumReport
+
+        dark = SpectrumReport(
+            band_energy_db={"sub": -50, "low": -30, "low_mid": -25,
+                            "mid": -20, "high_mid": -22, "presence": -24, "air": -35},
+            spectral_tilt_db_per_octave=-4.0,
+            resonances=[], mud_ratio_db=-5.0, presence_deficit_db=1.0,
+            air_level_db=-25.0,
+        )
+        assert _derive_eq_intent(dark, role="vocal", genre="pop").spectral_tilt == "dark"
+
+        bright = SpectrumReport(
+            band_energy_db={"sub": -50, "low": -30, "low_mid": -25,
+                            "mid": -20, "high_mid": -22, "presence": -24, "air": -35},
+            spectral_tilt_db_per_octave=3.0,
+            resonances=[], mud_ratio_db=-5.0, presence_deficit_db=1.0,
+            air_level_db=-25.0,
+        )
+        assert _derive_eq_intent(bright, role="vocal", genre="pop").spectral_tilt == "bright"
+
+    def test_all_genres_work(self):
+        """Every known genre should produce a valid EqIntent without crash."""
+        from hermes_core.engine import _derive_eq_intent, _GENRE_EQ_TWEAKS
+        from hermes_core.spectrum import SpectrumReport
+
+        report = SpectrumReport(
+            band_energy_db={"sub": -50, "low": -30, "low_mid": -25,
+                            "mid": -20, "high_mid": -22, "presence": -24, "air": -35},
+            spectral_tilt_db_per_octave=-1.5,
+            resonances=[], mud_ratio_db=-5.0, presence_deficit_db=4.0,
+            air_level_db=-35.0,
+        )
+        for genre in _GENRE_EQ_TWEAKS:
+            intent = _derive_eq_intent(report, role="vocal", genre=genre)
+            assert intent.spectral_tilt in ("dark", "neutral", "bright")
+
+
+@pytest.mark.unit
+class TestEQTranslator:
+    """Verify :func:`_apply_proq3_eq` maps EqIntent → Pro-Q 3 physical params."""
+
+    def test_single_band_maps_all_keys(self):
+        from hermes_core.engine import _apply_proq3_eq, _proq3_freq_norm, _proq3_q_norm
+        from hermes_core.loudness_optimizer import EqIntent, EqBandIntent
+
+        band = EqBandIntent(
+            band_type="bell", freq_hz=2500.0, gain_db=-3.0, q=2.5,
+            reason="test",
+        )
+        intent = EqIntent(bands=[band], spectral_tilt="neutral", mud_detected=False)
+        params = _apply_proq3_eq(intent)
+        assert params["Band 1 Frequency"] == pytest.approx(_proq3_freq_norm(2500.0))
+        assert params["Band 1 Gain"] == pytest.approx((-3.0 + 30.0) / 60.0)
+        assert params["Band 1 Q"] == pytest.approx(_proq3_q_norm(2.5))
+        assert params["Band 1 Shape"] == 0.0     # Bell
+        assert params["Band 1 Enabled"] == 1.0
+        assert params["Band 1 Used"] == 1.0
+        # Defaults must be explicitly set
+        assert params["Band 1 Speakers"] == 0.0
+        assert params["Band 1 Stereo Placement"] == 0.5
+        assert params["Band 1 Solo"] == 0.0
+
+    def test_mixed_band_types(self):
+        from hermes_core.engine import _apply_proq3_eq
+        from hermes_core.loudness_optimizer import EqIntent, EqBandIntent
+
+        bands = [
+            EqBandIntent(band_type="hp", freq_hz=80.0, gain_db=0.0, q=0.7,
+                         reason="hpf"),
+            EqBandIntent(band_type="bell", freq_hz=350.0, gain_db=-3.0, q=0.7,
+                         reason="mud"),
+            EqBandIntent(band_type="bell", freq_hz=3000.0, gain_db=2.0, q=1.0,
+                         reason="presence"),
+            EqBandIntent(band_type="high_shelf", freq_hz=8000.0, gain_db=1.5, q=0.7,
+                         reason="air"),
+        ]
+        intent = EqIntent(bands=bands, spectral_tilt="dark", mud_detected=True)
+        params = _apply_proq3_eq(intent)
+
+        assert params["Band 1 Shape"] == 0.25   # Low Cut = 2/8
+        assert params["Band 2 Shape"] == 0.0    # Bell
+        assert params["Band 3 Shape"] == 0.0    # Bell
+        assert params["Band 4 Shape"] == 0.375  # High Shelf = 3/8
+        for n in range(1, 5):
+            assert params[f"Band {n} Enabled"] == 1.0
+        for n in range(5, 9):
+            assert params[f"Band {n} Enabled"] == 0.0
+        # All bands get explicit defaults
+        for n in range(1, 5):
+            assert params[f"Band {n} Speakers"] == 0.0
+
+    def test_params_all_in_01_range(self):
+        """Every param should already be in [0, 1] — no normalise needed."""
+        from hermes_core.engine import _apply_proq3_eq
+        from hermes_core.loudness_optimizer import EqIntent, EqBandIntent
+
+        bands = [
+            EqBandIntent(band_type="hp", freq_hz=80.0, gain_db=0.0, q=0.7,
+                         reason="hpf"),
+            EqBandIntent(band_type="bell", freq_hz=3000.0, gain_db=2.5, q=1.0,
+                         reason="presence"),
+        ]
+        intent = EqIntent(bands=bands, spectral_tilt="dark", mud_detected=False)
+        params = _apply_proq3_eq(intent)
+        for pname, pval in params.items():
+            assert 0.0 <= pval <= 1.0, (
+                f"{pname} = {pval:.4f} is outside [0, 1]"
+            )
+
+
+@pytest.mark.unit
+class TestApplyEQBaseline:
+    """Verify :meth:`MixingEngine._apply_eq_baseline` pipeline."""
+
+    def test_fallback_to_static_when_no_file(self):
+        """When no file path provided, use static _EQ_BASELINE."""
+        eng = MixingEngine()
+        eng._fx.set_param = MagicMock()
+        eng._apply_eq_baseline(
+            track_index=0, fx_index=0, role="vocal",
+            genre="pop", stem_file_path="",
+        )
+        assert eng._fx.set_param.call_count > 0
+        assert len(eng._last_eq_params) > 0
+
+    def test_fallback_to_static_when_file_missing(self):
+        """Non-existent file path → fallback to static baseline."""
+        eng = MixingEngine()
+        eng._fx.set_param = MagicMock()
+        eng._apply_eq_baseline(
+            track_index=0, fx_index=0, role="vocal",
+            genre="pop", stem_file_path="/nonexistent/file.wav",
+        )
+        assert eng._fx.set_param.call_count > 0
+        assert len(eng._last_eq_params) > 0
+
+    def test_spectrum_driven_eq_with_real_wav(self, tmp_path):
+        """A real WAV file → full spectrum-driven EQ pipeline."""
+        from tests.conftest import make_test_wav
+
+        wav_path = tmp_path / "test_vocal.wav"
+        make_test_wav(str(wav_path), duration_sec=2.0, frequency=440.0)
+
+        eng = MixingEngine()
+        eng._fx.set_param = MagicMock()
+        eng._apply_eq_baseline(
+            track_index=0, fx_index=0, role="vocal",
+            genre="pop", stem_file_path=str(wav_path),
+        )
+        assert eng._fx.set_param.call_count > 0
+        assert len(eng._last_eq_params) > 0
+
+    def test_spectrum_driven_populates_eq_params(self):
+        """Spectrum pipeline should populate _last_eq_params with proper band data."""
+        import tempfile
+        import numpy as np
+        import wave
+
+        sr = 48000
+        dur = 2.0
+        t = np.arange(int(sr * dur)) / sr
+        sig = (0.5 * np.sin(2 * np.pi * 200 * t)
+               + 0.3 * np.sin(2 * np.pi * 400 * t)
+               + 0.2 * np.sin(2 * np.pi * 800 * t)
+               + 0.1 * np.sin(2 * np.pi * 3000 * t))
+        sig = np.clip(sig * 32767, -32768, 32767).astype(np.int16)
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            wav_path = f.name
+        try:
+            with wave.open(wav_path, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(sr)
+                wf.writeframes(sig.tobytes())
+
+            eng = MixingEngine()
+            eng._fx.set_param = MagicMock()
+            eng._apply_eq_baseline(
+                track_index=0, fx_index=0, role="vocal",
+                genre="pop", stem_file_path=wav_path,
+            )
+            params = eng._last_eq_params
+            assert len(params) > 0
+            freq_keys = [k for k in params if "Freq" in k]
+            assert len(freq_keys) >= 1, f"Should have at least 1 freq band, got {freq_keys}"
+        finally:
+            os.unlink(wav_path)
+
+    def test_spectrum_driven_handles_backing_role(self):
+        """Backing role should derive its own EQ intent."""
+        import tempfile
+        import numpy as np
+        import wave
+
+        sr = 48000
+        dur = 1.0
+        t = np.arange(int(sr * dur)) / sr
+        sig = np.clip(0.5 * np.sin(2 * np.pi * 300 * t) * 32767, -32768, 32767).astype(np.int16)
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            wav_path = f.name
+        try:
+            with wave.open(wav_path, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(sr)
+                wf.writeframes(sig.tobytes())
+
+            eng = MixingEngine()
+            eng._fx.set_param = MagicMock()
+            eng._apply_eq_baseline(
+                track_index=0, fx_index=0, role="backing",
+                genre="rock", stem_file_path=wav_path,
+            )
+            params = eng._last_eq_params
+            assert len(params) > 0
+            freq_keys = [k for k in params if "Freq" in k]
+            assert len(freq_keys) >= 1
+        finally:
+            os.unlink(wav_path)
+
+    def test_spectrum_failure_falls_back_gracefully(self):
+        """If spectrum analysis raises, fall back to static baseline."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as f:
+            f.write(b"not a wav file")
+            bad_path = f.name
+
+        try:
+            eng = MixingEngine()
+            eng._fx.set_param = MagicMock()
+            eng._apply_eq_baseline(
+                track_index=0, fx_index=0, role="vocal",
+                genre="pop", stem_file_path=bad_path,
+            )
+            assert eng._fx.set_param.call_count > 0
+            assert len(eng._last_eq_params) > 0
+        finally:
+            os.unlink(bad_path)
+
+
+# ════════════════════════════════════════════════════════════════
+# Headroom protection
+# ════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestHeadroomProtection:
+    """Pro-Q 3 Output Level compensates for total EQ boost."""
+
+    def test_no_boost_keeps_unity(self):
+        """Zero boost → Output Level at 0 dB."""
+        from hermes_core.engine import _apply_proq3_eq
+        band = EqBandIntent("bell", 350.0, -3.0, 0.7, "cut only")
+        intent = EqIntent(bands=[band], spectral_tilt="neutral", mud_detected=False)
+        params = _apply_proq3_eq(intent)
+        assert params["Output Level"] == 0.5  # unity, no boost
+
+    def test_boost_reduces_output(self):
+        """Positive gain → Output Level trimmed."""
+        from hermes_core.engine import _apply_proq3_eq
+        band = EqBandIntent("bell", 3000.0, 3.5, 1.0, "presence")
+        intent = EqIntent(bands=[band], spectral_tilt="dark", mud_detected=False)
+        params = _apply_proq3_eq(intent)
+        # +3.5 dB boost → output should be trimmed
+        assert params["Output Level"] < 0.5
+
+    def test_mixed_band_output_correct(self):
+        """One cut + one boost → output compensates for net boost only."""
+        from hermes_core.engine import _apply_proq3_eq
+        bands = [
+            EqBandIntent("bell", 350.0, -4.0, 0.7, "mud cut"),
+            EqBandIntent("bell", 3000.0, 3.5, 1.0, "presence"),
+        ]
+        intent = EqIntent(bands=bands, spectral_tilt="dark", mud_detected=True)
+        params = _apply_proq3_eq(intent)
+        # Only +3.5 counts toward boost, -4.0 ignored
+        expected_norm = (-3.5 + 36) / 72
+        assert params["Output Level"] == pytest.approx(expected_norm, abs=0.01)
+
+
+# ════════════════════════════════════════════════════════════════
+# SSL EQ engine integration
+# ════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestSSLEQEngine:
+    """_apply_ssleq_eq integration with the engine pipeline."""
+
+    def test_ssleq_via_apply_eq_baseline(self):
+        """When fx_name contains 'ssleq', use SSL EQ translator."""
+        import tempfile, wave, os, struct, math
+
+        wav_path = None
+        try:
+            # Generate 1s of 1kHz sine at -18dBFS RMS
+            sr = 44100
+            t = [i / sr for i in range(sr)]
+            sig = [int(16000 * math.sin(2 * math.pi * 1000 * x))
+                   for x in t]
+
+            fd, wav_path = tempfile.mkstemp(suffix=".wav")
+            os.close(fd)
+            with wave.open(wav_path, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(sr)
+                wf.writeframes(struct.pack(f"<{len(sig)}h", *sig))
+
+            eng = MixingEngine()
+            eng._fx.set_param = MagicMock()
+            eng._apply_eq_baseline(
+                track_index=0, fx_index=0, role="vocal",
+                genre="pop", stem_file_path=wav_path,
+                position="post", fx_name="SSLEQ Mono (Waves)",
+            )
+            params = eng._last_eq_params
+            # SSL EQ params should be present
+            assert "Analog" in params
+            assert params["Analog"] == 1.0
+            assert params["EQ IN"] == 1.0
+        finally:
+            if wav_path:
+                os.unlink(wav_path)

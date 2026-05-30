@@ -243,13 +243,110 @@ PLUGIN_REGISTRY: dict[str, dict] = {
     },
 
     # ── EQs ────────────────────────────────────────────
+    # Pro-Q 3 verified via reapy readback (2026-05-31).
+    # All per-band params are pre-normalised (0–1) by _apply_proq3_eq().
+    # Global params (Output Level) are also pre-normalised.
+    #
+    # Verified curves:
+    #   Frequency:  log10(f/10) / log10(3000)          10 Hz – 30 kHz
+    #   Gain:       (dB+30) / 60                       -30 – +30 dB
+    #   Q:          log10(Q/0.025) / log10(1600)       0.025 – 40
+    #   Shape:      enum / 8                           0=Bell..7=Tilt
+    #   Slope:      enum / 9                           0=6..9=96 dB/oct
+    #   Dynamic Range: (dB+30) / 60                    -30 – +30 dB
+    #   Threshold:  (dB+60) / 60                       -60 – 0 dB
+    #   Output Level: (dB+36) / 72                     -36 – +36 dB
     "FabFilter Pro-Q 3 (FabFilter)": {
         "type": "eq",
-        "params": {},
+        "params": {
+            **{
+                f"Band {n} Used":      {"range": (0.0, 1.0), "curve": "linear"}
+                for n in range(1, 9)
+            },
+            **{
+                f"Band {n} Enabled":   {"range": (0.0, 1.0), "curve": "linear"}
+                for n in range(1, 9)
+            },
+            **{
+                f"Band {n} Frequency": {"range": (0.0, 1.0), "curve": "linear"}
+                for n in range(1, 9)
+            },
+            **{
+                f"Band {n} Gain":      {"range": (0.0, 1.0), "curve": "linear"}
+                for n in range(1, 9)
+            },
+            **{
+                f"Band {n} Q":         {"range": (0.0, 1.0), "curve": "linear"}
+                for n in range(1, 9)
+            },
+            **{
+                f"Band {n} Shape":     {"range": (0.0, 1.0), "curve": "linear"}
+                for n in range(1, 9)
+            },
+            # Global
+            "Output Level":            {"range": (0.0, 1.0), "curve": "linear"},
+        },
     },
+    # ── SSL EQ (post-comp tonal shaping) ─────────────────
+    # Verified via reapy readback (2026-05-31).
+    # All params 0–1 pass-through — pre-normalised by _apply_ssleq_eq().
+    #
+    # Gain curves:
+    #   LF/HF Gain:  (dB + 17) / 34    ±17 dB
+    #   LMF/HMF Gain: (dB + 20) / 40   ±20 dB
+    #   Output Gain:  (dB + 12) / 24   ±12 dB
+    # Frequency: stepped controls — lookup tables
+    # Q: 0.1 (widest=1.0) – 3.5 (narrowest=0.0), reverse-linear
+    # Switches: 0/1 (HP On, LMF Div3, HMF Mul3, Analog, EQ IN)
+    "SSLEQ Mono (Waves)": {
+        "type": "eq",
+        "params": {
+            "Bypass":       {"range": (0.0, 1.0), "curve": "linear"},
+            "HP On/Off":    {"range": (0.0, 1.0), "curve": "linear"},
+            "LF Gain":      {"range": (-17.0, 17.0), "curve": "linear"},
+            "LMF Gain":     {"range": (-20.0, 20.0), "curve": "linear"},
+            "LMF Div3":     {"range": (0.0, 1.0), "curve": "linear"},
+            "HMF Mul3":     {"range": (0.0, 1.0), "curve": "linear"},
+            "HMF Gain":     {"range": (-20.0, 20.0), "curve": "linear"},
+            "HF Gain":      {"range": (-17.0, 17.0), "curve": "linear"},
+            "Gain":         {"range": (-12.0, 12.0), "curve": "linear"},
+            "HP Frq":       {"range": (0.0, 1.0), "curve": "linear"},
+            "LF Frq":       {"range": (0.0, 1.0), "curve": "linear"},
+            "LMF Q":        {"range": (0.0, 1.0), "curve": "linear"},
+            "LMF Frq":      {"range": (0.0, 1.0), "curve": "linear"},
+            "HMF Q":        {"range": (0.0, 1.0), "curve": "linear"},
+            "HMF Frq":      {"range": (0.0, 1.0), "curve": "linear"},
+            "HF Frq":       {"range": (0.0, 1.0), "curve": "linear"},
+            "Analog":       {"range": (0.0, 1.0), "curve": "linear"},
+            "EQ IN":        {"range": (0.0, 1.0), "curve": "linear"},
+        },
+    },
+    # ReaEQ: 4 bands for basic EQ tasks.  Band Types:
+    # 0=High Pass, 1=Low Shelf, 2=Bell, 3=High Shelf, 4=Low Pass.
     "ReaEQ (Cockos)": {
         "type": "eq",
-        "params": {},
+        "params": {
+            **{
+                f"Band {n} Freq":    {"range": (20.0, 20000.0), "curve": "linear"}
+                for n in range(1, 5)
+            },
+            **{
+                f"Band {n} Gain":    {"range": (-24.0, 24.0),   "curve": "linear"}
+                for n in range(1, 5)
+            },
+            **{
+                f"Band {n} Q":       {"range": (0.01, 10.0),    "curve": "linear"}
+                for n in range(1, 5)
+            },
+            **{
+                f"Band {n} Type":    {"range": (0.0, 5.0),      "curve": "linear"}
+                for n in range(1, 5)
+            },
+            **{
+                f"Band {n} Enabled": {"range": (0.0, 1.0),      "curve": "linear"}
+                for n in range(1, 5)
+            },
+        },
     },
 
     # ── Reverbs ────────────────────────────────────────

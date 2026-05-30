@@ -3,7 +3,9 @@ MixingEngine — Layer 3 public API. Composes all Layer 2 modules into
 a single entry point for Hermes acceptance scenarios.
 """
 
+import bisect
 import logging
+import math
 import os
 import time
 from datetime import datetime
@@ -23,6 +25,8 @@ from hermes_core.loudness_optimizer import (
     load_calibration,
     generate_report,
     CompressionIntent,
+    EqIntent,
+    EqBandIntent,
 )
 from hermes_core.normalize import normalize_params
 from hermes_core.profiles import (
@@ -31,6 +35,7 @@ from hermes_core.profiles import (
     _EQ_BASELINE,
 )
 from hermes_core.dag import AudioNode, SendNode, ChainExecutor
+from hermes_core.spectrum import SpectrumAnalyzer, SpectrumReport
 
 log = logging.getLogger(__name__)
 
@@ -230,6 +235,456 @@ _TRANSLATORS = {
     "opto": _apply_opto_params,
     "rvox": _apply_rvox_params,
 }
+
+
+# ════════════════════════════════════════════════════════════════
+# EQ derivation + translator layer (mirrors compressor pattern)
+# ════════════════════════════════════════════════════════════════
+
+# Genre-specific tweaks to EQ derivation thresholds
+_GENRE_EQ_TWEAKS: dict[str, dict] = {
+    "pop":  {"presence_extra_db": 0.5, "mud_threshold_db": 3.0, "boost_scale": 1.0},
+    "rock": {"presence_extra_db": 0.0, "mud_threshold_db": 4.0, "boost_scale": 1.0},
+    "folk": {"presence_extra_db": 0.0, "mud_threshold_db": 3.0, "boost_scale": 0.75},
+    "default": {"presence_extra_db": 0.0, "mud_threshold_db": 3.0, "boost_scale": 1.0},
+}
+
+
+def _derive_eq_intent(
+    report: SpectrumReport,
+    role: str = "vocal",
+    genre: str = "pop",
+    position: str = "solo",
+) -> EqIntent:
+    """Derive EQ goals from spectrum analysis.
+
+    Rule-based decision logic — no ML required.  Rules are applied
+    selectively based on *position* in the FX chain:
+
+    - ``"pre"`` — corrective EQ before compression.
+      Runs all 6 rules, but boost thresholds are conservative
+      (prefer subtraction; only boost when the signal truly needs it).
+    - ``"post"`` — tonal / colour EQ after compression.
+      Runs all 6 rules without restriction.  Cuts are allowed because
+      compression (especially FET saturation) can introduce new peaks
+      that need taming.
+    - ``"solo"`` — all rules (standalone, backward-compatible default).
+
+    The six rules are:
+    1. **HPF** — frequency scales with sub-band energy.
+    2. **Resonance cuts** — narrow peaks (Q > 15, non-harmonic) get
+       bell cuts proportional to their prominence.
+    3. **Low-mid mud cut** — broad attenuation when the low-mid band
+       exceeds the mid band by the genre threshold.
+    4. **Presence boost** — gentle bell lift when the presence band
+       is quiet relative to mid / dark vocal.
+    5. **Air shelf** — high shelf when the air band is low and the
+       spectral tilt is steeply negative.
+    6. **Genre adjustments** — pop gets extra presence, rock tolerates
+       more mud, folk scales back all boosts.
+    """
+    _POSITIONS = ("pre", "post", "solo")
+    if position not in _POSITIONS:
+        raise ValueError(f"position must be one of {_POSITIONS}, got {position!r}")
+
+    # All positions run the full rule set.
+    # Pre-comp is conservative on boosts: higher threshold, lower gain.
+    conservative = position == "pre"
+
+    tweaks = _GENRE_EQ_TWEAKS.get(genre, _GENRE_EQ_TWEAKS["default"])
+    bands: list[EqBandIntent] = []
+
+    # ── Rule 1: HPF ─────────────────────────────────────────
+    sub_energy = report.band_energy_db.get("sub", -60.0)
+    mid_energy = report.band_energy_db.get("mid", -60.0)
+    sub_excess = sub_energy - mid_energy
+
+    if role == "vocal":
+        hpf_freq = 80.0
+        if sub_excess > 3.0:
+            hpf_freq = min(120.0, 80.0 + (sub_excess - 3.0) * 10)
+    else:
+        hpf_freq = 40.0
+        if sub_excess > 3.0:
+            hpf_freq = min(80.0, 40.0 + (sub_excess - 3.0) * 10)
+
+    bands.append(EqBandIntent(
+        band_type="hp", freq_hz=round(hpf_freq, 1), gain_db=0.0,
+        q=0.7,
+        reason=f"HPF@{hpf_freq:.0f}Hz sub_excess={sub_excess:.1f}dB",
+    ))
+
+    # ── Rule 2: Resonance cuts ──────────────────────────────
+    for res in report.resonances:
+        # Skip harmonics — they're musical content, not problems
+        if res.is_harmonic:
+            bands.append(EqBandIntent(
+                band_type="bell", freq_hz=res.freq_hz,
+                gain_db=max(-2.0, -res.prominence_db * 0.3),
+                q=min(res.q_factor * 0.5, 10.0),
+                reason=f"{res.freq_hz}Hz harmonic Q={res.q_factor:.0f} (light touch)",
+            ))
+            continue
+
+        # Q > 15 → genuine room resonance → cut
+        if res.q_factor < _MIN_EQ_Q:
+            continue
+
+        # Skip presence band (2-5 kHz) — critical for intelligibility
+        if 2000.0 <= res.freq_hz <= 5000.0:
+            continue
+
+        cut_db = -min(res.prominence_db, 6.0)
+        bands.append(EqBandIntent(
+            band_type="bell", freq_hz=res.freq_hz,
+            gain_db=round(cut_db, 1),
+            q=min(res.q_factor * 0.5, 10.0),
+            reason=f"{res.freq_hz}Hz room mode Q={res.q_factor:.0f} prominence={res.prominence_db:.1f}dB",
+        ))
+
+    # ── Rule 3: Low-mid mud cut ─────────────────────────────
+    mud_threshold = tweaks.get("mud_threshold_db", 3.0)
+    if report.mud_ratio_db > mud_threshold:
+        cut_db = -min(report.mud_ratio_db - 2.0, 4.0)
+        cut_db = max(cut_db, -4.0)
+        bands.append(EqBandIntent(
+            band_type="bell", freq_hz=350.0, gain_db=round(cut_db, 1),
+            q=0.7,
+            reason=f"Mud cut@{350}Hz mud_ratio={report.mud_ratio_db:.1f}dB",
+        ))
+
+    # ── Rule 4: Presence boost ──────────────────────────────
+    # Pre-comp: higher threshold (4 dB deficit) to be conservative.
+    presence_deficit_threshold = 4.0 if conservative else 2.0
+    if report.presence_deficit_db > presence_deficit_threshold:
+        boost = min(report.presence_deficit_db * 0.5, 3.0)
+        boost += tweaks.get("presence_extra_db", 0.0)
+        boost *= tweaks.get("boost_scale", 1.0)
+        if conservative:
+            boost *= 0.5  # pre-comp boosts at half strength
+        bands.append(EqBandIntent(
+            band_type="bell", freq_hz=3000.0, gain_db=round(boost, 1),
+            q=1.0,
+            reason=f"Presence boost@{3000}Hz deficit={report.presence_deficit_db:.1f}dB",
+        ))
+
+    # ── Rule 5: Air shelf ───────────────────────────────────
+    # Graduated: severe tilt + moderately low air deserves air too.
+    # Pre-comp: thresholds are stricter (air < -35, tilt < -5).
+    if conservative:
+        air_low = report.air_level_db < -35.0
+        air_moderate = report.air_level_db < -28.0
+        tilt_dark = report.spectral_tilt_db_per_octave < -5.0
+        tilt_very_dark = report.spectral_tilt_db_per_octave < -6.5
+        air_gain_scale = 0.5
+    else:
+        air_low = report.air_level_db < -30.0
+        air_moderate = report.air_level_db < -22.0
+        tilt_dark = report.spectral_tilt_db_per_octave < -3.0
+        tilt_very_dark = report.spectral_tilt_db_per_octave < -4.5
+        air_gain_scale = 1.0
+
+    air_gain = 0.0
+    if air_low and tilt_dark:
+        air_gain = 1.5  # both severe: full boost
+    elif tilt_very_dark and air_moderate:
+        air_gain = 1.0  # very dark + moderately low air
+    elif air_low and tilt_very_dark:
+        air_gain = 1.5  # severe air loss + very dark
+
+    if air_gain > 0.0:
+        air_gain *= tweaks.get("boost_scale", 1.0)
+        air_gain *= air_gain_scale
+        bands.append(EqBandIntent(
+            band_type="high_shelf", freq_hz=8000.0, gain_db=round(air_gain, 1),
+            q=0.7,
+            reason=f"Air shelf@8kHz air={report.air_level_db:.1f}dB tilt={report.spectral_tilt_db_per_octave:.1f}dB/oct",
+        ))
+
+    # ── Assemble ─────────────────────────────────────────────
+    # Cap at 8 bands (Pro-Q 3 limit).  Priority order:
+    #   1. HPF (always included — structural necessity)
+    #   2. Resonance cuts (most prominent first)
+    #   3. Tonal balance (mud → presence → air)
+    hpf_bands = [b for b in bands if b.band_type == "hp"]
+    reso_bands = [b for b in bands if b.band_type == "bell" and b.gain_db < -2.0]
+    tonal_bands = [b for b in bands if b not in hpf_bands and b not in reso_bands]
+
+    capped: list[EqBandIntent] = []
+    capped.extend(hpf_bands[:1])                    # exactly 1 HPF
+    capped.extend(reso_bands[:5])                    # top 5 resonance cuts
+    remaining = 8 - len(capped)
+    capped.extend(tonal_bands[:remaining])
+
+    return EqIntent(
+        bands=capped,
+        spectral_tilt=(
+            "dark" if report.spectral_tilt_db_per_octave < -2.0
+            else "bright" if report.spectral_tilt_db_per_octave > 2.0
+            else "neutral"
+        ),
+        mud_detected=report.mud_ratio_db > mud_threshold,
+    )
+
+
+# Minimum Q factor for EQ resonance cuts (mirrors spectrum._MIN_Q_FACTOR)
+_MIN_EQ_Q = 15.0
+
+# Pro-Q 3 Shape enum — verified 2026-05-31 via reapy readback.
+# Denominator is 8 (not 7).  Values correspond to:
+#   0=Bell  1=Low Shelf  2=Low Cut  3=High Shelf
+#   4=High Cut  5=Notch  6=Band Pass  7=Tilt Shelf
+_PROQ3_SHAPE: dict[str, float] = {
+    "bell":        0.0 / 8.0,
+    "low_shelf":   1.0 / 8.0,
+    "high_shelf":  3.0 / 8.0,
+    "hp":          2.0 / 8.0,  # Low Cut
+    "lp":          4.0 / 8.0,  # High Cut
+}
+
+# Pro-Q 3 log-frequency formula (verified): norm = log10(f / 10) / log10(3000).
+# Frequency range is 10 Hz – 30 kHz.
+_PROQ3_FREQ_LOG_BASE = math.log10(30000.0 / 10.0)  # ≈ 3.477
+
+
+def _proq3_freq_norm(hz: float) -> float:
+    """Convert Hz to Pro-Q 3 normalised frequency (0–1, log scale)."""
+    return math.log10(max(float(hz), 10.0) / 10.0) / _PROQ3_FREQ_LOG_BASE
+
+
+def _proq3_q_norm(q: float) -> float:
+    """Convert Q value to Pro-Q 3 normalised Q (0–1, log scale).
+
+    Verified: Q=1.0 ↔ norm=0.5.  Range is 0.025 – 40.
+    Formula: norm = log10(Q / 0.025) / log10(40.0 / 0.025).
+    """
+    return math.log10(max(float(q), 0.025) / 0.025) / math.log10(40.0 / 0.025)
+
+
+def _apply_proq3_eq(eq_intent: EqIntent) -> dict[str, float]:
+    """Translate an :class:`EqIntent` into Pro-Q 3 normalised (0–1) parameters.
+
+    Maps each :class:`EqBandIntent` to Pro-Q 3 band slots (1–8).
+    **All** values are normalised to 0–1 and ready for direct REAPER use.
+    Callers should write these values directly via ``FxManager.set_param``
+    — do **not** route through :func:`normalize_params`.
+
+    **Every** parameter is set explicitly so that no garbage values
+    leak from previous plugin state.
+
+    Verified parameter names, defaults, and curve formulas (reapy, 2026-05-31).
+    """
+    _GAIN_RANGE = 60.0  # -30 .. +30 dB
+
+    _DEFAULTS = {
+        "Dynamic Range":       0.5,    # 0 dB
+        "Dynamics Enabled":    0.0,    # static EQ — no dynamic bands
+        "Threshold":           1.0,    # Auto
+        "Slope":               0.0,
+        "Stereo Placement":    0.5,    # Stereo
+        "Speakers":            0.0,    # Stereo (not Center/Surround)
+        "Solo":                0.0,    # Disabled
+    }
+
+    _SLOPE_12DB = 1.0 / 9.0    # 12 dB/oct (10 values 0–9, index 1)
+
+    params: dict[str, float] = {}
+
+    for i, band in enumerate(eq_intent.bands[:8]):
+        n = i + 1
+        shape = _PROQ3_SHAPE.get(band.band_type, 0.0)
+        gain_norm = (band.gain_db + 30.0) / _GAIN_RANGE
+
+        params[f"Band {n} Used"] = 1.0
+        params[f"Band {n} Enabled"] = 1.0
+        params[f"Band {n} Frequency"] = round(_proq3_freq_norm(band.freq_hz), 10)
+        params[f"Band {n} Gain"] = round(max(0.0, min(1.0, gain_norm)), 10)
+        params[f"Band {n} Q"] = round(_proq3_q_norm(band.q), 10)
+        params[f"Band {n} Shape"] = round(shape, 10)
+
+        for pname, pval in _DEFAULTS.items():
+            params.setdefault(f"Band {n} {pname}", pval)
+
+        if band.band_type in ("hp", "lp"):
+            params[f"Band {n} Slope"] = _SLOPE_12DB
+
+    # Disable unused bands
+    for n in range(len(eq_intent.bands) + 1, 9):
+        params[f"Band {n} Used"] = 0.0
+        params[f"Band {n} Enabled"] = 0.0
+        params[f"Band {n} Speakers"] = 0.0        # Stereo
+        params[f"Band {n} Stereo Placement"] = 0.5
+        params[f"Band {n} Solo"] = 0.0
+
+    # Global: Output Level with headroom protection.
+    # Pro-Q 3's Output Level range is -36 .. +36 dB, norm = (dB + 36) / 72.
+    # If the EQ adds any net boost, attenuate the output so the next plugin
+    # (typically a compressor calibrated at -18 dBFS) doesn't clip internally.
+    total_boost = sum(max(0.0, b.gain_db) for b in eq_intent.bands)
+    if total_boost > 0.0:
+        out_db = -total_boost
+        params["Output Level"] = round((out_db + 36.0) / 72.0, 10)
+    else:
+        params["Output Level"] = 0.5  # 0 dB, unity
+
+    return params
+
+
+# ════════════════════════════════════════════════════════════════
+# SSL EQ translation (post-comp tonal shaping)
+# ════════════════════════════════════════════════════════════════
+
+# Frequency lookup tables: (norm, Hz) pairs sorted by Hz.
+# Verified via reapy readback (2026-05-31).
+# Interpolation between knots for continuous norm values.
+
+_LF_FRQ_TABLE: list[tuple[float, float]] = [
+    (0.000, 30),
+    (0.230, 60),
+    (0.425, 150),
+    (0.650, 300),
+    (1.000, 450),
+]
+
+_LMF_FRQ_TABLE: list[tuple[float, float]] = [
+    (0.000, 200),
+    (0.260, 500),
+    (0.500, 1000),
+    (1.000, 2500),
+]
+
+_HMF_FRQ_TABLE: list[tuple[float, float]] = [
+    (0.000, 600),
+    (0.450, 2500),
+    (1.000, 7000),
+]
+
+_HF_FRQ_TABLE: list[tuple[float, float]] = [
+    (0.000, 1500),
+    (0.650, 10000),
+    (1.000, 16000),
+]
+
+_HP_FRQ_TABLE: list[tuple[float, float]] = [
+    (0.012, 16),
+    (0.440, 100),
+    (1.000, 350),
+]
+
+# Q: 0.1 (widest, norm=1.0) → 3.5 (narrowest, norm=0.0), reverse-linear.
+_SSL_Q_MIN = 0.1
+_SSL_Q_MAX = 3.5
+_SSL_Q_RANGE = _SSL_Q_MAX - _SSL_Q_MIN  # 3.4
+
+
+def _ssleq_freq_norm(target_hz: float, table: list[tuple[float, float]]) -> float:
+    """Find the norm value for *target_hz* via interpolation in *table*.
+
+    The table is ``[(norm, Hz), …]`` sorted ascending by Hz.
+    Values outside the table range are clamped to the nearest endpoint.
+    """
+    hz_list = [row[1] for row in table]
+
+    if target_hz <= hz_list[0]:
+        return table[0][0]
+    if target_hz >= hz_list[-1]:
+        return table[-1][0]
+
+    idx = bisect.bisect_left(hz_list, target_hz)
+    if idx == 0:
+        return table[0][0]
+
+    lo_n, lo_hz = table[idx - 1]
+    hi_n, hi_hz = table[idx]
+
+    if hi_hz == lo_hz:
+        return lo_n
+
+    t = (target_hz - lo_hz) / (hi_hz - lo_hz)
+    return lo_n + t * (hi_n - lo_n)
+
+
+def _ssleq_q_norm(q: float) -> float:
+    """Map SSL EQ Q value (0.1–3.5) to norm (1.0–0.0)."""
+    clamped = max(_SSL_Q_MIN, min(_SSL_Q_MAX, q))
+    return (_SSL_Q_MAX - clamped) / _SSL_Q_RANGE
+
+
+def _apply_ssleq_eq(eq_intent: EqIntent) -> dict[str, float]:
+    """Translate an :class:`EqIntent` into SSL EQ normalised (0–1) parameters.
+
+    SSL EQ has 4 bands: LF (shelf), LMF (bell), HMF (bell), HF (shelf).
+    All values are normalised to 0–1, ready for direct REAPER use.
+
+    Post-comp tonal shaping (additive only):
+    - ``bell`` / ``presence`` → HMF
+    - ``high_shelf`` / ``air`` → HF
+    - ``low_shelf`` / ``warmth`` → LF
+    - HPF is **not** applied (handled by pre-comp EQ1).
+    """
+    _LF_GAIN_RANGE = 34.0   # ±17 dB
+    _MF_GAIN_RANGE = 40.0   # ±20 dB
+    _HF_GAIN_RANGE = 34.0   # ±17 dB
+    _OUT_GAIN_RANGE = 24.0  # ±12 dB
+
+    params: dict[str, float] = {
+        "Bypass": 0.0,
+        "EQ IN": 1.0,
+        "Analog": 1.0,       # always on for character
+        "HP On/Off": 0.0,
+        "LMF Div3": 0.0,
+        "HMF Mul3": 0.0,
+        # Default gains at 0 dB
+        "LF Gain": 0.5,
+        "LMF Gain": 0.5,
+        "HMF Gain": 0.5,
+        "HF Gain": 0.5,
+        "Gain": 0.5,
+        # Default frequencies at mid-points
+        "LF Frq": 0.5,
+        "LMF Frq": 0.5,
+        "HMF Frq": 0.5,
+        "HF Frq": 0.5,
+        "HP Frq": 0.012,
+        # Default Q at mid-point
+        "LMF Q": 0.5,
+        "HMF Q": 0.5,
+    }
+
+    for band in eq_intent.bands:
+        if band.band_type in ("high_shelf", "air"):
+            # → HF shelf
+            gain_norm = (band.gain_db + _HF_GAIN_RANGE / 2) / _HF_GAIN_RANGE
+            params["HF Gain"] = round(max(0.0, min(1.0, gain_norm)), 10)
+            params["HF Frq"] = round(_ssleq_freq_norm(band.freq_hz, _HF_FRQ_TABLE), 10)
+
+        elif band.band_type in ("bell", "presence"):
+            # → HMF bell
+            gain_norm = (band.gain_db + _MF_GAIN_RANGE / 2) / _MF_GAIN_RANGE
+            params["HMF Gain"] = round(max(0.0, min(1.0, gain_norm)), 10)
+            params["HMF Frq"] = round(_ssleq_freq_norm(band.freq_hz, _HMF_FRQ_TABLE), 10)
+            params["HMF Q"] = round(_ssleq_q_norm(band.q), 10)
+
+        elif band.band_type == "low_shelf":
+            # → LF shelf (optional low warmth)
+            gain_norm = (band.gain_db + _LF_GAIN_RANGE / 2) / _LF_GAIN_RANGE
+            params["LF Gain"] = round(max(0.0, min(1.0, gain_norm)), 10)
+            params["LF Frq"] = round(_ssleq_freq_norm(band.freq_hz, _LF_FRQ_TABLE), 10)
+
+        elif band.band_type in ("hp",):
+            # HPF — unlikely in post-comp, but handle gracefully
+            params["HP On/Off"] = 1.0
+            params["HP Frq"] = round(_ssleq_freq_norm(band.freq_hz, _HP_FRQ_TABLE), 10)
+
+    # Output level: check total boost, compensate
+    total_boost = sum(max(0.0, b.gain_db) for b in eq_intent.bands)
+    if total_boost > 0.0:
+        # Attenuate output to protect headroom (post-comp, safe to trim)
+        out_db = -total_boost
+        out_norm = (out_db + _OUT_GAIN_RANGE / 2) / _OUT_GAIN_RANGE
+        params["Gain"] = round(max(0.0, min(1.0, out_norm)), 10)
+
+    return params
 
 
 class MixingEngine:
@@ -467,7 +922,16 @@ class MixingEngine:
             nodes.append(node)
 
             if fx_type == "eq":
-                self._apply_eq_baseline(track_index, idx, role)
+                file_path = sd.get("file_path", "")
+                eq_position = fx.eq_position if hasattr(fx, "eq_position") else "solo"
+                self._apply_eq_baseline(
+                    track_index, idx, role,
+                    genre=genre, stem_file_path=file_path,
+                    position=eq_position, fx_name=fx.name,
+                )
+                # Update node params with derived EQ bands for traceability
+                if hasattr(self, "_last_eq_params"):
+                    node.params = dict(self._last_eq_params)
             elif fx_type in _TRANSLATORS and rms is not None and peak is not None:
                 intent = _derive_compressor_intent(rms, peak, genre=genre)
                 preset = _get_compressor_preset(role, genre)
@@ -508,39 +972,104 @@ class MixingEngine:
         return changed
 
     def _apply_eq_baseline(self, track_index: int, fx_index: int,
-                           role: str) -> None:
-        """Apply conservative EQ baseline for *role* (``"vocal"`` or ``"backing"``).
+                           role: str, *,
+                           genre: str = "pop",
+                           stem_file_path: str = "",
+                           position: str = "solo",
+                           fx_name: str = "") -> None:
+        """Apply EQ to *track_index* / *fx_index* for the given *role*.
 
-        Uses :data:`_EQ_BASELINE` from :mod:`hermes_core.profiles`.
-        Currently only supports ReaEQ with ``"hp"`` and ``"bell"`` band types.
+        When *stem_file_path* points to a readable WAV file the full
+        spectrum-driven pipeline is used::
+
+            SpectrumAnalyzer → EqIntent → translator → FxManager
+
+        The translator is chosen based on *fx_name*:
+        - ``SSLEQ`` → :func:`_apply_ssleq_eq`
+        - Everything else → :func:`_apply_proq3_eq`
+
+        *position* ("pre" / "post" / "solo") controls which rules fire
+        (see :func:`_derive_eq_intent`).
+
+        Otherwise falls back to the static :data:`_EQ_BASELINE` from
+        :mod:`hermes_core.profiles`.
         """
+        self._last_eq_params = {}
+
+        # ── Spectrum-driven EQ (happy path) ─────────────────
+        if stem_file_path and os.path.exists(stem_file_path):
+            try:
+                report = SpectrumAnalyzer.analyze(stem_file_path)
+                eq_intent = _derive_eq_intent(
+                    report, role=role, genre=genre, position=position,
+                )
+
+                # Select translator based on FX
+                is_ssl = "ssleq" in fx_name.lower()
+                if is_ssl:
+                    normalized = _apply_ssleq_eq(eq_intent)
+                else:
+                    normalized = _apply_proq3_eq(eq_intent)
+
+                for pname, pval in normalized.items():
+                    self._fx.set_param(track_index, fx_index, pname, pval)
+
+                self._last_eq_params = normalized
+                log.info(
+                    "Auto-EQ (%s/%s/%s): %d bands @%s — %s",
+                    role, genre, position, len(eq_intent.bands),
+                    "SSLEQ" if is_ssl else "Pro-Q3",
+                    ", ".join(b.reason for b in eq_intent.bands),
+                )
+                return
+            except Exception as exc:
+                log.warning(
+                    "Spectrum-driven EQ failed (%s), falling back to baseline",
+                    exc,
+                )
+
+        # ── Static baseline fallback ─────────────────────────
         bands = _EQ_BASELINE.get(role, [])
         if not bands:
             return
 
+        # Apply via ReaEQ (the only EQ plugin with guaranteed params)
         for band_idx, band in enumerate(bands):
             btype = band.get("type", "")
             freq = band.get("freq_hz", 1000.0)
             gain = band.get("gain_db", 0.0)
             q = band.get("q", 1.0)
 
-            if btype == "hp":
-                # ReaEQ high-pass: enable band, set type to high-pass
-                self._fx.set_param(track_index, fx_index,
-                                   f"Band {band_idx + 1} Type", 0.0)
-                # Most ReaEQ params use "Band N Freq" / "Band N Gain" / "Band N Q"
-                pass  # ReaEQ-specific mapping — see note below
-            elif btype == "bell":
-                pass
+            try:
+                n = band_idx + 1
+                if btype == "hp":
+                    self._fx.set_param(track_index, fx_index,
+                                       f"Band {n} Type", 0.0)
+                    self._fx.set_param(track_index, fx_index,
+                                       f"Band {n} Freq", freq)
+                    self._fx.set_param(track_index, fx_index,
+                                       f"Band {n} Q", q)
+                    self._fx.set_param(track_index, fx_index,
+                                       f"Band {n} Enabled", 1.0)
+                elif btype == "bell":
+                    self._fx.set_param(track_index, fx_index,
+                                       f"Band {n} Type", 2.0)
+                    self._fx.set_param(track_index, fx_index,
+                                       f"Band {n} Freq", freq)
+                    self._fx.set_param(track_index, fx_index,
+                                       f"Band {n} Gain", gain)
+                    self._fx.set_param(track_index, fx_index,
+                                       f"Band {n} Q", q)
+                    self._fx.set_param(track_index, fx_index,
+                                       f"Band {n} Enabled", 1.0)
+                self._last_eq_params[f"Band {n} Freq"] = freq
+                self._last_eq_params[f"Band {n} Gain"] = gain
+            except Exception as exc:
+                log.debug("EQ baseline param set failed: %s", exc)
 
-        # NOTE: ReaEQ parameter names vary by REAPER version and localisation.
-        # The EQ baseline values above define the *intent*; the actual parameter
-        # mapping will be completed when we implement the EQ adapter layer
-        # (similar to the compressor translator layer).  For now, baseline EQ
-        # is intent-only and skipped at the parameter level.
-        log.debug(
-            "EQ baseline intent for %s track %d: %s",
-            role, track_index, bands,
+        log.info(
+            "EQ baseline (%s/%s): %d bands applied",
+            role, genre, len(bands),
         )
 
     # ── Scene 1: Connection & health ─────────────────────

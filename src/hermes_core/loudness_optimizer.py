@@ -45,6 +45,34 @@ class CompressionIntent:
 
 
 @dataclass
+class EqBandIntent:
+    """A single EQ band adjustment derived from spectrum analysis.
+
+    Describes *what* EQ change to make in plugin-agnostic terms.
+    The EQ translator layer maps this to physical plugin parameters.
+    """
+    band_type: str       # "hp", "lp", "bell", "high_shelf"
+    freq_hz: float
+    gain_db: float       # negative = cut, positive = boost
+    q: float
+    reason: str          # human-readable, e.g. "340Hz room mode Q=22.3 prominence=8.2dB"
+
+
+@dataclass
+class EqIntent:
+    """EQ goals derived from spectrum analysis.
+
+    This is the **adapter-pattern bridge** between spectrum analysis and
+    EQ-specific parameter translation — mirroring :class:`CompressionIntent`
+    for the EQ domain.  It describes *what* EQ changes to make, not *how*
+    to set the knobs on a specific EQ plugin.
+    """
+    bands: list[EqBandIntent]
+    spectral_tilt: str   # "dark" | "neutral" | "bright"
+    mud_detected: bool
+
+
+@dataclass
 class LoudnessResult:
     """Optimal-gain search result."""
     gain_db: float
