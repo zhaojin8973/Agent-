@@ -337,13 +337,17 @@ class TestCreateReverbSend:
         result = eng.create_reverb_send(src_track=3, level_db=-6.0)
 
         eng._tracks.create.assert_called_once_with(name="Verb Return")
-        eng._fx.add.assert_called_once_with(7, "ReaVerbate")
+        # Abbey Road EQ (ReaEQ) is auto-inserted before the reverb
+        assert eng._fx.add.call_count == 2
+        eng._fx.add.assert_any_call(7, "ReaEQ (Cockos)")
+        eng._fx.add.assert_any_call(7, "ReaVerbate")
         eng._send.create.assert_called_once_with(
             src=3, dest=7, level_db=-6.0, mode="post-fader"
         )
         assert result["aux_index"] == 7
         assert result["send"]["index"] == 0
         assert result["fx_index"] == 0
+        assert "abbey_eq_index" in result
 
 
 @pytest.mark.unit
@@ -844,3 +848,173 @@ class TestBalanceFaders:
         eng._balance_faders(stems, vocal_indices=[0], backing_indices=[1],
                             backing_reduction_lu=7.5)
         assert eng.apply_gain.call_count >= 1
+
+
+# ════════════════════════════════════════════════════════════
+# Micro-render + chain execution
+# ════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestMicroRender:
+    def test_clean_node_cache_hit(self):
+        """Clean node with valid output path returns cached path."""
+        from hermes_core.dag import AudioNode
+        eng = MixingEngine()
+        node = AudioNode(name="test", fx_type="eq")
+        node.mark_clean("/tmp/cached.wav")
+        # Create the fake cache file
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as td:
+            cache_path = os.path.join(td, "cached.wav")
+            with open(cache_path, "w") as f:
+                f.write("fake")
+            node.output_audio_path = cache_path
+            node.is_dirty = False
+            result = eng._micro_render_node(node, "/tmp/input.wav", td)
+            assert result == cache_path
+
+    def test_missing_input_wav_returns_none(self):
+        """No input WAV → skip render."""
+        from hermes_core.dag import AudioNode
+        eng = MixingEngine()
+        node = AudioNode(name="test", fx_type="comp")
+        node.is_dirty = True
+        result = eng._micro_render_node(node, None, "/tmp/cache")
+        assert result is None
+
+    def test_gen_calibration_signal(self):
+        """Calibration signal is -18 dBFS RMS, 5s, stereo."""
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as td:
+            path = MixingEngine._gen_calibration_signal(td, duration=1.0)
+            assert os.path.exists(path)
+            from hermes_core.signal import SignalAnalyzer
+            report = SignalAnalyzer.analyze(path)
+            # Should be close to -18 dBFS RMS
+            assert -20 < report.rms_db < -16
+
+
+@pytest.mark.unit
+class TestChainExecution:
+    def test_execute_chain_all_clean(self):
+        """All nodes clean → nothing rendered."""
+        from hermes_core.dag import AudioNode
+        eng = MixingEngine()
+        nodes = [AudioNode(name=f"n{i}", fx_type="eq") for i in range(3)]
+        for i, n in enumerate(nodes):
+            n.mark_clean(f"/tmp/n{i}.wav")
+        # No REAPER needed — all clean, all skipped
+        result = eng.execute_chain(nodes)
+        assert len(result) == 3
+        assert all(not n.is_dirty for n in result)
+
+    def test_first_dirty_returns_correct_index(self):
+        from hermes_core.dag import AudioNode, ChainExecutor
+        nodes = [AudioNode(name=f"n{i}", fx_type="eq") for i in range(3)]
+        for n in nodes:
+            n.mark_clean()
+        nodes[1].invalidate()
+        assert ChainExecutor.first_dirty(nodes) == 1
+
+    def test_make_chain_executor_returns_executor(self):
+        from hermes_core.dag import ChainExecutor
+        eng = MixingEngine()
+        exe = eng._make_chain_executor("/tmp/cache")
+        assert isinstance(exe, ChainExecutor)
+
+
+# ════════════════════════════════════════════════════════════
+# Preview / Finalize 双模渲染 + 湿声缓存
+# ════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestNumpyMix:
+    def test_mixes_dry_wet(self, tmp_path):
+        import numpy as np
+        import soundfile as sf
+        dry = tmp_path / "dry.wav"
+        wet = tmp_path / "wet.wav"
+        out = tmp_path / "mixed.wav"
+        sr = 48000
+        dry_data = np.ones((48000, 2), dtype=np.float64) * 0.5
+        wet_data = np.ones((48000, 2), dtype=np.float64) * 0.1
+        sf.write(str(dry), dry_data, sr)
+        sf.write(str(wet), wet_data, sr)
+
+        result = MixingEngine._numpy_mix(str(dry), str(wet), -6.0, str(out))
+        assert result is not None
+        assert os.path.exists(str(out))
+
+    def test_sr_mismatch_returns_none(self, tmp_path):
+        import numpy as np
+        import soundfile as sf
+        dry = tmp_path / "dry.wav"
+        wet = tmp_path / "wet.wav"
+        out = tmp_path / "mixed.wav"
+        sf.write(str(dry), np.zeros((48000, 1)), 48000)
+        sf.write(str(wet), np.zeros((44100, 1)), 44100)
+
+        result = MixingEngine._numpy_mix(str(dry), str(wet), 0.0, str(out))
+        assert result is None
+
+    def test_missing_file_returns_none(self, tmp_path):
+        out = tmp_path / "mixed.wav"
+        result = MixingEngine._numpy_mix(
+            "/nonexistent/dry.wav", "/nonexistent/wet.wav", 0.0, str(out),
+        )
+        assert result is None
+
+
+@pytest.mark.unit
+class TestPreviewRender:
+    def test_preview_without_reverb_uses_dry_only(self):
+        """render_preview works even without reverb send node."""
+        eng = MixingEngine()
+        eng._bridge.connect = MagicMock(return_value=True)
+        eng._bridge._api = MagicMock()
+        eng._bridge._reapy_module = MagicMock()
+        eng._bridge._api.GetMasterTrack.return_value = None
+        eng._bridge._api.CountTracks.return_value = 0
+        eng._reverb_send_node = None
+
+        # render_mix will fail (no project), preview should handle it
+        result = eng.render_preview("/tmp/preview_test")
+        assert result["mode"] == "preview"
+        # Without REAPER, dry render fails immediately
+        assert result.get("error") is not None or result.get("output_path") is None
+
+    def test_preview_returns_mastering_bypassed_flag(self):
+        """Preview output carries 'mastering': 'bypassed' on success."""
+        eng = MixingEngine()
+        eng._bridge.connect = MagicMock(return_value=True)
+        eng._bridge._api = MagicMock()
+        eng._bridge._api.CountTracks.return_value = 0
+        eng._bridge._api.GetMasterTrack.return_value = None
+        result = eng.render_preview("/tmp/test")
+        # May fail without REAPER; if it succeeds, mastering must be bypassed
+        if result.get("output_path"):
+            assert result.get("mastering") == "bypassed"
+            assert "warning" in result
+        else:
+            assert result.get("error") is not None
+
+
+@pytest.mark.unit
+class TestWetCache:
+    def test_no_reverb_node_returns_none(self):
+        eng = MixingEngine()
+        eng._reverb_send_node = None
+        result = eng._cache_reverb_wet("/tmp/cache")
+        assert result is None
+
+    def test_no_aux_index_returns_none(self):
+        from hermes_core.dag import SendNode, AudioNode
+        eng = MixingEngine()
+        src = AudioNode(name="src", fx_type="comp")
+        eng._reverb_send_node = SendNode(name="verb", fx_type="reverb",
+                                          source_node=src)
+        eng._reverb_send_node.params = {}
+        result = eng._cache_reverb_wet("/tmp/cache")
+        assert result is None

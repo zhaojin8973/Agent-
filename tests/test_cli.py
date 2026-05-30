@@ -14,6 +14,8 @@ from hermes_core.cli import (
     cmd_vocal_mix,
     cmd_check,
     cmd_batch,
+    cmd_calibrate,
+    cmd_adjust,
 )
 
 
@@ -230,4 +232,84 @@ class TestMain:
         with patch("hermes_core.cli.cmd_check", side_effect=SystemExit(0)) as mock_cmd:
             with pytest.raises(SystemExit):
                 main(["check", "--profile", "/fake/p.yaml"])
+            mock_cmd.assert_called_once()
+
+
+# ════════════════════════════════════════════════════════════
+# calibrate parser + errors
+# ════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestCalibrateParser:
+    def test_full_args(self):
+        parser = _build_parser()
+        args = parser.parse_args([
+            "calibrate", "--plugin", "Universal Audio 1176LN",
+            "--param", "Input", "--lo", "-50.0", "--hi", "10.0",
+            "--steps", "20", "--output", "cal.json",
+        ])
+        assert args.plugin == "Universal Audio 1176LN"
+        assert args.lo == -50.0
+        assert args.hi == 10.0
+        assert args.steps == 20
+
+
+@pytest.mark.unit
+class TestCmdCalibrateErrors:
+    def test_requires_plugin_and_param(self):
+        parser = _build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["calibrate"])
+
+
+# ════════════════════════════════════════════════════════════
+# adjust parser + errors + dispatch
+# ════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestAdjustParser:
+    def test_full_args(self):
+        parser = _build_parser()
+        args = parser.parse_args([
+            "adjust", "--project", "./out",
+            "--comp-ratio", "6.0", "--eq-presence", "3.0",
+            "--threshold", "-15.0", "--reverb-level", "-6.0",
+        ])
+        assert args.project == "./out"
+        assert args.comp_ratio == 6.0
+        assert args.reverb_level == -6.0
+
+    def test_no_changes_ok(self):
+        parser = _build_parser()
+        args = parser.parse_args(["adjust", "--project", "./out"])
+        assert args.comp_ratio is None
+
+
+@pytest.mark.unit
+class TestCmdAdjustErrors:
+    def test_nonexistent_project_returns_1(self):
+        args = argparse.Namespace(
+            command="adjust", project="/nonexistent/dir",
+            comp_ratio=None, eq_presence=None, threshold=None,
+            reverb_level=None, target_lufs=-12.0, preview=False,
+            watchdog=False,
+        )
+        assert cmd_adjust(args) == 1
+
+
+@pytest.mark.unit
+class TestNewDispatchers:
+    def test_adjust_dispatched(self):
+        with patch("hermes_core.cli.cmd_adjust", side_effect=SystemExit(0)) as mock_cmd:
+            with pytest.raises(SystemExit):
+                main(["adjust", "--project", "./out", "--comp-ratio", "6"])
+            mock_cmd.assert_called_once()
+
+    def test_calibrate_dispatched(self):
+        with patch("hermes_core.cli.cmd_calibrate", side_effect=SystemExit(0)) as mock_cmd:
+            with pytest.raises(SystemExit):
+                main(["calibrate", "--plugin", "X", "--param", "Y",
+                      "--lo", "0", "--hi", "1"])
             mock_cmd.assert_called_once()

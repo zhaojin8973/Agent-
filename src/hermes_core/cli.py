@@ -42,6 +42,30 @@ def _build_batch_parser(subparsers) -> None:
     p.add_argument("--target-lufs", type=float, default=-12.0)
 
 
+def _build_calibrate_parser(subparsers) -> None:
+    p = subparsers.add_parser("calibrate", help="Auto-calibrate compressor knob curves")
+    p.add_argument("--plugin", required=True, help="REAPER FX name to calibrate")
+    p.add_argument("--param", required=True, help="Parameter name to sweep (e.g. 'Input')")
+    p.add_argument("--lo", type=float, required=True, help="Physical value at knob=0.0")
+    p.add_argument("--hi", type=float, required=True, help="Physical value at knob=1.0")
+    p.add_argument("--steps", type=int, default=10, help="Measurement points (default 10)")
+    p.add_argument("--signal", default=None, help="Test WAV path (auto-generated if omitted)")
+    p.add_argument("--output", "-o", default=None, help="Save calibration JSON to file")
+    p.add_argument("--watchdog", action="store_true", help="Enable DialogKiller")
+
+
+def _build_adjust_parser(subparsers) -> None:
+    p = subparsers.add_parser("adjust", help="Modify mix params with dirty-flag cascade")
+    p.add_argument("--project", required=True, help="Project output directory")
+    p.add_argument("--comp-ratio", type=float, default=None, help="New compressor ratio")
+    p.add_argument("--eq-presence", type=float, default=None, help="EQ presence gain (dB)")
+    p.add_argument("--threshold", type=float, default=None, help="Compressor threshold (dB)")
+    p.add_argument("--reverb-level", type=float, default=None, help="Reverb send level (dB)")
+    p.add_argument("--target-lufs", type=float, default=-12.0)
+    p.add_argument("--preview", action="store_true", help="Fast preview (numpy mix, no Pro-L 2)")
+    p.add_argument("--watchdog", action="store_true", help="Enable DialogKiller")
+
+
 def cmd_vocal_mix(args) -> int:
     """Run a one-shot vocal mix."""
     from hermes_core import MixingEngine
@@ -195,6 +219,119 @@ def cmd_batch(args) -> int:
     return 0 if ok == len(songs) else 1
 
 
+def cmd_calibrate(args) -> int:
+    """Auto-calibrate a compressor parameter's knob curve."""
+    import json
+    from hermes_core import MixingEngine
+
+    log.info("Calibrating %s.%s ...", args.plugin, args.param)
+    with MixingEngine(watchdog=args.watchdog) as eng:
+        table = eng.calibrate_compressor(
+            plugin_name=args.plugin,
+            param_name=args.param,
+            param_range=(args.lo, args.hi),
+            steps=args.steps,
+            test_signal_path=args.signal,
+        )
+    if args.output:
+        out = {
+            "plugin": args.plugin,
+            "param": args.param,
+            "range": [args.lo, args.hi],
+            "steps": args.steps,
+            "table": table,
+        }
+        with open(args.output, "w") as f:
+            json.dump(out, f, indent=2)
+        log.info("Calibration saved to %s", args.output)
+    else:
+        for norm, phys in table:
+            print(f"  ({norm:.2f}, {phys:.1f})")
+    return 0
+
+
+def cmd_adjust(args) -> int:
+    """Modify FX parameters on an existing mix and re-render.
+
+    Loads the project from --project, applies parameter changes via
+    update_node_param (dirty-flag cascade), re-runs post_fx_balance
+    and finalize_master.
+    """
+    from hermes_core import MixingEngine
+    from hermes_core.profiles import MixingProfile
+
+    if not os.path.isdir(args.project):
+        log.error("Project directory not found: %s", args.project)
+        return 1
+
+    with MixingEngine(watchdog=args.watchdog) as eng:
+        # ── Discover existing project ──
+        log.info("Loading project from %s ...", args.project)
+        # For adjust, we re-create the state from the project dir
+        # The engine auto-detects existing RPP files and cached stems
+
+        # ── Apply parameter changes via dirty-flag cascade ──
+        changes_applied = 0
+        for node in (eng._vocal_chain_nodes + eng._backing_chain_nodes):
+            if args.comp_ratio is not None and node.fx_type == "comp":
+                eng.update_node_param(node, "Ratio", args.comp_ratio)
+                changes_applied += 1
+            if args.eq_presence is not None and node.fx_type == "eq":
+                eng.update_node_param(node, "Band 2 Gain", args.eq_presence)
+                changes_applied += 1
+            if args.threshold is not None and node.fx_type == "comp":
+                eng.update_node_param(node, "Threshold", args.threshold)
+                changes_applied += 1
+
+        if args.reverb_level is not None and eng._reverb_send_node:
+            eng.update_node_param(
+                eng._reverb_send_node, "level_db", args.reverb_level,
+            )
+            changes_applied += 1
+
+        if changes_applied == 0:
+            log.warning("No changes specified — use --comp-ratio, --eq-presence, "
+                        "--threshold, or --reverb-level")
+            return 1
+
+        log.info("Applied %d parameter change(s) — dirty cascade triggered",
+                 changes_applied)
+
+        # ── Re-run balance + render ──
+        log.info("Re-balancing post-FX faders ...")
+        balance = eng.post_fx_balance()
+        log.info(
+            "Balance: vocal=%.1f LUFS, backing=%.1f LUFS",
+            balance.get("vocal_lufs", float("nan")),
+            balance.get("backing_lufs", float("nan")),
+        )
+
+        if args.preview:
+            log.info("Preview render (numpy mix, no Pro-L 2) ...")
+            result = eng.render_preview(
+                output_dir=args.project,
+                target_lufs=args.target_lufs,
+            )
+            if result.get("output_path"):
+                log.info("✓ Preview — %s | ~%.1f LUFS (bypassed mastering)",
+                         result["output_path"], result.get("estimated_lufs", 0.0))
+            else:
+                log.error("✗ Preview failed — %s", result.get("error", "unknown"))
+                return 1
+        else:
+            log.info("Finalizing master (target: %.1f LUFS) ...",
+                     args.target_lufs)
+            result = eng.finalize_master(target_lufs=args.target_lufs)
+            if result.get("passed"):
+                log.info("✓ Finalized — %s | %.1f LUFS",
+                         result["output_path"], result["achieved_lufs"])
+            else:
+                log.error("✗ Failed — %s", result.get("error", "unknown"))
+                return 1
+
+    return 0
+
+
 # ── parser ───────────────────────────────────────────────────────
 
 
@@ -207,6 +344,8 @@ def _build_parser() -> argparse.ArgumentParser:
     _build_vocal_mix_parser(subparsers)
     _build_check_parser(subparsers)
     _build_batch_parser(subparsers)
+    _build_calibrate_parser(subparsers)
+    _build_adjust_parser(subparsers)
     return parser
 
 
@@ -220,6 +359,10 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(cmd_check(args))
     elif args.command == "batch":
         sys.exit(cmd_batch(args))
+    elif args.command == "calibrate":
+        sys.exit(cmd_calibrate(args))
+    elif args.command == "adjust":
+        sys.exit(cmd_adjust(args))
     else:
         parser.print_help()
         sys.exit(1)

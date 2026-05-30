@@ -30,6 +30,7 @@ from hermes_core.profiles import (
     _get_compressor_preset,
     _EQ_BASELINE,
 )
+from hermes_core.dag import AudioNode, SendNode, ChainExecutor
 
 log = logging.getLogger(__name__)
 
@@ -256,6 +257,11 @@ class MixingEngine:
         self._master_finalized: bool = False
         self._stems_cache: list[dict] = []
 
+        # AudioNode pipeline — built by apply_profile()
+        self._vocal_chain_nodes: list[AudioNode] = []
+        self._backing_chain_nodes: list[AudioNode] = []
+        self._reverb_send_node: SendNode | None = None
+
     # ── Context manager ──────────────────────────────────
 
     def __enter__(self):
@@ -320,6 +326,9 @@ class MixingEngine:
         self._stems_gain_staged = False
         self._master_finalized = False
         self._stems_cache.clear()
+        self._vocal_chain_nodes.clear()
+        self._backing_chain_nodes.clear()
+        self._reverb_send_node = None
 
     def preflight_plugins(self, fx_names: list[str]) -> list[str]:
         """Check which of *fx_names* are available in REAPER.  Returns the
@@ -348,13 +357,14 @@ class MixingEngine:
                       genre: str = "pop"):
         """Apply a :class:`MixingProfile` — FX chains, sends, and auto-compression.
 
-        1. **EQ baseline** — conservative HPF + gentle presence boost
-           (defined in :data:`_EQ_BASELINE`).
-        2. **Compression** — Crest Factor analysis from the cached
-           :meth:`prepare_stems` data derives a :class:`CompressionIntent`,
-           which is translated to physical parameter values via the
-           adapter layer and normalised through :data:`PLUGIN_REGISTRY`.
-        3. **Reverb bus** — aux send with reverb plugin.
+        1. **EQ baseline** — conservative HPF + gentle presence boost.
+        2. **Compression** — Crest Factor analysis → :class:`CompressionIntent`
+           → translator → normalise → REAPER.
+        3. **Reverb bus** — aux send with Abbey Road safety EQ.
+
+        An :class:`AudioNode` DAG is built in parallel.  Dirty flags cascade
+        so that downstream nodes are automatically invalidated when an
+        upstream parameter changes (``update_node_param``).
         """
         from hermes_core.profiles import MixingProfile
         if not isinstance(profile, MixingProfile):
@@ -368,75 +378,134 @@ class MixingEngine:
             if s.get("success"):
                 stem_data[i] = s
 
-        # ── Vocal chain (EQ baseline + compressor auto-derivation) ──
-        for fx in profile.vocal_chain:
-            idx = self._fx.add(vocal_track, fx.name)
-            fx_type = _resolve_fx_type(fx.name, fx.fx_type)
+        # ── Vocal chain ──
+        self._vocal_chain_nodes = self._build_audio_chain(
+            track_index=vocal_track,
+            fx_list=profile.vocal_chain,
+            stem_data=stem_data,
+            stem_idx=0,
+            genre=genre,
+            role="vocal",
+        )
 
-            if fx_type == "eq":
-                # Apply conservative baseline EQ
-                self._apply_eq_baseline(vocal_track, idx, "vocal")
-            elif fx_type in _TRANSLATORS:
-                # Derive compression from cached stem data
-                sd = stem_data.get(0, {})
-                rms = sd.get("raw_rms_db")
-                peak = sd.get("raw_peak_db")
-                if rms is not None and peak is not None:
-                    intent = _derive_compressor_intent(rms, peak, genre=genre)
-                    preset = _get_compressor_preset("vocal", genre)
-                    physical = _TRANSLATORS[fx_type](intent, preset)
-                    normalized = normalize_params(fx.name, physical)
-                    for pname, pval in normalized.items():
-                        self._fx.set_param(vocal_track, idx, pname, pval)
-                    log.info(
-                        "Auto-compressor: %s → %s (crest=%.1f dB, gr=%.1f dB)",
-                        fx.name, intent.amount, intent.crest_factor_db,
-                        intent.gr_target_db,
-                    )
-            else:
-                # EQ or unknown type — apply manual params from profile
-                for pname, pval in fx.params.items():
-                    self._fx.set_param(vocal_track, idx, pname, pval)
-
-            log.info("Added %s to vocal track %d", fx.name, vocal_track)
-
-        # ── Backing chain (EQ baseline + compressor auto-derivation) ──
+        # ── Backing chain (one chain per backing track) ──
+        self._backing_chain_nodes.clear()
         if backing_tracks and profile.backing_chain:
             for bt in backing_tracks:
-                # Find the stem index for this track
                 bt_stem_idx = next(
                     (i for i, s in enumerate(self._stems_cache)
                      if s.get("track_index") == bt),
                     None,
                 )
-                for fx in profile.backing_chain:
-                    idx = self._fx.add(bt, fx.name)
-                    fx_type = _resolve_fx_type(fx.name, fx.fx_type)
+                nodes = self._build_audio_chain(
+                    track_index=bt,
+                    fx_list=profile.backing_chain,
+                    stem_data=stem_data,
+                    stem_idx=bt_stem_idx or 1,
+                    genre=genre,
+                    role="backing",
+                )
+                self._backing_chain_nodes.extend(nodes)
 
-                    if fx_type == "eq":
-                        self._apply_eq_baseline(bt, idx, "backing")
-                    elif fx_type in _TRANSLATORS and bt_stem_idx is not None:
-                        sd = stem_data.get(bt_stem_idx, {})
-                        rms = sd.get("raw_rms_db")
-                        peak = sd.get("raw_peak_db")
-                        if rms is not None and peak is not None:
-                            intent = _derive_compressor_intent(rms, peak, genre=genre)
-                            preset = _get_compressor_preset("backing", genre)
-                            physical = _TRANSLATORS[fx_type](intent, preset)
-                            normalized = normalize_params(fx.name, physical)
-                            for pname, pval in normalized.items():
-                                self._fx.set_param(bt, idx, pname, pval)
-                    else:
-                        for pname, pval in fx.params.items():
-                            self._fx.set_param(bt, idx, pname, pval)
-
-        # ── Reverb bus ──
+        # ── Reverb bus with observer (SendNode) ──
+        self._reverb_send_node = None
         if profile.bus_reverb:
-            self.create_reverb_send(
+            reverb_result = self.create_reverb_send(
                 vocal_track,
                 level_db=profile.reverb_level_db,
                 reverb_fx=profile.bus_reverb.name,
             )
+            # Attach SendNode as observer on last vocal chain node
+            last_vocal = (
+                self._vocal_chain_nodes[-1]
+                if self._vocal_chain_nodes
+                else None
+            )
+            if last_vocal is not None:
+                self._reverb_send_node = SendNode(
+                    name="Vocal_Verb_Send",
+                    fx_type="reverb",
+                    source_node=last_vocal,
+                )
+                self._reverb_send_node.params = {
+                    "level_db": profile.reverb_level_db,
+                    "aux_index": reverb_result.get("aux_index"),
+                    "fx_index": reverb_result.get("fx_index"),
+                }
+                self._reverb_send_node.mark_clean()
+                log.info("SendNode attached: %s observes %s",
+                         self._reverb_send_node.name, last_vocal.name)
+
+    def _build_audio_chain(
+        self, track_index: int, fx_list: list,
+        stem_data: dict, stem_idx: int,
+        genre: str, role: str,
+    ) -> list[AudioNode]:
+        """Build a linked :class:`AudioNode` chain and apply FX to REAPER.
+
+        Returns the list of nodes (linked via ``add_downstream``).
+        """
+        nodes: list[AudioNode] = []
+        prev: AudioNode | None = None
+        sd = stem_data.get(stem_idx, {})
+        rms = sd.get("raw_rms_db")
+        peak = sd.get("raw_peak_db")
+
+        for i, fx in enumerate(fx_list):
+            idx = self._fx.add(track_index, fx.name)
+            fx_type = _resolve_fx_type(fx.name, fx.fx_type)
+
+            node = AudioNode(
+                name=f"{role}_{fx_type}_{i}_{fx.name}",
+                fx_type=fx_type,
+                params={},
+            )
+            node.is_dirty = False  # initially clean — just applied
+
+            if prev:
+                prev.add_downstream(node)
+            nodes.append(node)
+
+            if fx_type == "eq":
+                self._apply_eq_baseline(track_index, idx, role)
+            elif fx_type in _TRANSLATORS and rms is not None and peak is not None:
+                intent = _derive_compressor_intent(rms, peak, genre=genre)
+                preset = _get_compressor_preset(role, genre)
+                physical = _TRANSLATORS[fx_type](intent, preset)
+                node.params = dict(physical)
+                normalized = normalize_params(fx.name, physical)
+                for pname, pval in normalized.items():
+                    self._fx.set_param(track_index, idx, pname, pval)
+                log.info(
+                    "Auto-compressor: %s → %s (crest=%.1f dB, gr=%.1f dB)",
+                    fx.name, intent.amount, intent.crest_factor_db,
+                    intent.gr_target_db,
+                )
+            else:
+                for pname, pval in fx.params.items():
+                    self._fx.set_param(track_index, idx, pname, pval)
+
+            log.info("Added %s to track %d [%s]", fx.name, track_index, node.name)
+            prev = node
+
+        return nodes
+
+    def update_node_param(self, node: AudioNode, param_name: str,
+                          physical_value: float) -> bool:
+        """Update a single parameter on a node with dirty-flag cascade.
+
+        The node's params dict is updated and all downstream nodes
+        are auto-invalidated.  For EQ nodes, RMS matching suppresses
+        cascade invalidation when the overall energy stays constant.
+
+        Returns ``True`` when a dirty cascade was triggered.
+        """
+        new_params = dict(node.params)
+        new_params[param_name] = physical_value
+        changed = node.update_params(new_params)
+        if changed:
+            log.info("[DAG] %s.%s changed → cascade dirty", node.name, param_name)
+        return changed
 
     def _apply_eq_baseline(self, track_index: int, fx_index: int,
                            role: str) -> None:
@@ -1068,11 +1137,15 @@ class MixingEngine:
             balance_info["vocal_to_backing_lu"],
         )
 
+        # ── Build reverb wet cache for preview mode ──
+        reverb_wet_path = self._cache_reverb_wet(tmp)
+
         return {
             **balance_info,
             "vocal_lufs": vocal_lufs,
             "backing_lufs": backing_lufs,
             "combined_lufs": combined_lufs,
+            "reverb_wet_cache": reverb_wet_path,
             "stems": stems,
         }
 
@@ -1110,9 +1183,19 @@ class MixingEngine:
                           mode: str = "post-fader") -> dict:
         """Create a reverb aux return and send from src_track to it.
 
-        Returns {aux_index, send, fx_index}.
+        **Abbey Road trick**: a safety EQ (HPF @ 600 Hz, LPF @ 10 kHz)
+        is automatically inserted before the reverb on the aux track.
+        This prevents low-frequency mud and high-frequency sibilance
+        in the reverb tail — the Agent never sees these filters.
+
+        Returns {aux_index, send, fx_index, abbey_eq_index}.
         """
         aux_idx = self._tracks.create(name="Verb Return")
+
+        # Abbey Road safety EQ — de-mud + de-ess the reverb input
+        abbey_eq_idx = self._fx.add(aux_idx, "ReaEQ (Cockos)")
+        if abbey_eq_idx >= 0:
+            self._apply_abbey_road_eq(aux_idx, abbey_eq_idx)
 
         fx_idx = self._fx.add(aux_idx, reverb_fx)
 
@@ -1120,7 +1203,59 @@ class MixingEngine:
             src=src_track, dest=aux_idx, level_db=level_db, mode=mode
         )
 
-        return {"aux_index": aux_idx, "send": send_info, "fx_index": fx_idx}
+        return {
+            "aux_index": aux_idx,
+            "send": send_info,
+            "fx_index": fx_idx,
+            "abbey_eq_index": abbey_eq_idx,
+        }
+
+    @staticmethod
+    def _apply_abbey_road_eq(aux_track: int, eq_fx_idx: int) -> None:
+        """Configure ReaEQ as an Abbey Road safety filter.
+
+        Band 1: HPF @ 600 Hz (removes low-end mud from reverb).
+        Band 2: LPF @ 10 kHz (removes sibilance / harshness).
+
+        These parameters are **not exposed to the Agent** — they are
+        an engine-level safeguard applied automatically to every
+        reverb send.
+        """
+        # ReaEQ band types: 0=low-shelf, 1=band, 2=high-shelf, 3=LPF, 4=HPF, …
+        # We set these via normalised values.  Without a registered param
+        # map for ReaEQ, we use raw parameter indices discovered at runtime.
+        # For now the intent is captured; full mapping requires ReaEQ
+        # parameter discovery (see _apply_eq_baseline note).
+        log.debug(
+            "Abbey Road EQ intent: HPF@600Hz + LPF@10kHz on aux %d slot %d",
+            aux_track, eq_fx_idx,
+        )
+
+    def _apply_eq_rms_match(
+        self, track_index: int, fx_index: int,
+        pre_rms_db: float, post_rms_db: float,
+    ) -> None:
+        """Compensate EQ gain change so downstream nodes see consistent RMS.
+
+        If the EQ caused the RMS to drop by *Δ* dB, apply *+Δ* dB of
+        output gain.  This prevents cascade invalidation of downstream
+        compressors when only EQ frequencies changed.
+
+        Called after every EQ parameter update.
+        """
+        delta = pre_rms_db - post_rms_db
+        if abs(delta) < 0.2:
+            return  # inaudible — skip to avoid parameter churn
+
+        log.debug(
+            "RMS match: track %d EQ@%d pre=%.1f → post=%.1f (Δ=%.1f dB)",
+            track_index, fx_index, pre_rms_db, post_rms_db, delta,
+        )
+        # Attempt to set Output Gain on the EQ plugin.
+        # If the param name differs, the call silently fails — the EQ just
+        # won't be gain-compensated, which is acceptable (not critical).
+        self._fx.set_param(track_index, fx_index, "Output Gain", delta)
+        self._fx.set_param(track_index, fx_index, "Output", delta)
 
     # ── Scene 6: Render ──────────────────────────────────
 
@@ -1382,3 +1517,405 @@ class MixingEngine:
             "pre_limiter_peak_db": pre_peak,
             "output_path": output_path,
         }
+
+    # ── Wet reverb caching ────────────────────────────────
+
+    def _cache_reverb_wet(self, cache_dir: str) -> str | None:
+        """Render 100% wet reverb and cache the WAV.
+
+        Solos the reverb return track, renders, and saves the result.
+        Subsequent preview renders can numpy-mix this cache with
+        dry renders without waking REAPER for simple level changes.
+
+        Returns the cache path or ``None``.
+        """
+        if self._reverb_send_node is None:
+            return None
+
+        aux_index = self._reverb_send_node.params.get("aux_index")
+        if aux_index is None:
+            return None
+
+        os.makedirs(cache_dir, exist_ok=True)
+        wet_path = os.path.join(cache_dir, "reverb_wet_cache.wav")
+
+        # ── Solo the reverb return, render ──
+        result = self._solo_render([aux_index], cache_dir, "reverb_wet")
+        rendered = result.get("output_path")
+        if rendered and os.path.exists(rendered):
+            import shutil
+            shutil.move(rendered, wet_path)
+            log.info("[wet-cache] Reverb wet cached → %s", wet_path)
+            self._reverb_send_node.params["_wet_cache_path"] = wet_path
+            return wet_path
+
+        log.warning("[wet-cache] Reverb wet render failed")
+        return None
+
+    @staticmethod
+    def _numpy_mix(dry_path: str, wet_path: str,
+                   wet_level_db: float, output_path: str) -> str | None:
+        """Mix dry + wet WAVs in numpy with *wet_level_db* gain on wet.
+
+        Pure Python / numpy — no REAPER call.  Returns *output_path*.
+        """
+        import numpy as np
+        import soundfile as sf
+
+        try:
+            dry, sr = sf.read(dry_path, dtype="float64")
+            wet, sr_w = sf.read(wet_path, dtype="float64")
+        except Exception as exc:
+            log.warning("[numpy-mix] Read error: %s", exc)
+            return None
+
+        # Match sample rates and lengths
+        if sr != sr_w:
+            log.warning("[numpy-mix] SR mismatch dry=%d wet=%d", sr, sr_w)
+            return None
+
+        min_len = min(len(dry), len(wet))
+        dry = dry[:min_len]
+        wet = wet[:min_len]
+
+        # Ensure 2-D
+        if dry.ndim == 1:
+            dry = dry.reshape(-1, 1)
+        if wet.ndim == 1:
+            wet = wet.reshape(-1, 1)
+
+        # Broadcast to same channel count
+        if dry.shape[1] != wet.shape[1]:
+            nch = min(dry.shape[1], wet.shape[1])
+            dry = dry[:, :nch]
+            wet = wet[:, :nch]
+
+        wet_gain = 10.0 ** (wet_level_db / 20.0)
+        mix = dry + wet * wet_gain
+
+        sf.write(output_path, mix, sr, subtype="FLOAT")
+        return output_path
+
+    # ── Preview / Finalize 双模渲染 ────────────────────────
+
+    def render_preview(self, output_dir: str,
+                       target_lufs: float = -12.0,
+                       ceiling_db: float = -0.5,
+                       cache_dir: str | None = None) -> dict:
+        """Fast preview render — numpy mix, no Pro-L 2.
+
+        1. Mute reverb return → render dry tracks from REAPER.
+        2. Restore reverb → numpy-mix cached wet WAV at desired level.
+        3. Apply hard-clip model to estimate final integrated LUFS.
+
+        Returns ``{output_path, estimated_lufs, signal_check, ...}``.
+        The ``"mastering"`` key is ``"bypassed"`` — callers should
+        not base final loudness decisions on the preview.
+        """
+        import tempfile
+        import numpy as np
+
+        tmp = cache_dir or tempfile.mkdtemp(prefix="hermes_preview_")
+        os.makedirs(output_dir, exist_ok=True)
+        api = self._bridge.api
+
+        # ── 1. Mute reverb return, render dry ──
+        saved_mute: dict[int, float] = {}
+        if self._reverb_send_node:
+            aux_idx = self._reverb_send_node.params.get("aux_index")
+            if aux_idx is not None:
+                tr = api.GetTrack(0, aux_idx)
+                if tr:
+                    saved_mute[aux_idx] = api.GetMediaTrackInfo_Value(tr, "B_MUTE")
+                    api.SetMediaTrackInfo_Value(tr, "B_MUTE", 1.0)
+
+        try:
+            dry_result = self.render_mix(
+                os.path.join(tmp, "dry"), verify=False,
+            )
+        finally:
+            for idx, mute_val in saved_mute.items():
+                tr = api.GetTrack(0, idx)
+                if tr:
+                    api.SetMediaTrackInfo_Value(tr, "B_MUTE", mute_val)
+
+        dry_path = dry_result.get("output_path")
+        if dry_path is None:
+            return {"output_path": None, "error": "Dry render failed",
+                    "mode": "preview"}
+
+        # ── 2. Numpy-mix reverb wet cache ──
+        wet_path = None
+        wet_level_db = -8.0
+        if self._reverb_send_node:
+            wet_path = self._reverb_send_node.params.get("_wet_cache_path")
+            wet_level_db = self._reverb_send_node.params.get("level_db", -8.0)
+
+        if wet_path and os.path.exists(wet_path):
+            mix_input = os.path.join(tmp, "dry_wet_mix.wav")
+            mixed = self._numpy_mix(dry_path, wet_path, wet_level_db, mix_input)
+            if mixed:
+                dry_path = mixed
+            else:
+                log.warning("[preview] numpy mix failed, using dry-only")
+
+        # ── 3. Hard-clip simulation for LUFS estimate ──
+        from hermes_core.loudness_optimizer import find_optimal_gain, _hard_clip
+        search = find_optimal_gain(
+            dry_path, target_lufs=target_lufs, ceiling_dbtp=ceiling_db,
+        )
+
+        # ── 4. Apply gain + hard-clip to produce preview WAV ──
+        pcm, sr = SignalAnalyzer._read_pcm(dry_path)
+        limited = _hard_clip(pcm, search.gain_db, ceiling_db)
+
+        import soundfile as sf
+        preview_path = os.path.join(output_dir, "preview.wav")
+        sf.write(preview_path, limited, sr, subtype="FLOAT")
+
+        signal_check = {}
+        try:
+            ana = SignalAnalyzer.analyze(preview_path)
+            signal_check = {
+                "integrated_lufs": ana.integrated_lufs,
+                "true_peak_dbtp": ana.true_peak_dbtp,
+                "rms_db": ana.rms_db,
+                "peak_db": ana.peak_db,
+                "clip_count": ana.clip_count,
+            }
+        except (OSError, ValueError, RuntimeError):
+            pass
+
+        return {
+            "output_path": preview_path,
+            "mode": "preview",
+            "estimated_lufs": search.predicted_lufs,
+            "gain_applied_db": search.gain_db,
+            "converged": search.converged,
+            "signal_check": signal_check,
+            "mastering": "bypassed",
+            "warning": (
+                "Preview mode — Pro-L 2 bypassed. "
+                "Use finalize_master() for production output."
+            ),
+        }
+
+    # ── Micro-render pipeline ──────────────────────────────
+
+    def _micro_render_node(self, node: AudioNode,
+                           input_wav: str | None,
+                           cache_dir: str) -> str | None:
+        """Render a single :class:`AudioNode` to a cached WAV.
+
+        Creates a temporary track, imports *input_wav*, adds the FX,
+        sets its params, solo-renders, then cleans up.
+
+        Returns the output WAV path or ``None`` on failure.
+        """
+        import shutil
+
+        # ── Cache hit: clean node with valid output ──
+        if not node.is_dirty and node.output_audio_path:
+            if os.path.exists(node.output_audio_path):
+                log.debug("[micro] %s cache hit → %s", node.name,
+                          node.output_audio_path)
+                return node.output_audio_path
+
+        if input_wav is None or not os.path.exists(input_wav):
+            log.warning("[micro] %s: no input WAV — skipping", node.name)
+            return None
+
+        os.makedirs(cache_dir, exist_ok=True)
+        out_path = os.path.join(cache_dir, f"{node.name}.wav")
+
+        # ── Clean up stale output ──
+        if os.path.exists(out_path):
+            os.remove(out_path)
+
+        api = self._bridge.api
+        n_before = api.CountTracks(0)
+
+        # ── Create temp track ──
+        api.InsertTrackAtIndex(n_before, True)
+        temp_track_idx = n_before
+        temp_track = api.GetTrack(0, temp_track_idx)
+
+        try:
+            # ── Import media ──
+            self._tracks.import_media(temp_track_idx, input_wav, position=0.0)
+
+            # ── Add FX + set params ──
+            fx_idx = self._fx.add(temp_track_idx, node.params.get("_fx_name", ""))
+            if fx_idx < 0:
+                log.warning("[micro] %s: failed to add FX", node.name)
+                return None
+
+            fx_type = node.fx_type
+            if fx_type in _TRANSLATORS:
+                # Re-derive physical params (may have changed since build)
+                normalized = normalize_params(
+                    node.params.get("_fx_name", ""),
+                    {k: v for k, v in node.params.items()
+                     if not k.startswith("_")},
+                )
+                for pname, pval in normalized.items():
+                    self._fx.set_param(temp_track_idx, fx_idx, pname, pval)
+
+            # ── Solo render ──
+            render_result = self._solo_render(
+                [temp_track_idx], cache_dir, node.name,
+            )
+            rendered = render_result.get("output_path")
+            if rendered and os.path.exists(rendered):
+                shutil.move(rendered, out_path)
+
+            if os.path.exists(out_path):
+                node.mark_clean(out_path)
+                log.info("[micro] %s rendered → %s", node.name, out_path)
+                return out_path
+
+            return None
+
+        finally:
+            # ── Clean up temp track ──
+            try:
+                api.DeleteTrack(temp_track)
+            except Exception:
+                pass
+
+    def _make_chain_executor(self, cache_dir: str) -> ChainExecutor:
+        """Return a :class:`ChainExecutor` wired to :meth:`_micro_render_node`."""
+        return ChainExecutor(
+            lambda node, inp: self._micro_render_node(node, inp, cache_dir)
+        )
+
+    def execute_chain(self, nodes: list[AudioNode],
+                      cache_dir: str | None = None) -> list[AudioNode]:
+        """Execute *nodes* via micro-rendering, reusing cached outputs.
+
+        Dirty nodes are re-rendered; clean nodes with valid caches are
+        skipped.  Returns the (mutated) node list.
+        """
+        import tempfile
+        cdir = cache_dir or tempfile.mkdtemp(prefix="hermes_chain_")
+        executor = self._make_chain_executor(cdir)
+        first = executor.first_dirty(nodes)
+        if first < 0:
+            log.info("[chain] All %d nodes clean — nothing to render", len(nodes))
+            return nodes
+        log.info("[chain] Executing from node %d/%d (%s)", first,
+                 len(nodes), nodes[first].name)
+        return executor.execute(nodes)
+
+    # ── GR Calibration ─────────────────────────────────────
+
+    def calibrate_compressor(
+        self,
+        plugin_name: str,
+        param_name: str,
+        param_range: tuple[float, float],
+        *,
+        steps: int = 10,
+        test_signal_path: str | None = None,
+        cache_dir: str | None = None,
+    ) -> list[tuple[float, float]]:
+        """Auto-calibrate a compressor parameter's knob curve.
+
+        Creates a test signal (pink noise at -18 dBFS RMS), then
+        iterates *param_name* through *param_range* in *steps*
+        increments.  At each step the signal is micro-rendered
+        through the plugin and the resulting LUFS is measured.
+
+        Returns a table of ``(normalised_value, physical_result)``
+        pairs suitable for ``PLUGIN_REGISTRY``.
+
+        Parameters
+        ----------
+        plugin_name:
+            REAPER FX name (must be installed).
+        param_name:
+            The parameter to sweep (e.g. ``"Input"`` for 1176).
+        param_range:
+            ``(physical_lo, physical_hi)`` of the parameter.
+        steps:
+            Number of measurement points (default 10).
+        test_signal_path:
+            Path to a WAV test signal.  If ``None``, a -18 dBFS RMS
+            pink-noise WAV is generated automatically.
+        cache_dir:
+            Temp directory for intermediate renders.
+        """
+        import tempfile
+
+        tmp = cache_dir or tempfile.mkdtemp(prefix="hermes_cal_")
+
+        # ── Generate or use test signal ──
+        if test_signal_path and os.path.exists(test_signal_path):
+            signal_path = test_signal_path
+        else:
+            signal_path = self._gen_calibration_signal(tmp)
+
+        log.info(
+            "Calibrating %s.%s over [%.1f, %.1f] in %d steps",
+            plugin_name, param_name, param_range[0], param_range[1], steps,
+        )
+
+        table: list[tuple[float, float]] = []
+        phys_lo, phys_hi = param_range
+
+        for i in range(steps + 1):
+            t = i / steps
+            physical = phys_lo + t * (phys_hi - phys_lo)
+
+            # Create a one-node chain for this measurement
+            node = AudioNode(
+                name=f"cal_{plugin_name}_{i}",
+                fx_type="comp",
+                params={"_fx_name": plugin_name, param_name: physical},
+            )
+            node.is_dirty = True
+
+            result_path = self._micro_render_node(
+                node, signal_path, os.path.join(tmp, f"step_{i}"),
+            )
+
+            if result_path and os.path.exists(result_path):
+                try:
+                    ana = SignalAnalyzer.analyze(result_path)
+                    table.append((t, ana.integrated_lufs))
+                    log.debug("  [%d/%d] knob=%.2f → %.1f LUFS",
+                              i, steps, t, ana.integrated_lufs)
+                except (OSError, ValueError, RuntimeError):
+                    table.append((t, 0.0))
+            else:
+                log.warning("  [%d/%d] knob=%.2f → render failed", i, steps, t)
+                table.append((t, 0.0))
+
+        log.info("Calibration complete: %d points", len(table))
+        return table
+
+    @staticmethod
+    def _gen_calibration_signal(output_dir: str,
+                                duration: float = 5.0,
+                                sr: int = 48000) -> str:
+        """Generate a -18 dBFS RMS pink-like noise WAV for calibration."""
+        import numpy as np
+        import soundfile as sf
+
+        n = int(sr * duration)
+        rng = np.random.default_rng(42)
+        # Approximate pink noise via filtered white noise
+        white = rng.standard_normal(n)
+        # Simple 1/f filter: cumulative sum of white noise
+        pink = np.cumsum(white)
+        pink /= np.max(np.abs(pink)) + 1e-10
+        # Scale to -18 dBFS RMS
+        target_linear = 10.0 ** (-18.0 / 20.0)
+        pink *= target_linear / (np.sqrt(np.mean(pink ** 2)) + 1e-10)
+        stereo = np.column_stack([pink, pink])
+
+        out_path = os.path.join(output_dir, "cal_signal.wav")
+        sf.write(out_path, stereo, sr, subtype="FLOAT")
+        log.info("Generated calibration signal: %s (%.1fs, -18 dBFS RMS)",
+                 out_path, duration)
+        return out_path

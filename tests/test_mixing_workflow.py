@@ -433,7 +433,16 @@ class TestVocalMixing:
             f"Expected vocal + backing + verb return = 3, got {len(tracks)}"
         )
         verb_chain = eng.get_fx_chain(reverb["aux_index"])
-        assert len(verb_chain) == 1
+        # Abbey Road EQ (ReaEQ) is auto-inserted before the reverb
+        assert len(verb_chain) == 2, (
+            f"Expected Abbey Road EQ + reverb = 2, got {len(verb_chain)}"
+        )
+        assert any("ReaEQ" in fx["name"] for fx in verb_chain), (
+            "Abbey Road EQ should be auto-inserted"
+        )
+        assert any(_REVERB_PLUGIN in fx["name"] for fx in verb_chain), (
+            f"{_REVERB_PLUGIN} should be on aux"
+        )
 
     # ── Scene 5: Checkpoints ────────────────────────────────
 

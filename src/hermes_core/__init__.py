@@ -25,6 +25,7 @@ from hermes_core.normalize import (
     normalize_params,
 )
 from hermes_core.loudness_optimizer import CompressionIntent
+from hermes_core.dag import AudioNode, SendNode, ChainExecutor
 
 __all__ = [
     "ReaperBridge",
@@ -59,4 +60,8 @@ __all__ = [
     "normalize_params",
     # Compression
     "CompressionIntent",
+    # DAG / AudioNode pipeline
+    "AudioNode",
+    "SendNode",
+    "ChainExecutor",
 ]
