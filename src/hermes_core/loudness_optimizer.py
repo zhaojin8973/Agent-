@@ -27,6 +27,23 @@ _CALIBRATION_FILE = "loudness_calibration.json"
 
 # ── data structures ──────────────────────────────────────────
 
+
+@dataclass
+class CompressionIntent:
+    """Compression goals derived from Crest Factor analysis.
+
+    This is the **adapter-pattern bridge** between signal analysis and
+    compressor-specific parameter translation.  It describes *what* the
+    compressor should do (in plugin-agnostic terms), not *how* to set
+    the knobs.
+    """
+    amount: str            # "light" | "medium" | "heavy"
+    gr_target_db: float    # target gain reduction (dB)
+    crest_factor_db: float  # Peak - RMS
+    rms_db: float          # reference RMS after clip gain (≈ -18 dBFS)
+    peak_db: float         # peak level after clip gain
+
+
 @dataclass
 class LoudnessResult:
     """Optimal-gain search result."""

@@ -15,6 +15,81 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 
+# ── type aliases (name-based fallback when fx_type is empty) ─────
+
+_TYPE_ALIASES: dict[str, str] = {
+    "1176":     "fet",
+    "LA-2A":    "opto",
+    "CL-1B":    "opto",
+    "RVox":     "rvox",
+    "RComp":    "vca",
+    "API 2500": "vca",
+    "Pro-C":    "vca",
+    "SSL":      "vca",
+    "Pro-Q":    "eq",
+    "ReaEQ":    "eq",
+    "Pro-L":    "limiter",
+    "Valhalla": "reverb",
+    "ReaVerb":  "reverb",
+}
+
+
+def _resolve_fx_type(fx_name: str, declared_type: str = "") -> str:
+    """Return the compressor type string for *fx_name*.
+
+    If *declared_type* is non-empty it is returned as-is (profile author's
+    explicit choice).  Otherwise a case-insensitive substring match against
+    :data:`_TYPE_ALIASES` is used as a fallback.
+    """
+    if declared_type:
+        return declared_type
+    name_lower = fx_name.lower()
+    for alias, typ in _TYPE_ALIASES.items():
+        if alias.lower() in name_lower:
+            return typ
+    return ""
+
+
+# ── compressor style presets (attack / release per genre) ────────
+
+_COMPRESSOR_PRESETS: dict[str, dict[str, dict[str, float]]] = {
+    "vocal": {
+        "pop":     {"attack_ms": 5.0,  "release_ms": 80.0},
+        "folk":    {"attack_ms": 10.0, "release_ms": 120.0},
+        "rock":    {"attack_ms": 3.0,  "release_ms": 60.0},
+        "default": {"attack_ms": 5.0,  "release_ms": 100.0},
+    },
+    "backing": {
+        "pop":     {"attack_ms": 10.0, "release_ms": 150.0},
+        "folk":    {"attack_ms": 15.0, "release_ms": 200.0},
+        "rock":    {"attack_ms": 5.0,  "release_ms": 100.0},
+        "default": {"attack_ms": 10.0, "release_ms": 150.0},
+    },
+}
+
+
+def _get_compressor_preset(role: str, genre: str) -> dict[str, float]:
+    """Return ``{attack_ms, release_ms}`` for *role* + *genre*."""
+    role_presets = _COMPRESSOR_PRESETS.get(role, _COMPRESSOR_PRESETS.get("vocal", {}))
+    return role_presets.get(genre, role_presets.get("default", {"attack_ms": 5.0, "release_ms": 100.0}))
+
+
+# ── conservative EQ baseline (no FFT analysis) ───────────────────
+
+_EQ_BASELINE: dict[str, list[dict]] = {
+    "vocal": [
+        # Remove sub-bass rumble, proximity effect
+        {"type": "hp", "freq_hz": 80.0, "q": 0.7},
+        # Gentle presence lift — helps vocal cut through
+        {"type": "bell", "freq_hz": 3000.0, "gain_db": 1.5, "q": 1.0},
+    ],
+    "backing": [
+        # Remove sub-sonic content only
+        {"type": "hp", "freq_hz": 40.0, "q": 0.7},
+    ],
+}
+
+
 # ── data structures ──────────────────────────────────────────────
 
 
@@ -22,6 +97,7 @@ log = logging.getLogger(__name__)
 class FXPreset:
     """A single plugin slot in a chain."""
     name: str                           # REAPER FX name (exact match required)
+    fx_type: str = ""                   # "vca" | "fet" | "opto" | "rvox" | "eq" | "reverb" | "limiter" | ""
     params: dict[str, float] = field(default_factory=dict)
     alternatives: list[str] = field(default_factory=list)
 
@@ -99,6 +175,7 @@ class MixingProfile:
             return FXPreset(name=raw)
         return FXPreset(
             name=raw.get("name", ""),
+            fx_type=raw.get("type", raw.get("fx_type", "")),
             params=raw.get("params", {}),
             alternatives=raw.get("alternatives", []),
         )

@@ -3,7 +3,7 @@
 import pytest
 from pathlib import Path
 
-from hermes_core.profiles import FXPreset, MixingProfile
+from hermes_core.profiles import FXPreset, MixingProfile, _resolve_fx_type, _get_compressor_preset, _EQ_BASELINE
 
 
 # ════════════════════════════════════════════════════════════
@@ -222,3 +222,100 @@ class TestEdgeCases:
             "description": "A test profile for rock mixing",
         })
         assert "rock mixing" in profile.description
+
+
+# ════════════════════════════════════════════════════════════
+# FXPreset.fx_type
+# ════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestFxType:
+    def test_fx_type_from_yaml(self):
+        """fx_type can be set via 'type' field in YAML."""
+        fx = MixingProfile._parse_fx({"name": "1176", "type": "fet"})
+        assert fx.fx_type == "fet"
+
+    def test_fx_type_default_empty(self):
+        fx = FXPreset(name="SomeFX")
+        assert fx.fx_type == ""
+
+
+# ════════════════════════════════════════════════════════════
+# _resolve_fx_type
+# ════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestResolveFxType:
+    def test_declared_type_wins(self):
+        assert _resolve_fx_type("My Plugin", "vca") == "vca"
+
+    def test_1176_alias(self):
+        assert _resolve_fx_type("Universal Audio 1176LN", "") == "fet"
+
+    def test_la2a_alias(self):
+        assert _resolve_fx_type("Teletronix LA-2A", "") == "opto"
+
+    def test_rvox_alias(self):
+        assert _resolve_fx_type("Waves RVox (Waves)", "") == "rvox"
+
+    def test_proc_alias(self):
+        assert _resolve_fx_type("FabFilter Pro-C 2", "") == "vca"
+
+    def test_eq_alias(self):
+        assert _resolve_fx_type("FabFilter Pro-Q 3", "") == "eq"
+
+    def test_reverb_alias(self):
+        assert _resolve_fx_type("ValhallaVintageVerb", "") == "reverb"
+
+    def test_unknown_returns_empty(self):
+        assert _resolve_fx_type("SomeUnknownPlugin", "") == ""
+
+
+# ════════════════════════════════════════════════════════════
+# _get_compressor_preset
+# ════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestCompressorPresets:
+    def test_vocal_pop(self):
+        p = _get_compressor_preset("vocal", "pop")
+        assert p["attack_ms"] == 5.0
+        assert p["release_ms"] == 80.0
+
+    def test_vocal_folk(self):
+        p = _get_compressor_preset("vocal", "folk")
+        assert p["attack_ms"] == 10.0
+
+    def test_backing_rock(self):
+        p = _get_compressor_preset("backing", "rock")
+        assert p["attack_ms"] == 5.0
+        assert p["release_ms"] == 100.0
+
+    def test_unknown_genre_falls_back(self):
+        p = _get_compressor_preset("vocal", "jazz")
+        assert p["attack_ms"] == 5.0  # default
+
+    def test_unknown_role_falls_back(self):
+        p = _get_compressor_preset("drums", "pop")
+        assert "attack_ms" in p
+
+
+# ════════════════════════════════════════════════════════════
+# _EQ_BASELINE
+# ════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestEQBaseline:
+    def test_vocal_has_bands(self):
+        bands = _EQ_BASELINE["vocal"]
+        assert len(bands) >= 1
+        assert bands[0]["type"] == "hp"
+
+    def test_backing_has_bands(self):
+        bands = _EQ_BASELINE["backing"]
+        assert len(bands) >= 1
+        assert bands[0]["freq_hz"] == 40.0

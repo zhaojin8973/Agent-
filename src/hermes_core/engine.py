@@ -22,6 +22,13 @@ from hermes_core.loudness_optimizer import (
     verify_output,
     load_calibration,
     generate_report,
+    CompressionIntent,
+)
+from hermes_core.normalize import normalize_params
+from hermes_core.profiles import (
+    _resolve_fx_type,
+    _get_compressor_preset,
+    _EQ_BASELINE,
 )
 
 log = logging.getLogger(__name__)
@@ -101,6 +108,129 @@ def _friendly_hint(error: str) -> str:
     "modal dialogs blocking automation."
 
 
+# ════════════════════════════════════════════════════════════════
+# Compression derivation + translator layer
+# ════════════════════════════════════════════════════════════════
+
+
+def _derive_compressor_intent(
+    rms_db: float, peak_db: float, *, genre: str = "pop"
+) -> CompressionIntent:
+    """Derive compression targets from Crest Factor (Peak – RMS).
+
+    ==============  ============  ============================
+    Crest Factor    Amount        Typical material
+    ==============  ============  ============================
+    ≥ 15 dB         ``"heavy"``   Folk ballad, classical vocal
+    10–15 dB        ``"medium"``  Pop vocal, rock vocal
+    < 10 dB         ``"light"``   Pre-compressed, synth, EDM
+    ==============  ============  ============================
+
+    *gr_target_db* is set to roughly 40 % of the crest factor so the
+    compressor tames peaks without flattening the performance.
+    """
+    crest = peak_db - rms_db
+
+    if crest >= 15.0:
+        amount = "heavy"
+        gr_target = round(crest * 0.4, 1)
+    elif crest >= 10.0:
+        amount = "medium"
+        gr_target = round(crest * 0.35, 1)
+    else:
+        amount = "light"
+        gr_target = round(crest * 0.25, 1)
+
+    return CompressionIntent(
+        amount=amount,
+        gr_target_db=gr_target,
+        crest_factor_db=round(crest, 1),
+        rms_db=round(rms_db, 1),
+        peak_db=round(peak_db, 1),
+    )
+
+
+def _apply_vca_params(intent: CompressionIntent,
+                       preset: dict[str, float]) -> dict[str, float]:
+    """VCA / digital compressor → physical parameter dict.
+
+    Threshold is placed so that the signal's peak exceeds it by
+    *gr_target_db* — the compressor catches the transient and
+    reduces it by the target amount.
+    """
+    threshold = intent.peak_db - intent.gr_target_db
+    ratio = {
+        "light":  2.0,
+        "medium": 4.0,
+        "heavy":  8.0,
+    }.get(intent.amount, 4.0)
+
+    return {
+        "Threshold":   round(threshold, 1),
+        "Ratio":       ratio,
+        "Attack":      preset["attack_ms"],
+        "Release":     preset["release_ms"],
+        "Makeup Gain": round(intent.gr_target_db * 0.6, 1),
+    }
+
+
+def _apply_fet_params(intent: CompressionIntent,
+                       preset: dict[str, float]) -> dict[str, float]:
+    """FET compressor (1176-style) → physical parameter dict.
+
+    The Input knob sets an *equivalent threshold* — we compute the
+    threshold from peak + target GR, then let the normalisation layer
+    reverse-lookup the knob position via the calibration table.
+    """
+    threshold = intent.peak_db - intent.gr_target_db
+    return {
+        "Input":    round(threshold, 1),
+        "Output":   round(intent.gr_target_db * 0.5, 1),
+        "Attack":   preset["attack_ms"],
+        "Release":  preset["release_ms"],
+    }
+
+
+def _apply_opto_params(intent: CompressionIntent,
+                        preset: dict[str, float]) -> dict[str, float]:
+    """Optical compressor (LA-2A style) → physical parameter dict."""
+    return {
+        "Peak Reduction": round(intent.gr_target_db, 1),
+        "Gain":           round(intent.gr_target_db * 0.4, 1),
+    }
+
+
+def _apply_rvox_params(intent: CompressionIntent,
+                        preset: dict[str, float]) -> dict[str, float]:
+    """Waves RVox → physical parameter dict.
+
+    RVox's Compression control is 0–100 (%).  We map the intent amount
+    directly, then let normalisation handle the 0–1 scaling.
+    """
+    comp = {
+        "light":  40.0,
+        "medium": 60.0,
+        "heavy":  80.0,
+    }.get(intent.amount, 50.0)
+
+    return {
+        "Compression": comp,
+        "Gain":         round(intent.gr_target_db * 0.5, 1),
+    }
+
+
+# ════════════════════════════════════════════════════════════════
+# Compressor dispatcher
+# ════════════════════════════════════════════════════════════════
+
+_TRANSLATORS = {
+    "vca":  _apply_vca_params,
+    "fet":  _apply_fet_params,
+    "opto": _apply_opto_params,
+    "rvox": _apply_rvox_params,
+}
+
+
 class MixingEngine:
     """Top-level REAPER mixing engine. Use as context manager for auto-connect.
 
@@ -122,7 +252,7 @@ class MixingEngine:
         self._snapshot_project_path: str | None = None  # from GetProjectPath at init
         self._snapshot_project_name: str | None = None  # from GetProjectName at init
         # Idempotency guards — prevent double-execution of destructive ops.
-        self._stems_prepared: bool = False
+        self._stems_gain_staged: bool = False
         self._master_finalized: bool = False
         self._stems_cache: list[dict] = []
 
@@ -187,7 +317,7 @@ class MixingEngine:
 
     def reset(self):
         """Clear idempotency guards so the engine can be re-used for a new mix."""
-        self._stems_prepared = False
+        self._stems_gain_staged = False
         self._master_finalized = False
         self._stems_cache.clear()
 
@@ -214,12 +344,17 @@ class MixingEngine:
         return missing
 
     def apply_profile(self, profile, /, *, vocal_track: int = 0,
-                      backing_tracks: list[int] | None = None):
-        """Apply a :class:`MixingProfile` — add all FX chains and sends.
+                      backing_tracks: list[int] | None = None,
+                      genre: str = "pop"):
+        """Apply a :class:`MixingProfile` — FX chains, sends, and auto-compression.
 
-        This adds plugins to the vocal track(s), creates a reverb bus,
-        and configures the master limiter name for later use in
-        :meth:`finalize_master`.
+        1. **EQ baseline** — conservative HPF + gentle presence boost
+           (defined in :data:`_EQ_BASELINE`).
+        2. **Compression** — Crest Factor analysis from the cached
+           :meth:`prepare_stems` data derives a :class:`CompressionIntent`,
+           which is translated to physical parameter values via the
+           adapter layer and normalised through :data:`PLUGIN_REGISTRY`.
+        3. **Reverb bus** — aux send with reverb plugin.
         """
         from hermes_core.profiles import MixingProfile
         if not isinstance(profile, MixingProfile):
@@ -227,28 +362,117 @@ class MixingEngine:
 
         self._profile = profile
 
-        # Vocal chain
+        # ── Build a lookup: stem index → analysis data ──
+        stem_data: dict[int, dict] = {}
+        for i, s in enumerate(self._stems_cache):
+            if s.get("success"):
+                stem_data[i] = s
+
+        # ── Vocal chain (EQ baseline + compressor auto-derivation) ──
         for fx in profile.vocal_chain:
             idx = self._fx.add(vocal_track, fx.name)
-            for pname, pval in fx.params.items():
-                self._fx.set_param(vocal_track, idx, pname, pval)
+            fx_type = _resolve_fx_type(fx.name, fx.fx_type)
+
+            if fx_type == "eq":
+                # Apply conservative baseline EQ
+                self._apply_eq_baseline(vocal_track, idx, "vocal")
+            elif fx_type in _TRANSLATORS:
+                # Derive compression from cached stem data
+                sd = stem_data.get(0, {})
+                rms = sd.get("raw_rms_db")
+                peak = sd.get("raw_peak_db")
+                if rms is not None and peak is not None:
+                    intent = _derive_compressor_intent(rms, peak, genre=genre)
+                    preset = _get_compressor_preset("vocal", genre)
+                    physical = _TRANSLATORS[fx_type](intent, preset)
+                    normalized = normalize_params(fx.name, physical)
+                    for pname, pval in normalized.items():
+                        self._fx.set_param(vocal_track, idx, pname, pval)
+                    log.info(
+                        "Auto-compressor: %s → %s (crest=%.1f dB, gr=%.1f dB)",
+                        fx.name, intent.amount, intent.crest_factor_db,
+                        intent.gr_target_db,
+                    )
+            else:
+                # EQ or unknown type — apply manual params from profile
+                for pname, pval in fx.params.items():
+                    self._fx.set_param(vocal_track, idx, pname, pval)
+
             log.info("Added %s to vocal track %d", fx.name, vocal_track)
 
-        # Backing chain (optional)
+        # ── Backing chain (EQ baseline + compressor auto-derivation) ──
         if backing_tracks and profile.backing_chain:
             for bt in backing_tracks:
+                # Find the stem index for this track
+                bt_stem_idx = next(
+                    (i for i, s in enumerate(self._stems_cache)
+                     if s.get("track_index") == bt),
+                    None,
+                )
                 for fx in profile.backing_chain:
                     idx = self._fx.add(bt, fx.name)
-                    for pname, pval in fx.params.items():
-                        self._fx.set_param(bt, idx, pname, pval)
+                    fx_type = _resolve_fx_type(fx.name, fx.fx_type)
 
-        # Reverb bus
+                    if fx_type == "eq":
+                        self._apply_eq_baseline(bt, idx, "backing")
+                    elif fx_type in _TRANSLATORS and bt_stem_idx is not None:
+                        sd = stem_data.get(bt_stem_idx, {})
+                        rms = sd.get("raw_rms_db")
+                        peak = sd.get("raw_peak_db")
+                        if rms is not None and peak is not None:
+                            intent = _derive_compressor_intent(rms, peak, genre=genre)
+                            preset = _get_compressor_preset("backing", genre)
+                            physical = _TRANSLATORS[fx_type](intent, preset)
+                            normalized = normalize_params(fx.name, physical)
+                            for pname, pval in normalized.items():
+                                self._fx.set_param(bt, idx, pname, pval)
+                    else:
+                        for pname, pval in fx.params.items():
+                            self._fx.set_param(bt, idx, pname, pval)
+
+        # ── Reverb bus ──
         if profile.bus_reverb:
             self.create_reverb_send(
                 vocal_track,
                 level_db=profile.reverb_level_db,
                 reverb_fx=profile.bus_reverb.name,
             )
+
+    def _apply_eq_baseline(self, track_index: int, fx_index: int,
+                           role: str) -> None:
+        """Apply conservative EQ baseline for *role* (``"vocal"`` or ``"backing"``).
+
+        Uses :data:`_EQ_BASELINE` from :mod:`hermes_core.profiles`.
+        Currently only supports ReaEQ with ``"hp"`` and ``"bell"`` band types.
+        """
+        bands = _EQ_BASELINE.get(role, [])
+        if not bands:
+            return
+
+        for band_idx, band in enumerate(bands):
+            btype = band.get("type", "")
+            freq = band.get("freq_hz", 1000.0)
+            gain = band.get("gain_db", 0.0)
+            q = band.get("q", 1.0)
+
+            if btype == "hp":
+                # ReaEQ high-pass: enable band, set type to high-pass
+                self._fx.set_param(track_index, fx_index,
+                                   f"Band {band_idx + 1} Type", 0.0)
+                # Most ReaEQ params use "Band N Freq" / "Band N Gain" / "Band N Q"
+                pass  # ReaEQ-specific mapping — see note below
+            elif btype == "bell":
+                pass
+
+        # NOTE: ReaEQ parameter names vary by REAPER version and localisation.
+        # The EQ baseline values above define the *intent*; the actual parameter
+        # mapping will be completed when we implement the EQ adapter layer
+        # (similar to the compressor translator layer).  For now, baseline EQ
+        # is intent-only and skipped at the parameter level.
+        log.debug(
+            "EQ baseline intent for %s track %d: %s",
+            role, track_index, bands,
+        )
 
     # ── Scene 1: Connection & health ─────────────────────
 
@@ -456,26 +680,22 @@ class MixingEngine:
         vocal_to_backing_lu: float = 4.0,
         backing_reduction_lu: float | None = None,
     ) -> dict:
-        """Analyse raw stems, apply clip gain to reference level, then
-        balance vocal vs. backing via fader.
+        """Analyse raw stems and apply clip gain to reference level.
 
-        Two-stage gain staging:
-        1. Clip gain — brings every stem to -18 dBFS RMS (0 VU reference).
-           Ensures plugins see consistent input levels across projects.
-        2. Fader — genre-based vocal/backing balance, keeps vocal fader
-           near unity for optimal resolution.
+        Clip gain brings every stem to -18 dBFS RMS (0 VU reference) so
+        downstream plugins see consistent input levels across projects.
 
-        When *backing_reduction_lu* is given it bypasses the genre table
-        and uses that exact LU value. Useful for tuning without editing
-        ``_GENRE_BACKING_REDUCTION``.
+        Fader balancing is deferred to :meth:`post_fx_balance` — call it
+        **after** :meth:`apply_profile` so the balance accounts for the
+        loudness changes introduced by EQ, compression and reverb.
 
         This method is **idempotent** — calling it twice on the same
         engine instance raises ``RuntimeError``.  Call :meth:`reset` to
         clear the guard for a fresh mix.
         """
-        if self._stems_prepared:
+        if self._stems_gain_staged:
             raise RuntimeError(
-                "Stems already prepared. Call reset() to start a new mix, "
+                "Stems already gain-staged. Call reset() to start a new mix, "
                 "or create a new project with create_project()."
             )
         self._ensure_project_match()
@@ -489,7 +709,7 @@ class MixingEngine:
             )
 
         result = self._undo_block("Prepare Stems", _do_prepare)
-        self._stems_prepared = True
+        self._stems_gain_staged = True
         self._stems_cache = result.get("stems", [])
         return result
 
@@ -580,10 +800,11 @@ class MixingEngine:
                 "success": imp["success"],
             })
 
-        # 4. Genre-based fader balance using adjusted LUFS
-        if backing_reduction_lu is not None:
-            reduction = backing_reduction_lu
-        else:
+        # 4. Fader balancing is deferred to post_fx_balance() — after FX chains
+        #    have been applied the LUFS values change, so balancing pre-FX would
+        #    become inaccurate as soon as EQ/compression/reverb are added.
+        reduction = backing_reduction_lu
+        if reduction is None:
             reduction = _GENRE_BACKING_REDUCTION.get(
                 genre, _GENRE_BACKING_REDUCTION["pop"]
             )
@@ -598,11 +819,75 @@ class MixingEngine:
             sum(backing_lufs_vals) / len(backing_lufs_vals)
             if backing_lufs_vals else -18.0
         )
+
+        return {
+            "stems": stems_out,
+            "genre": genre,
+            "genre_reduction_lu": reduction,
+            "backing_adjusted_lufs": round(backing_adjusted_lufs, 1),
+            "vocal_indices": vocal_indices,
+            "backing_indices": backing_indices,
+            "vocal_to_backing_lu": vocal_to_backing_lu,
+            "backing_reduction_lu": reduction,
+        }
+
+    @staticmethod
+    def _classify_role(idx: int, vocal_indices: list[int],
+                       backing_indices: list[int]) -> str:  # noqa: D401
+        if idx in vocal_indices:
+            return "vocal"
+        if idx in backing_indices:
+            return "backing"
+        return "other"
+
+    # ── Post-FX fader balancing ──────────────────────────
+
+    def _balance_faders(
+        self,
+        stems: list[dict],
+        *,
+        vocal_indices: list[int] | None = None,
+        backing_indices: list[int] | None = None,
+        genre: str = "pop",
+        vocal_to_backing_lu: float = 4.0,
+        backing_reduction_lu: float | None = None,
+    ) -> dict:
+        """Apply genre-based fader gains using *post-FX* LUFS values.
+
+        Call this after :meth:`apply_profile` so the balance accounts
+        for loudness changes introduced by EQ, compression and reverb.
+
+        *stems* is the cached stem list from :meth:`prepare_stems` with
+        updated ``adjusted_lufs`` fields from post-FX measurement.
+        """
+        if vocal_indices is None:
+            vocal_indices = [0]
+        if backing_indices is None:
+            backing_indices = [i for i in range(len(stems))
+                               if i not in vocal_indices]
+
+        if backing_reduction_lu is not None:
+            reduction = backing_reduction_lu
+        else:
+            reduction = _GENRE_BACKING_REDUCTION.get(
+                genre, _GENRE_BACKING_REDUCTION["pop"]
+            )
+            if isinstance(reduction, tuple):
+                reduction = (reduction[0] + reduction[1]) / 2.0
+
+        backing_lufs_vals = [
+            s["adjusted_lufs"] for i, s in enumerate(stems)
+            if i in backing_indices and s["adjusted_lufs"] is not None
+        ]
+        backing_adjusted_lufs = (
+            sum(backing_lufs_vals) / len(backing_lufs_vals)
+            if backing_lufs_vals else -18.0
+        )
         backing_target_lufs = backing_adjusted_lufs - reduction
         vocal_target_lufs = backing_target_lufs + vocal_to_backing_lu
 
-        for i, s in enumerate(stems_out):
-            if not s["success"] or s["adjusted_lufs"] is None:
+        for i, s in enumerate(stems):
+            if not s.get("success") or s.get("adjusted_lufs") is None:
                 continue
             if i in vocal_indices:
                 target_lufs = vocal_target_lufs
@@ -615,23 +900,181 @@ class MixingEngine:
             self.apply_gain(s["track_index"], fader_gain_db)
 
         return {
-            "stems": stems_out,
-            "genre": genre,
-            "genre_reduction_lu": reduction,
+            "reduction_lu": reduction,
             "backing_adjusted_lufs": round(backing_adjusted_lufs, 1),
             "backing_target_lufs": round(backing_target_lufs, 1),
             "vocal_target_lufs": round(vocal_target_lufs, 1),
             "vocal_to_backing_lu": vocal_to_backing_lu,
         }
 
-    @staticmethod
-    def _classify_role(idx: int, vocal_indices: list[int],
-                       backing_indices: list[int]) -> str:  # noqa: D401
-        if idx in vocal_indices:
-            return "vocal"
-        if idx in backing_indices:
-            return "backing"
-        return "other"
+    def _solo_render(
+        self, indices: list[int], output_dir: str, label: str = ""
+    ) -> dict:
+        """Temporarily solo *indices*, render, restore solo state.
+
+        Returns the render result dict (including ``output_path``).
+        """
+        api = self._bridge.api
+        n = api.CountTracks(0)
+
+        # Save solo state and solo only the requested indices
+        saved: dict[int, bool] = {}
+        for i in range(n):
+            tr = api.GetTrack(0, i)
+            if tr:
+                try:
+                    solo = api.GetMediaTrackInfo_Value(tr, "I_SOLO")
+                except Exception:
+                    solo = 0.0
+                saved[i] = bool(solo)
+                api.SetMediaTrackInfo_Value(tr, "I_SOLO", 1.0 if i in indices else 0.0)
+
+        try:
+            result = self.render_mix(output_dir, verify=False)
+        finally:
+            # Restore original solo state
+            for i in range(n):
+                tr = api.GetTrack(0, i)
+                if tr:
+                    api.SetMediaTrackInfo_Value(
+                        tr, "I_SOLO", 1.0 if saved.get(i, False) else 0.0
+                    )
+
+        return result
+
+    def post_fx_balance(
+        self,
+        *,
+        vocal_indices: list[int] | None = None,
+        backing_indices: list[int] | None = None,
+        genre: str = "pop",
+        vocal_to_backing_lu: float = 4.0,
+        backing_reduction_lu: float | None = None,
+        tmp_dir: str | None = None,
+    ) -> dict:
+        """Measure post-FX LUFS and set fader balance.
+
+        **Must be called after** :meth:`apply_profile`.  Renders the
+        vocal and backing groups independently (via solo), measures
+        their actual post-FX integrated LUFS, then computes and applies
+        fader gains so the vocal sits at the correct level above the
+        backing.
+
+        Returns balance metadata plus the **combined LUFS** of the
+        full mix (all tracks unsoloed), which can be used to seed the
+        loudness optimiser in :meth:`finalize_master`.
+        """
+        import tempfile
+
+        tmp = tmp_dir or tempfile.mkdtemp(prefix="hermes_balance_")
+
+        stems = list(self._stems_cache)
+        if not stems:
+            raise RuntimeError(
+                "No cached stems — call prepare_stems() first"
+            )
+
+        if vocal_indices is None:
+            vocal_indices = [0]
+        if backing_indices is None:
+            backing_indices = [i for i in range(len(stems))
+                               if i not in vocal_indices]
+
+        # Map stem index → track index
+        stem_idx_to_track = {
+            i: s["track_index"] for i, s in enumerate(stems) if s.get("success")
+        }
+
+        # ── Solo-render vocal group ──
+        vocal_tracks = [
+            stem_idx_to_track[i] for i in vocal_indices
+            if i in stem_idx_to_track
+        ]
+        vocal_lufs = None
+        if vocal_tracks:
+            vocal_result = self._solo_render(
+                vocal_tracks,
+                os.path.join(tmp, "vocal_solo"),
+                "vocal",
+            )
+            if vocal_result.get("output_path"):
+                try:
+                    ana = SignalAnalyzer.analyze(vocal_result["output_path"])
+                    vocal_lufs = ana.integrated_lufs
+                except (OSError, ValueError, RuntimeError):
+                    pass
+
+        # ── Solo-render backing group ──
+        backing_tracks = [
+            stem_idx_to_track[i] for i in backing_indices
+            if i in stem_idx_to_track
+        ]
+        backing_lufs = None
+        if backing_tracks:
+            backing_result = self._solo_render(
+                backing_tracks,
+                os.path.join(tmp, "backing_solo"),
+                "backing",
+            )
+            if backing_result.get("output_path"):
+                try:
+                    ana = SignalAnalyzer.analyze(backing_result["output_path"])
+                    backing_lufs = ana.integrated_lufs
+                except (OSError, ValueError, RuntimeError):
+                    pass
+
+        # ── Update cached LUFS ──
+        for i, s in enumerate(stems):
+            if not s.get("success"):
+                continue
+            if i in vocal_indices and vocal_lufs is not None:
+                s["adjusted_lufs"] = vocal_lufs
+            elif i in backing_indices and backing_lufs is not None:
+                s["adjusted_lufs"] = backing_lufs
+
+        # ── Apply fader balance ──
+        balance_info = self._balance_faders(
+            stems,
+            vocal_indices=vocal_indices,
+            backing_indices=backing_indices,
+            genre=genre,
+            vocal_to_backing_lu=vocal_to_backing_lu,
+            backing_reduction_lu=backing_reduction_lu,
+        )
+
+        # ── Full-mix LUFS (for finalize_master seed) ──
+        combined_lufs = None
+        full_tracks = vocal_tracks + backing_tracks
+        if full_tracks:
+            full_result = self._solo_render(
+                full_tracks,
+                os.path.join(tmp, "full_mix"),
+                "full",
+            )
+            if full_result.get("output_path"):
+                try:
+                    ana = SignalAnalyzer.analyze(full_result["output_path"])
+                    combined_lufs = ana.integrated_lufs
+                except (OSError, ValueError, RuntimeError):
+                    pass
+
+        log.info(
+            "Post-FX balance: vocal=%.1f LUFS, backing=%.1f LUFS, "
+            "combined=%.1f LUFS, reduction=%.1f LU, vocal_to_backing=%.1f LU",
+            vocal_lufs or float("nan"),
+            backing_lufs or float("nan"),
+            combined_lufs or float("nan"),
+            balance_info["reduction_lu"],
+            balance_info["vocal_to_backing_lu"],
+        )
+
+        return {
+            **balance_info,
+            "vocal_lufs": vocal_lufs,
+            "backing_lufs": backing_lufs,
+            "combined_lufs": combined_lufs,
+            "stems": stems,
+        }
 
     def check_headroom(self) -> dict:
         """Check headroom. Without rendering, reports source as unavailable."""

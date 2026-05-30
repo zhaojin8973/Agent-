@@ -28,3 +28,11 @@ class AnalysisError(HermesError):
 
 class CalibrationError(HermesError):
     """Loudness calibration failures."""
+
+
+class UnregisteredPluginError(HermesError):
+    """Plugin not found in PLUGIN_REGISTRY — cannot normalise parameters."""
+
+
+class UnregisteredParamError(HermesError):
+    """Parameter name not registered for a known plugin."""

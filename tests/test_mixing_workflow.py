@@ -303,7 +303,7 @@ class TestVocalMixing:
     # ── Scene 2: Gain staging ───────────────────────────────
 
     def test_vocal_gain_staging_uses_genre_based_calculation(self):
-        """Gain values are computed from audio data + genre rules, not hardcoded."""
+        """prepare_stems does clip gain; fader balance is deferred to post_fx_balance."""
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
@@ -334,15 +334,46 @@ class TestVocalMixing:
                 f"(was {s['clip_gain_db']})"
             )
 
+        # Fader is now deferred to post_fx_balance — verify it's zero here.
+        for s in stems:
+            assert s["fader_gain_db"] == 0.0, (
+                f"Fader for {s['role']} should be 0.0 before post_fx_balance"
+            )
+
+        structure = eng.get_gain_structure()
+        assert len(structure["tracks"]) == 2
+
+    def test_post_fx_balance_genre_based_faders(self):
+        """post_fx_balance applies genre-based fader reduction to backing."""
+        require_reaper()
+        eng = MixingEngine()
+        eng._bridge.connect()
+        eng.create_project(
+            name="TestPostFxBalance", output_dir="/tmp/hermes_balance_test",
+            sample_rate=48000,
+        )
+
+        eng.prepare_stems(
+            [_VOCAL_FILE, _BACKING_FILE],
+            genre="chinese_folk_bel_canto",
+        )
+
+        # Simulate post-FX scenario: apply_profile then balance
+        balance = eng.post_fx_balance(
+            vocal_indices=[0], backing_indices=[1],
+            genre="chinese_folk_bel_canto",
+        )
+        stems = balance["stems"]
+
+        vocal = stems[0]
+        backing = stems[1]
+
         # chinese_folk_bel_canto: backing reduction 9-12 LU,
         # backing fader should be much lower than vocal fader
         assert abs(backing["fader_gain_db"]) > abs(vocal["fader_gain_db"]), (
             f"Backing fader ({backing['fader_gain_db']}) should exceed "
             f"vocal fader ({vocal['fader_gain_db']}) for vocal-forward genre"
         )
-
-        structure = eng.get_gain_structure()
-        assert len(structure["tracks"]) == 2
 
     # ── Scene 3: EQ + compression ───────────────────────────
 

@@ -6,8 +6,16 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hermes_core.engine import MixingEngine
+from hermes_core.engine import (
+    MixingEngine,
+    _derive_compressor_intent,
+    _apply_vca_params,
+    _apply_fet_params,
+    _apply_opto_params,
+    _apply_rvox_params,
+)
 from hermes_core.track import TrackManager, TrackInfo
+from hermes_core.loudness_optimizer import CompressionIntent
 from hermes_core.bus import BusManager
 from hermes_core.fx import FxManager
 from tests.conftest import require_reaper, clean_project, make_test_wav
@@ -631,8 +639,8 @@ class TestIdempotencyGuards:
         eng = MixingEngine()
         eng._bridge.connect = MagicMock(return_value=True)
         # Fake stems_prepared to simulate first call completed
-        eng._stems_prepared = True
-        with pytest.raises(RuntimeError, match="already prepared"):
+        eng._stems_gain_staged = True
+        with pytest.raises(RuntimeError, match="already gain-staged"):
             eng.prepare_stems(["/fake/path.wav"])
 
     def test_finalize_master_raises_on_second_call(self):
@@ -646,24 +654,24 @@ class TestIdempotencyGuards:
     def test_reset_clears_guards(self):
         """reset() clears both idempotency guards."""
         eng = MixingEngine()
-        eng._stems_prepared = True
+        eng._stems_gain_staged = True
         eng._master_finalized = True
         eng._stems_cache = [{"name": "test"}]
         eng.reset()
-        assert eng._stems_prepared is False
+        assert eng._stems_gain_staged is False
         assert eng._master_finalized is False
         assert eng._stems_cache == []
 
     def test_create_project_resets_guards(self):
         """create_project() calls reset() via mock verification."""
         eng = MixingEngine()
-        eng._stems_prepared = True
+        eng._stems_gain_staged = True
         eng._master_finalized = True
         # Verify guards are set
-        assert eng._stems_prepared is True
+        assert eng._stems_gain_staged is True
         # Direct call to reset
         eng.reset()
-        assert eng._stems_prepared is False
+        assert eng._stems_gain_staged is False
         assert eng._master_finalized is False
 
 
@@ -700,20 +708,139 @@ class TestProgressCallback:
     """Progress callbacks fire at expected stages."""
 
     def test_on_progress_signature_accepted(self):
-        """finalize_master accepts on_progress callback without error."""
+        """finalize_master accepts on_progress callback without TypeError."""
         eng = MixingEngine()
-        # Just verify the signature is correct — the callback is
-        # exercised fully in the integration tests.
+        eng._bridge.connect = MagicMock(return_value=True)
+        eng._bridge._api = MagicMock()
+        eng._bridge._reapy_module = MagicMock()
+        eng._bridge._api.GetMasterTrack.return_value = None
+        eng._bridge._api.CountTracks.return_value = 0
         called = []
 
         def progress(stage: str, pct: float):
             called.append(stage)
 
-        # The call will fail (no REAPER), but the progress parameter
-        # should be accepted without TypeError.
-        with pytest.raises(Exception):
-            eng.finalize_master(target_lufs=-12.0, on_progress=progress)
-
-        result = eng.render_mix(str(tmp_path), verify=False)
-        assert result.get("output_path") is None
+        # The call will fail (no master track → no FX), but progress
+        # parameter must be accepted without TypeError.
+        result = eng.finalize_master(target_lufs=-12.0, on_progress=progress)
+        assert isinstance(result, dict)
         assert "error" in result
+
+
+# ════════════════════════════════════════════════════════════
+# _derive_compressor_intent
+# ════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestDeriveCompressorIntent:
+    def test_heavy_for_large_crest(self):
+        intent = _derive_compressor_intent(-18.0, -3.0)  # crest = 15 dB
+        assert intent.amount == "heavy"
+        assert intent.gr_target_db > 4.0
+
+    def test_medium_for_moderate_crest(self):
+        intent = _derive_compressor_intent(-18.0, -6.0)  # crest = 12 dB
+        assert intent.amount == "medium"
+
+    def test_light_for_small_crest(self):
+        intent = _derive_compressor_intent(-10.0, -5.0)  # crest = 5 dB
+        assert intent.amount == "light"
+        assert intent.gr_target_db < 4.0
+
+    def test_boundary_15db(self):
+        """Crest = 15 dB exactly → heavy."""
+        intent = _derive_compressor_intent(-18.0, -3.0)
+        assert intent.amount == "heavy"
+
+    def test_boundary_10db(self):
+        """Crest = 10 dB exactly → medium."""
+        intent = _derive_compressor_intent(-18.0, -8.0)  # crest = 10
+        assert intent.amount == "medium"
+
+    def test_fields_are_numeric(self):
+        intent = _derive_compressor_intent(-18.0, -6.0)
+        assert isinstance(intent.gr_target_db, float)
+        assert isinstance(intent.crest_factor_db, float)
+
+
+# ════════════════════════════════════════════════════════════
+# Compressor translators
+# ════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestCompressorTranslators:
+    INTENT = CompressionIntent("medium", 6.0, 12.0, -18.0, -6.0)
+    PRESET = {"attack_ms": 5.0, "release_ms": 100.0}
+
+    def test_vca_returns_physical_params(self):
+        params = _apply_vca_params(self.INTENT, self.PRESET)
+        assert "Threshold" in params
+        assert "Ratio" in params
+        assert "Attack" in params
+        assert params["Ratio"] == 4.0
+        assert params["Threshold"] < 0  # below peak
+
+    def test_fet_returns_input_as_threshold(self):
+        params = _apply_fet_params(self.INTENT, self.PRESET)
+        assert "Input" in params
+        assert "Output" in params
+        # Input should be a threshold value (negative dBFS)
+        assert params["Input"] < 0
+
+    def test_opto_returns_peak_reduction(self):
+        params = _apply_opto_params(self.INTENT, self.PRESET)
+        assert "Peak Reduction" in params
+        assert "Gain" in params
+        assert params["Peak Reduction"] == 6.0
+
+    def test_rvox_returns_compression_pct(self):
+        params = _apply_rvox_params(self.INTENT, self.PRESET)
+        assert "Compression" in params
+        assert params["Compression"] == 60.0  # medium → 60
+
+    def test_heavy_vca_uses_higher_ratio(self):
+        heavy = CompressionIntent("heavy", 8.0, 16.0, -18.0, -2.0)
+        params = _apply_vca_params(heavy, self.PRESET)
+        assert params["Ratio"] == 8.0
+
+    def test_light_vca_uses_lower_ratio(self):
+        light = CompressionIntent("light", 3.0, 8.0, -18.0, -10.0)
+        params = _apply_vca_params(light, self.PRESET)
+        assert params["Ratio"] == 2.0
+
+
+# ════════════════════════════════════════════════════════════
+# _balance_faders
+# ════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestBalanceFaders:
+    def test_no_balance_without_lufs(self):
+        """stems without adjusted_lufs get zero fader gain."""
+        eng = MixingEngine()
+        stems = [
+            {"track_index": 0, "role": "vocal", "success": True,
+             "adjusted_lufs": None},
+            {"track_index": 1, "role": "backing", "success": True,
+             "adjusted_lufs": None},
+        ]
+        eng.apply_gain = MagicMock()
+        eng._balance_faders(stems, vocal_indices=[0], backing_indices=[1])
+        assert eng.apply_gain.call_count == 0
+
+    def test_balance_with_valid_lufs(self):
+        """Valid LUFS → fader gains computed and applied."""
+        eng = MixingEngine()
+        stems = [
+            {"track_index": 0, "role": "vocal", "success": True,
+             "adjusted_lufs": -25.0},
+            {"track_index": 1, "role": "backing", "success": True,
+             "adjusted_lufs": -20.0},
+        ]
+        eng.apply_gain = MagicMock()
+        eng._balance_faders(stems, vocal_indices=[0], backing_indices=[1],
+                            backing_reduction_lu=7.5)
+        assert eng.apply_gain.call_count >= 1

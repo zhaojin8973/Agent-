@@ -16,7 +16,15 @@ from hermes_core.exceptions import (
     RenderError,
     AnalysisError,
     CalibrationError,
+    UnregisteredPluginError,
+    UnregisteredParamError,
 )
+from hermes_core.normalize import (
+    PLUGIN_REGISTRY,
+    normalize_param,
+    normalize_params,
+)
+from hermes_core.loudness_optimizer import CompressionIntent
 
 __all__ = [
     "ReaperBridge",
@@ -43,4 +51,12 @@ __all__ = [
     "RenderError",
     "AnalysisError",
     "CalibrationError",
+    "UnregisteredPluginError",
+    "UnregisteredParamError",
+    # Normalisation
+    "PLUGIN_REGISTRY",
+    "normalize_param",
+    "normalize_params",
+    # Compression
+    "CompressionIntent",
 ]

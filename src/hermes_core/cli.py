@@ -79,8 +79,23 @@ def cmd_vocal_mix(args) -> int:
             backing_indices=backing_indices,
         )
 
-        # Apply FX chain from profile
-        eng.apply_profile(profile, vocal_track=0, backing_tracks=backing_indices)
+        # Apply FX chain from profile (EQ baseline + auto-compression + reverb)
+        eng.apply_profile(profile, vocal_track=0, backing_tracks=backing_indices,
+                          genre=args.genre)
+
+        # Post-FX fader balance
+        log.info("Measuring post-FX loudness and balancing faders...")
+        balance = eng.post_fx_balance(
+            vocal_indices=vocal_indices,
+            backing_indices=backing_indices,
+            genre=args.genre,
+        )
+        log.info(
+            "Balance: vocal=%.1f LUFS, backing=%.1f LUFS, combined=%.1f LUFS",
+            balance.get("vocal_lufs", float("nan")),
+            balance.get("backing_lufs", float("nan")),
+            balance.get("combined_lufs", float("nan")),
+        )
 
         # Master
         log.info("Finalizing master (target: %.1f LUFS)...", args.target_lufs)
@@ -165,7 +180,8 @@ def cmd_batch(args) -> int:
             with MixingEngine(watchdog=True) as eng:
                 eng.create_project(song_dir.name, song_output)
                 eng.prepare_stems(stem_paths, genre="pop")
-                eng.apply_profile(profile)
+                eng.apply_profile(profile, genre="pop")
+                eng.post_fx_balance()
                 result = eng.finalize_master(target_lufs=args.target_lufs)
                 if result.get("passed"):
                     ok += 1
