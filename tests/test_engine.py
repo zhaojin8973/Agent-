@@ -1390,3 +1390,131 @@ class TestSSLEQEngine:
         finally:
             if wav_path:
                 os.unlink(wav_path)
+
+
+# ══════════════════════════════════════════════════════════════
+# BPM-aware compressor timing tests
+# ══════════════════════════════════════════════════════════════
+
+
+class TestBpmTiming:
+    """Verify BPM-aware attack/release selection."""
+
+    def test_fast_bpm_selects_fast_preset(self):
+        """BPM >= 130 → fast (attack=3ms, release=60ms)."""
+        from hermes_core.profiles import get_bpm_timing
+        timing = get_bpm_timing(140.0)
+        assert timing is not None
+        assert timing["attack_ms"] == 3.0
+        assert timing["release_ms"] == 60.0
+
+    def test_med_bpm_selects_med_preset(self):
+        """BPM 90-129 → med (attack=5ms, release=100ms)."""
+        from hermes_core.profiles import get_bpm_timing
+        timing = get_bpm_timing(120.0)
+        assert timing is not None
+        assert timing["attack_ms"] == 5.0
+        assert timing["release_ms"] == 100.0
+
+    def test_slow_bpm_selects_slow_preset(self):
+        """BPM < 90 → slow (attack=10ms, release=200ms)."""
+        from hermes_core.profiles import get_bpm_timing
+        timing = get_bpm_timing(60.0)
+        assert timing is not None
+        assert timing["attack_ms"] == 10.0
+        assert timing["release_ms"] == 200.0
+
+    def test_boundary_130_is_fast(self):
+        """Exactly 130 BPM is fast."""
+        from hermes_core.profiles import get_bpm_timing
+        timing = get_bpm_timing(130.0)
+        assert timing is not None
+        assert timing["attack_ms"] == 3.0
+
+    def test_boundary_90_is_med(self):
+        """Exactly 90 BPM is med."""
+        from hermes_core.profiles import get_bpm_timing
+        timing = get_bpm_timing(90.0)
+        assert timing is not None
+        assert timing["attack_ms"] == 5.0
+
+    def test_none_bpm_returns_none(self):
+        """None BPM → None (caller falls back to genre)."""
+        from hermes_core.profiles import get_bpm_timing
+        assert get_bpm_timing(None) is None
+
+    def test_zero_bpm_returns_none(self):
+        """Zero BPM → None."""
+        from hermes_core.profiles import get_bpm_timing
+        assert get_bpm_timing(0.0) is None
+
+    def test_negative_bpm_returns_none(self):
+        """Negative BPM → None."""
+        from hermes_core.profiles import get_bpm_timing
+        assert get_bpm_timing(-10.0) is None
+
+    def test_inf_bpm_returns_none(self):
+        """Inf BPM → None."""
+        from hermes_core.profiles import get_bpm_timing
+        assert get_bpm_timing(float("inf")) is None
+
+    def test_nan_bpm_returns_none(self):
+        """NaN BPM → None."""
+        from hermes_core.profiles import get_bpm_timing
+        assert get_bpm_timing(float("nan")) is None
+
+    def test_bpm_override_in_chain(self, monkeypatch):
+        """When bpm is passed, compressor gets BPM-aware timing."""
+        from hermes_core.profiles import get_bpm_timing
+        from hermes_core.loudness_optimizer import CompressionIntent
+        from hermes_core.engine import _derive_compressor_intent
+
+        # Simulate a vocal with crest 12 dB (medium compression).
+        intent = _derive_compressor_intent(rms_db=-18.0, peak_db=-6.0, genre="pop")
+
+        # Without BPM: genre preset for "pop" vocal = attack 5, release 80.
+        preset_no_bpm = {"attack_ms": 5.0, "release_ms": 80.0}
+
+        # With BPM=140 (fast): override should be attack 3, release 60.
+        bpm_timing = get_bpm_timing(140.0)
+        preset_with_bpm = dict(preset_no_bpm, **bpm_timing)
+        assert preset_with_bpm["attack_ms"] == 3.0
+        assert preset_with_bpm["release_ms"] == 60.0
+        # Original preset is unchanged (immutability).
+        assert preset_no_bpm["attack_ms"] == 5.0
+
+    def test_bpm_fallback_when_none(self, monkeypatch):
+        """When bpm=None, get_bpm_timing returns None → keep genre preset."""
+        from hermes_core.profiles import get_bpm_timing
+        timing = get_bpm_timing(None)
+        assert timing is None
+
+    def test_fet_translator_respects_bpm_timing(self):
+        """FET translator uses attack_ms/release_ms from preset regardless of source."""
+        from hermes_core.engine import _apply_fet_params
+        from hermes_core.loudness_optimizer import CompressionIntent
+
+        intent = CompressionIntent(
+            amount="medium", gr_target_db=4.0,
+            crest_factor_db=12.0, rms_db=-18.0, peak_db=-6.0,
+        )
+        # Simulate BPM-aware preset (fast timing).
+        bpm_preset = {"attack_ms": 3.0, "release_ms": 60.0}
+        params = _apply_fet_params(intent, bpm_preset)
+        assert params["Attack"] == 3.0
+        assert params["Release"] == 60.0
+
+    def test_vca_translator_respects_bpm_timing(self):
+        """VCA translator uses attack_ms/release_ms from preset."""
+        from hermes_core.engine import _apply_vca_params
+        from hermes_core.loudness_optimizer import CompressionIntent
+
+        intent = CompressionIntent(
+            amount="light", gr_target_db=2.0,
+            crest_factor_db=8.0, rms_db=-20.0, peak_db=-12.0,
+        )
+        # Simulate BPM-aware preset (slow timing).
+        bpm_preset = {"attack_ms": 10.0, "release_ms": 200.0}
+        params = _apply_vca_params(intent, bpm_preset)
+        assert params["Attack"] == 10.0
+        assert params["Release"] == 200.0

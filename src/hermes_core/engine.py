@@ -33,6 +33,7 @@ from hermes_core.profiles import (
     _resolve_fx_type,
     _get_compressor_preset,
     _EQ_BASELINE,
+    get_bpm_timing,
 )
 from hermes_core.dag import AudioNode, SendNode, ChainExecutor
 from hermes_core.spectrum import SpectrumAnalyzer, SpectrumReport
@@ -132,20 +133,22 @@ def _derive_compressor_intent(
     < 10 dB         ``"light"``   Pre-compressed, synth, EDM
     ==============  ============  ============================
 
-    *gr_target_db* is set to roughly 40 % of the crest factor so the
-    compressor tames peaks without flattening the performance.
+    *gr_target_db* is conservative — FET compressors grab peaks
+    (20 % of crest) while leaving body compression to downstream
+    Opto / RVox stages.  For a single-compressor chain this keeps
+    the vocal breathing instead of flattening it.
     """
     crest = peak_db - rms_db
 
     if crest >= 15.0:
         amount = "heavy"
-        gr_target = round(crest * 0.4, 1)
+        gr_target = round(crest * 0.2, 1)
     elif crest >= 10.0:
         amount = "medium"
-        gr_target = round(crest * 0.35, 1)
+        gr_target = round(crest * 0.2, 1)
     else:
         amount = "light"
-        gr_target = round(crest * 0.25, 1)
+        gr_target = round(crest * 0.15, 1)
 
     return CompressionIntent(
         amount=amount,
@@ -197,6 +200,66 @@ def _apply_fet_params(intent: CompressionIntent,
     }
 
 
+# CLA-76 Input→GR calibration (pink noise -18 dBFS RMS, 2026-05-31).
+# (input_dB, gr_db) sorted by GR ascending.  GR is negative — the table
+# stores absolute values for readability.
+_CLA76_GR_TABLE: list[tuple[float, float]] = [
+    (-32.0,  0),    # threshold barely touched
+    (-24.0,  3),    # moderate
+    (-20.0,  8),    # heavy
+    (-16.0, 15),    # very heavy
+    (-8.0,  20),    # max
+]
+
+
+def _gr_to_cla76_input(gr_target: float) -> float:
+    """Given a GR target (dB), return the CLA-76 Input dB setting."""
+    gr_list = [row[1] for row in _CLA76_GR_TABLE]
+    if gr_target <= gr_list[0]:
+        return _CLA76_GR_TABLE[0][0]
+    if gr_target >= gr_list[-1]:
+        return _CLA76_GR_TABLE[-1][0]
+    idx = bisect.bisect_left(gr_list, gr_target)
+    lo_in, lo_gr = _CLA76_GR_TABLE[idx - 1]   # (input_dB, gr_db)
+    hi_in, hi_gr = _CLA76_GR_TABLE[idx]
+    t = (gr_target - lo_gr) / (hi_gr - lo_gr)
+    return lo_in + t * (hi_in - lo_in)
+
+
+def _apply_cla76_params(intent: CompressionIntent,
+                        preset: dict[str, float]) -> dict[str, float]:
+    r"""CLA-76 (Waves) physical parameter dict.
+
+    CLA-76 (1176-style FET) has a **fixed internal threshold**.
+    *Input* drives signal into that threshold.  *Output* attenuates
+    to balance the boosted uncompressed signal.
+
+    Input is determined by a measured GR calibration table
+    (pink noise -18 dBFS).  Output follows GR proportionally:
+    heavier compression needs more output attenuation.
+    """
+    gr = intent.gr_target_db
+    peak = intent.peak_db
+
+    # Calibrated on vocal (望归, crest≈20, peak≈-0.4, 2026-05-31).
+    # Input positions signal relative to 1176 fixed threshold.
+    # Higher peak → less Input needed (signal already near threshold).
+    # More GR → more Input needed (push harder into threshold).
+    input_db = -40.4 + gr * 0.8 - peak
+    input_db = max(-48.0, min(0.0, input_db))
+
+    # Output: level-match — keep signal roughly unity through the 76
+    output_db = -gr * 3.25
+    output_db = max(-48.0, min(0.0, output_db))
+
+    return {
+        "Input":    round(input_db, 1),
+        "Output":   round(output_db, 1),
+        "Attack":   preset["attack_ms"],
+        "Release":  preset["release_ms"],
+    }
+
+
 def _apply_opto_params(intent: CompressionIntent,
                         preset: dict[str, float]) -> dict[str, float]:
     """Optical compressor (LA-2A style) → physical parameter dict."""
@@ -235,6 +298,65 @@ _TRANSLATORS = {
     "opto": _apply_opto_params,
     "rvox": _apply_rvox_params,
 }
+
+
+# ════════════════════════════════════════════════════════════════
+# CLA-76 ms → knob conversion (CW=fast, range 1−7)
+# ════════════════════════════════════════════════════════════════
+
+# Attack: (ms, knob_position) sorted by ms ascending.
+# Attack ms → knob.  FET compressor attack times saturate below ~800 μs,
+# so engine ms values (3-10 ms from BPM presets) are all "slow" in FET
+# terms.  We compress the upper range so every BPM tier maps to a usable
+# knob position (nothing below 2 — knob 1 is too sluggish for vocals).
+_CLA76_ATTACK_MS_TABLE: list[tuple[float, float]] = [
+    (0.02,  7.0),   # fastest (knob 7 = ~20 μs)
+    (1.0,   6.0),   # knob 6
+    (2.0,   5.0),   # knob 5 — BPM FAST   (3 ms) lands near here
+    (3.0,   4.0),   # knob 4
+    (5.0,   3.0),   # knob 3 — BPM MED    (5 ms) lands here
+    (8.0,   2.5),   # knob 2.5
+    (12.0,  2.0),   # knob 2 — BPM SLOW   (10 ms) lands near here
+]
+
+# Release: (ms, knob_position) sorted by ms ascending.
+_CLA76_RELEASE_MS_TABLE: list[tuple[float, float]] = [
+    (50.0,   7.0),   # fastest
+    (150.0,  6.0),
+    (300.0,  5.0),
+    (500.0,  4.0),
+    (700.0,  3.0),
+    (900.0,  2.0),
+    (1100.0, 1.0),   # slowest
+]
+
+
+def _ms_to_cla76_attack(ms: float) -> float:
+    """Convert attack time (ms) to CLA-76 knob position (1−7, CW=fast)."""
+    return _lookup_ms_table(ms, _CLA76_ATTACK_MS_TABLE)
+
+
+def _ms_to_cla76_release(ms: float) -> float:
+    """Convert release time (ms) to CLA-76 knob position (1−7, CW=fast)."""
+    return _lookup_ms_table(ms, _CLA76_RELEASE_MS_TABLE)
+
+
+def _lookup_ms_table(ms: float, table: list[tuple[float, float]]) -> float:
+    """Bisect *table* (sorted by ms) and return the knob position.
+
+    Values outside the table range are clamped to the nearest endpoint.
+    """
+    ms_list = [row[0] for row in table]
+    if ms <= ms_list[0]:
+        return table[0][1]
+    if ms >= ms_list[-1]:
+        return table[-1][1]
+    idx = bisect.bisect_left(ms_list, ms)
+    # Interpolate between idx-1 and idx
+    lo_ms, lo_knob = table[idx - 1]
+    hi_ms, hi_knob = table[idx]
+    t = (ms - lo_ms) / (hi_ms - lo_ms)
+    return lo_knob + t * (hi_knob - lo_knob)
 
 
 # ════════════════════════════════════════════════════════════════
@@ -806,37 +928,48 @@ class MixingEngine:
         self._vocal_chain_nodes.clear()
         self._backing_chain_nodes.clear()
         self._reverb_send_node = None
+        self._bpm = None
 
     def preflight_plugins(self, fx_names: list[str]) -> list[str]:
         """Check which of *fx_names* are available in REAPER.  Returns the
         list of **missing** plugin names (empty = all present).
+
+        Uses a disposable probe track to test instantiation.  The master
+        track is **never** touched — plugins that fail to load leave no
+        residue.
         """
         missing: list[str] = []
-        for name in fx_names:
-            # Try adding to master then immediately removing.  We must
-            # instantiate (default True) so REAPER actually resolves the
-            # plugin, then clean up to leave no side effects.
-            idx = self._fx.add_master(name)
-            if idx < 0:
-                missing.append(name)
-            else:
-                # Clean up the probe FX — don't leave it on master.
-                try:
-                    master = self._bridge.api.GetMasterTrack(0)
-                    if master:
-                        self._bridge.api.TrackFX_Delete(master, idx)
-                except Exception:
-                    pass
+        # ── Create a temporary probe track ──────────────────────
+        api = self._bridge.api
+        probe_idx = api.CountTracks(0)
+        api.InsertTrackAtIndex(probe_idx, True)  # True = hidden under folder
+        try:
+            for name in fx_names:
+                idx = self._fx.add(probe_idx, name)
+                if idx < 0:
+                    missing.append(name)
+                else:
+                    track = api.GetTrack(0, probe_idx)
+                    if track:
+                        api.TrackFX_Delete(track, idx)
+        finally:
+            # Remove the probe track (also deletes any leftover FX).
+            track = api.GetTrack(0, probe_idx)
+            if track:
+                api.DeleteTrack(track)
+
         return missing
 
     def apply_profile(self, profile, /, *, vocal_track: int = 0,
                       backing_tracks: list[int] | None = None,
-                      genre: str = "pop"):
+                      genre: str = "pop",
+                      bpm: float | None = None):
         """Apply a :class:`MixingProfile` — FX chains, sends, and auto-compression.
 
         1. **EQ baseline** — conservative HPF + gentle presence boost.
         2. **Compression** — Crest Factor analysis → :class:`CompressionIntent`
-           → translator → normalise → REAPER.
+           → translator → normalise → REAPER.  If *bpm* is provided, BPM-aware
+           attack/release timing is used (see :func:`get_bpm_timing`).
         3. **Reverb bus** — aux send with Abbey Road safety EQ.
 
         An :class:`AudioNode` DAG is built in parallel.  Dirty flags cascade
@@ -848,6 +981,9 @@ class MixingEngine:
             raise TypeError(f"Expected MixingProfile, got {type(profile).__name__}")
 
         self._profile = profile
+
+        # Resolve BPM: explicit arg takes priority over prepare_stems stash.
+        _bpm = bpm if bpm is not None else getattr(self, "_bpm", None)
 
         # ── Build a lookup: stem index → analysis data ──
         stem_data: dict[int, dict] = {}
@@ -863,6 +999,7 @@ class MixingEngine:
             stem_idx=0,
             genre=genre,
             role="vocal",
+            bpm=_bpm,
         )
 
         # ── Backing chain (one chain per backing track) ──
@@ -881,6 +1018,7 @@ class MixingEngine:
                     stem_idx=bt_stem_idx or 1,
                     genre=genre,
                     role="backing",
+                    bpm=_bpm,
                 )
                 self._backing_chain_nodes.extend(nodes)
 
@@ -917,6 +1055,7 @@ class MixingEngine:
         self, track_index: int, fx_list: list,
         stem_data: dict, stem_idx: int,
         genre: str, role: str,
+        bpm: float | None = None,
     ) -> list[AudioNode]:
         """Build a linked :class:`AudioNode` chain and apply FX to REAPER.
 
@@ -956,8 +1095,26 @@ class MixingEngine:
                     node.params = dict(self._last_eq_params)
             elif fx_type in _TRANSLATORS and rms is not None and peak is not None:
                 intent = _derive_compressor_intent(rms, peak, genre=genre)
+
+                # BPM-aware timing: override genre preset when BPM is known.
                 preset = _get_compressor_preset(role, genre)
-                physical = _TRANSLATORS[fx_type](intent, preset)
+                if bpm is not None and bpm > 0:
+                    bpm_timing = get_bpm_timing(bpm)
+                    if bpm_timing is not None:
+                        preset = dict(preset, **bpm_timing)
+                        log.info(
+                            "BPM-aware timing: %.0f BPM → attack=%.0fms release=%.0fms",
+                            bpm, bpm_timing["attack_ms"], bpm_timing["release_ms"],
+                        )
+
+                # CLA-76: use dedicated translator (Input=drive, Output=unity)
+                # + ms → knob conversion (1-7, CW=fast).
+                if "cla-76" in fx.name.lower():
+                    preset["attack_ms"] = _ms_to_cla76_attack(preset["attack_ms"])
+                    preset["release_ms"] = _ms_to_cla76_release(preset["release_ms"])
+                    physical = _apply_cla76_params(intent, preset)
+                else:
+                    physical = _TRANSLATORS[fx_type](intent, preset)
                 node.params = dict(physical)
                 normalized = normalize_params(fx.name, physical)
                 for pname, pval in normalized.items():
@@ -1295,6 +1452,7 @@ class MixingEngine:
         stem_paths: list[str],
         *,
         genre: str = "pop",
+        bpm: float | None = None,
         vocal_indices: list[int] | None = None,
         backing_indices: list[int] | None = None,
         vocal_to_backing_lu: float = 4.0,
@@ -1319,6 +1477,9 @@ class MixingEngine:
                 "or create a new project with create_project()."
             )
         self._ensure_project_match()
+
+        # Store BPM for downstream use (apply_profile / _build_audio_chain).
+        self._bpm = bpm
 
         def _do_prepare():
             return self._prepare_stems_impl(

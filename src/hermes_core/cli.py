@@ -27,6 +27,8 @@ def _build_vocal_mix_parser(subparsers) -> None:
     p.add_argument("--profile", "-p", default=None, help="Path to YAML mixing profile")
     p.add_argument("--tolerance", type=float, default=0.3, help="LUFS tolerance")
     p.add_argument("--watchdog", action="store_true", help="Enable DialogKiller")
+    p.add_argument("--bpm", type=float, default=None, help="Project BPM for tempo-synced compression")
+    p.add_argument("--midi", type=Path, default=None, help="MIDI file to extract tempo from")
 
 
 def _build_check_parser(subparsers) -> None:
@@ -40,6 +42,8 @@ def _build_batch_parser(subparsers) -> None:
     p.add_argument("--profile", "-p", required=True, help="Path to YAML mixing profile")
     p.add_argument("--output-dir", default="./masters", help="Output directory")
     p.add_argument("--target-lufs", type=float, default=-12.0)
+    p.add_argument("--bpm", type=float, default=None, help="Project BPM for tempo-synced compression")
+    p.add_argument("--midi", type=Path, default=None, help="MIDI file to extract tempo from")
 
 
 def _build_calibrate_parser(subparsers) -> None:
@@ -66,6 +70,25 @@ def _build_adjust_parser(subparsers) -> None:
     p.add_argument("--watchdog", action="store_true", help="Enable DialogKiller")
 
 
+def _resolve_bpm(args) -> float | None:
+    """Resolve BPM from CLI args: --bpm takes priority, then --midi.
+
+    Returns ``None`` when neither is provided (engine falls back to
+    static genre presets).
+    """
+    if args.bpm is not None:
+        return float(args.bpm)
+    if args.midi is not None:
+        from hermes_core.midi_tempo import read_midi_tempo, MidiTempoError
+        try:
+            bpm = read_midi_tempo(args.midi)
+            log.info("Extracted %.1f BPM from %s", bpm, args.midi)
+            return bpm
+        except MidiTempoError as exc:
+            log.warning("MIDI tempo extraction failed (%s), falling back to genre defaults", exc)
+    return None
+
+
 def cmd_vocal_mix(args) -> int:
     """Run a one-shot vocal mix."""
     from hermes_core import MixingEngine
@@ -77,6 +100,7 @@ def cmd_vocal_mix(args) -> int:
     backing_indices = list(range(1, len(stem_paths)))
 
     project_name = os.path.splitext(os.path.basename(args.vocal))[0]
+    resolved_bpm = _resolve_bpm(args)
 
     with MixingEngine(watchdog=args.watchdog) as eng:
         log.info("Creating project: %s", project_name)
@@ -99,13 +123,14 @@ def cmd_vocal_mix(args) -> int:
         eng.prepare_stems(
             stem_paths,
             genre=args.genre,
+            bpm=resolved_bpm,
             vocal_indices=vocal_indices,
             backing_indices=backing_indices,
         )
 
         # Apply FX chain from profile (EQ baseline + auto-compression + reverb)
         eng.apply_profile(profile, vocal_track=0, backing_tracks=backing_indices,
-                          genre=args.genre)
+                          genre=args.genre, bpm=resolved_bpm)
 
         # Post-FX fader balance
         log.info("Measuring post-FX loudness and balancing faders...")
@@ -174,6 +199,7 @@ def cmd_batch(args) -> int:
     profile = MixingProfile.from_yaml(args.profile)
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
+    resolved_bpm = _resolve_bpm(args)
 
     if not input_dir.is_dir():
         log.error("Input directory not found: %s", input_dir)
@@ -203,8 +229,8 @@ def cmd_batch(args) -> int:
         try:
             with MixingEngine(watchdog=True) as eng:
                 eng.create_project(song_dir.name, song_output)
-                eng.prepare_stems(stem_paths, genre="pop")
-                eng.apply_profile(profile, genre="pop")
+                eng.prepare_stems(stem_paths, genre="pop", bpm=resolved_bpm)
+                eng.apply_profile(profile, genre="pop", bpm=resolved_bpm)
                 eng.post_fx_balance()
                 result = eng.finalize_master(target_lufs=args.target_lufs)
                 if result.get("passed"):

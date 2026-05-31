@@ -7,6 +7,7 @@ source code.
 """
 
 import logging
+import math
 import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -72,6 +73,42 @@ def _get_compressor_preset(role: str, genre: str) -> dict[str, float]:
     """Return ``{attack_ms, release_ms}`` for *role* + *genre*."""
     role_presets = _COMPRESSOR_PRESETS.get(role, _COMPRESSOR_PRESETS.get("vocal", {}))
     return role_presets.get(genre, role_presets.get("default", {"attack_ms": 5.0, "release_ms": 100.0}))
+
+
+# ── BPM-aware compressor timing ──────────────────────────────────
+
+
+# BPM → attack/release mapping (from docs/MIXING_KNOWLEDGE_BASE.md §3).
+_BPM_PRESETS: dict[str, dict[str, float]] = {
+    "fast":  {"attack_ms": 3.0,  "release_ms": 60.0},   # BPM >= 130
+    "med":   {"attack_ms": 5.0,  "release_ms": 100.0},  # BPM 90–130
+    "slow":  {"attack_ms": 10.0, "release_ms": 200.0},  # BPM < 90
+}
+
+
+def get_bpm_timing(bpm: float) -> dict[str, float] | None:
+    """Return ``{attack_ms, release_ms}`` for a given BPM, or ``None``.
+
+    BPM must be a positive finite number, otherwise ``None`` is returned
+    (callers should fall back to :func:`_get_compressor_preset`).
+
+    Thresholds match :data:`_BPM_PRESETS`:
+
+    - ``>= 130`` → fast (attack 3 ms, release 60 ms)
+    - ``90–129`` → med  (attack 5 ms, release 100 ms)
+    - ``< 90``   → slow (attack 10 ms, release 200 ms)
+    """
+    if not isinstance(bpm, (int, float)):
+        return None
+    if not (bpm > 0 and math.isfinite(bpm)):
+        return None
+
+    if bpm >= 130.0:
+        return dict(_BPM_PRESETS["fast"])
+    elif bpm >= 90.0:
+        return dict(_BPM_PRESETS["med"])
+    else:
+        return dict(_BPM_PRESETS["slow"])
 
 
 # ── conservative EQ baseline (no FFT analysis) ───────────────────
@@ -241,7 +278,7 @@ def get_default_vocal_chain() -> list[FXPreset]:
             eq_position="pre",
         ),
         FXPreset(
-            name="VST3: CLA-1176 (Waves)",
+            name="VST3: CLA-76 Mono (Waves)",
             fx_type="fet",
         ),
         FXPreset(

@@ -183,6 +183,19 @@ PLUGIN_REGISTRY: dict[str, dict] = {
         },
     },
 
+    # ── Waves CLA-76 (FET, verified sweep 2026-05-31) ─────
+    # All ranges verified via reapy readback against CLA-76 Mono GUI.
+    # Attack/Release accept knob positions 1-7 (CW=fast).
+    "VST3: CLA-76 Mono (Waves)": {
+        "type": "fet",
+        "params": {
+            "Input":    {"range": (-48.0, 0.0), "curve": "linear"},
+            "Output":   {"range": (-48.0, 0.0), "curve": "linear"},
+            "Attack":   {"range": (1.0, 7.0),  "curve": "linear"},
+            "Release":  {"range": (1.0, 7.0),  "curve": "linear"},
+        },
+    },
+
     # ── Optical compressors ────────────────────────────
     "Universal Audio LA-2A (Universal Audio)": {
         "type": "opto",
