@@ -72,7 +72,7 @@ class TestFromDict:
         assert profile.ceiling_db == -0.5
         assert profile.vocal_chain == []
         assert profile.backing_chain == []
-        assert profile.master_limiter.name == "FabFilter Pro-L 2 (FabFilter)"
+        assert profile.master_limiter.name == "VST: FabFilter Pro-L 2 (FabFilter)"
 
     def test_full_dict(self):
         d = {
@@ -112,7 +112,7 @@ class TestFromDict:
     def test_missing_limiter_falls_back(self):
         """When master_limiter is absent, default Pro-L 2 is used."""
         profile = MixingProfile._from_dict({"name": "NoLimiter"})
-        assert profile.master_limiter.name == "FabFilter Pro-L 2 (FabFilter)"
+        assert profile.master_limiter.name == "VST: FabFilter Pro-L 2 (FabFilter)"
 
     def test_genre_table_defaults_when_missing(self):
         profile = MixingProfile._from_dict({"name": "Test"})

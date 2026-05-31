@@ -92,7 +92,7 @@ def _friendly_hint(error: str) -> str:
             "the source files are not empty and have audible content.",
         "Pro-L 2 Output Level param not found":
             "Pro-L 2 parameter name doesn't match. Verify the plugin is "
-            "installed and named exactly 'FabFilter Pro-L 2 (FabFilter)'. "
+            "installed and named exactly 'VST: FabFilter Pro-L 2 (FabFilter)'. "
             "Try running preflight_plugins() first.",
         "Pro-L 2 Gain param not found":
             "Pro-L 2 Gain parameter not found. Same as above — check "
@@ -849,6 +849,77 @@ def _apply_ssleq_eq(eq_intent: EqIntent) -> dict[str, float]:
     return params
 
 
+def _reaeq_apply_baseline_band(fx_mgr, track_idx, fx_idx,
+                               band_idx, btype, freq, gain, q):
+    """Apply a single baseline EQ band using ReaEQ param names."""
+    n = band_idx + 1
+    if btype == "hp":
+        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Type", 0.0)
+        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Freq", freq)
+        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Q", q)
+        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Enabled", 1.0)
+    elif btype == "bell":
+        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Type", 2.0)
+        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Freq", freq)
+        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Gain", gain)
+        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Q", q)
+        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Enabled", 1.0)
+
+
+def _proq3_apply_baseline_band(fx_mgr, track_idx, fx_idx,
+                                band_idx, btype, freq, gain, q):
+    """Apply a single baseline EQ band using Pro-Q 3 param names."""
+    n = band_idx + 1
+    fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Used", 1.0)
+    fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Enabled", 1.0)
+    fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Frequency", freq)
+    fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Q", q)
+    fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Dynamic Range", 0.5)
+    fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Dynamics Enabled", 0.0)
+    fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Threshold", 1.0)
+    fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Stereo Placement", 0.5)
+    if btype == "hp":
+        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Shape", 0.25)
+        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Slope", 0.1111)
+    elif btype == "bell":
+        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Shape", 0.0)
+        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Gain", gain)
+    elif btype == "hs":
+        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Shape", 0.75)
+        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Slope", 0.1111)
+        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Gain", gain)
+
+
+def _ssleq_apply_baseline_band(fx_mgr, track_idx, fx_idx,
+                                band_idx, btype, freq, gain, q):
+    """Apply a single baseline EQ band using SSL EQ param names.
+
+    SSL EQ has fixed band assignments:
+      - HF shelf  (1.5-16 kHz)
+      - HMF bell  (600-7000 Hz)
+      - LMF bell  (200-2500 Hz)
+      - LF shelf  (30-450 Hz)
+      - HP filter (30-350 Hz, separate from bands)
+
+    Baseline bands are mapped to the most appropriate SSL band.
+    """
+    if btype == "hp":
+        fx_mgr.set_param(track_idx, fx_idx, "HP On/Off", 1.0)
+        fx_mgr.set_param(track_idx, fx_idx, "HP Frq", freq)
+    elif btype == "bell":
+        if freq < 2000:
+            fx_mgr.set_param(track_idx, fx_idx, "LMF Gain", gain)
+            fx_mgr.set_param(track_idx, fx_idx, "LMF Frq", freq)
+            fx_mgr.set_param(track_idx, fx_idx, "LMF Q", q)
+        else:
+            fx_mgr.set_param(track_idx, fx_idx, "HMF Gain", gain)
+            fx_mgr.set_param(track_idx, fx_idx, "HMF Frq", freq)
+            fx_mgr.set_param(track_idx, fx_idx, "HMF Q", q)
+    elif btype == "hs":
+        fx_mgr.set_param(track_idx, fx_idx, "HF Gain", gain)
+        fx_mgr.set_param(track_idx, fx_idx, "HF Frq", freq)
+
+
 class MixingEngine:
     """Top-level REAPER mixing engine. Use as context manager for auto-connect.
 
@@ -1230,39 +1301,36 @@ class MixingEngine:
         if not bands:
             return
 
-        # Apply via ReaEQ (the only EQ plugin with guaranteed params)
-        for band_idx, band in enumerate(bands):
-            btype = band.get("type", "")
-            freq = band.get("freq_hz", 1000.0)
-            gain = band.get("gain_db", 0.0)
-            q = band.get("q", 1.0)
+        # Build a synthetic EqIntent so the same translators
+        # (_apply_proq3_eq / _apply_ssleq_eq) handle normalisation.
+        from hermes_core.loudness_optimizer import EqIntent, EqBandIntent
+        band_intents = []
+        for b in bands:
+            band_intents.append(EqBandIntent(
+                band_type=b.get("type", "bell"),
+                freq_hz=b.get("freq_hz", 1000.0),
+                gain_db=b.get("gain_db", 0.0),
+                q=b.get("q", 1.0),
+                reason=f"baseline:{b.get('type','')}@{b.get('freq_hz',0):.0f}Hz",
+            ))
+        eq_intent = EqIntent(
+            bands=band_intents,
+            spectral_tilt="neutral",
+            mud_detected=False,
+        )
 
-            try:
-                n = band_idx + 1
-                if btype == "hp":
-                    self._fx.set_param(track_index, fx_index,
-                                       f"Band {n} Type", 0.0)
-                    self._fx.set_param(track_index, fx_index,
-                                       f"Band {n} Freq", freq)
-                    self._fx.set_param(track_index, fx_index,
-                                       f"Band {n} Q", q)
-                    self._fx.set_param(track_index, fx_index,
-                                       f"Band {n} Enabled", 1.0)
-                elif btype == "bell":
-                    self._fx.set_param(track_index, fx_index,
-                                       f"Band {n} Type", 2.0)
-                    self._fx.set_param(track_index, fx_index,
-                                       f"Band {n} Freq", freq)
-                    self._fx.set_param(track_index, fx_index,
-                                       f"Band {n} Gain", gain)
-                    self._fx.set_param(track_index, fx_index,
-                                       f"Band {n} Q", q)
-                    self._fx.set_param(track_index, fx_index,
-                                       f"Band {n} Enabled", 1.0)
-                self._last_eq_params[f"Band {n} Freq"] = freq
-                self._last_eq_params[f"Band {n} Gain"] = gain
-            except Exception as exc:
-                log.debug("EQ baseline param set failed: %s", exc)
+        is_ssl = "ssleq" in fx_name.lower()
+        try:
+            if is_ssl:
+                normalized = _apply_ssleq_eq(eq_intent)
+            else:
+                normalized = _apply_proq3_eq(eq_intent)
+            for pname, pval in normalized.items():
+                self._fx.set_param(track_index, fx_index, pname, pval)
+            self._last_eq_params = normalized
+        except Exception as exc:
+            log.warning("Baseline EQ apply failed: %s", exc)
+            return
 
         log.info(
             "EQ baseline (%s/%s): %d bands applied",

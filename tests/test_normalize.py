@@ -277,7 +277,7 @@ class TestProQ3Normalize:
     """Pro-Q 3 params are pre-normalised by _apply_proq3_eq().  The registry
     acts as a 0–1 pass-through for all Pro-Q 3 parameters."""
 
-    PLUGIN = "FabFilter Pro-Q 3 (FabFilter)"
+    PLUGIN = "VST: FabFilter Pro-Q 3 (FabFilter)"
 
     def test_pass_through_params(self):
         """All Pro-Q 3 params are 0–1 pass-through."""
@@ -337,7 +337,7 @@ class TestReaEQNormalize:
 class TestEQBatchNormalize:
     """Batch EQ — all values from _apply_proq3_eq already 0–1."""
 
-    PLUGIN = "FabFilter Pro-Q 3 (FabFilter)"
+    PLUGIN = "VST: FabFilter Pro-Q 3 (FabFilter)"
 
     def test_proq3_full_band_all_01(self):
         """_apply_proq3_eq outputs are all within [0, 1]."""

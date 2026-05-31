@@ -110,7 +110,11 @@ def cmd_vocal_mix(args) -> int:
         if args.profile:
             profile = MixingProfile.from_yaml(args.profile)
         else:
-            profile = MixingProfile()
+            from hermes_core.profiles import get_default_vocal_chain
+            profile = MixingProfile(
+                vocal_chain=get_default_vocal_chain(),
+                backing_chain=[],
+            )
         missing = eng.preflight_plugins(profile.all_fx_names())
         if missing:
             log.error("Missing plugins: %s", ", ".join(missing))
@@ -151,7 +155,7 @@ def cmd_vocal_mix(args) -> int:
         result = eng.finalize_master(
             target_lufs=args.target_lufs,
             limiter_fx=profile.master_limiter.name if profile else
-                       "FabFilter Pro-L 2 (FabFilter)",
+                       "VST: FabFilter Pro-L 2 (FabFilter)",
             tolerance=args.tolerance,
         )
 

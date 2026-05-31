@@ -164,7 +164,7 @@ class MixingProfile:
     bus_reverb: Optional[FXPreset] = None
     reverb_level_db: float = -8.0
     master_limiter: FXPreset = field(
-        default_factory=lambda: FXPreset(name="FabFilter Pro-L 2 (FabFilter)")
+        default_factory=lambda: FXPreset(name="VST: FabFilter Pro-L 2 (FabFilter)")
     )
 
     # ── genre table (backing reduction LU range) ──
@@ -184,7 +184,7 @@ class MixingProfile:
             target_lufs: -12.0
 
             vocal_chain:
-              - name: "FabFilter Pro-Q 3 (FabFilter)"
+              - name: "VST: FabFilter Pro-Q 3 (FabFilter)"
               - name: "Waves RVox (Waves)"
 
             bus_reverb:
@@ -193,7 +193,7 @@ class MixingProfile:
                 Mix: 0.3
 
             master_limiter:
-              name: "FabFilter Pro-L 2 (FabFilter)"
+              name: "VST: FabFilter Pro-L 2 (FabFilter)"
               params:
                 "Output Level": -0.5
 
@@ -225,7 +225,7 @@ class MixingProfile:
         backing = [cls._parse_fx(f) for f in d.get("backing_chain", [])]
         reverb = cls._parse_fx(d.get("bus_reverb"))
         limiter = cls._parse_fx(d.get("master_limiter")) or FXPreset(
-            name="FabFilter Pro-L 2 (FabFilter)"
+            name="VST: FabFilter Pro-L 2 (FabFilter)"
         )
 
         genre_table = {
@@ -273,7 +273,7 @@ def get_default_vocal_chain() -> list[FXPreset]:
     """
     return [
         FXPreset(
-            name="VST3: FabFilter Pro-Q 3 (FabFilter)",
+            name="VST: FabFilter Pro-Q 3 (FabFilter)",
             fx_type="eq",
             eq_position="pre",
         ),

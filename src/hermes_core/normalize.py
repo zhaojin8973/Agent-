@@ -248,7 +248,7 @@ PLUGIN_REGISTRY: dict[str, dict] = {
     },
 
     # ── FabFilter Pro-L 2 (already normalised in engine, listed for completeness) ──
-    "FabFilter Pro-L 2 (FabFilter)": {
+    "VST: FabFilter Pro-L 2 (FabFilter)": {
         "type": "limiter",
         "params": {
             "Gain":          {"range": (0.0, 30.0),  "curve": "linear"},
@@ -270,7 +270,7 @@ PLUGIN_REGISTRY: dict[str, dict] = {
     #   Dynamic Range: (dB+30) / 60                    -30 – +30 dB
     #   Threshold:  (dB+60) / 60                       -60 – 0 dB
     #   Output Level: (dB+36) / 72                     -36 – +36 dB
-    "FabFilter Pro-Q 3 (FabFilter)": {
+    "VST: FabFilter Pro-Q 3 (FabFilter)": {
         "type": "eq",
         "params": {
             **{
