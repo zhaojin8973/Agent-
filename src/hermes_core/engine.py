@@ -1264,10 +1264,30 @@ class MixingEngine:
         """
         self._last_eq_params = {}
 
+        log.debug(
+            "EQ baseline for %s/%s/%s: stem_file_path=%r, exists=%s, "
+            "fx_name=%r, position=%s",
+            role, genre, "spectrum" if (stem_file_path and os.path.exists(stem_file_path)) else "static",
+            stem_file_path or "",
+            os.path.exists(stem_file_path) if stem_file_path else False,
+            fx_name, position,
+        )
+
         # ── Spectrum-driven EQ (happy path) ─────────────────
         if stem_file_path and os.path.exists(stem_file_path):
             try:
                 report = SpectrumAnalyzer.analyze(stem_file_path)
+                log.info(
+                    "Spectrum analysis: tilt=%.1f dB/oct, mud=%.1f dB, "
+                    "presence_deficit=%.1f dB, air=%.1f dB, "
+                    "resonances=%d, bands=%s",
+                    report.spectral_tilt_db_per_octave,
+                    report.mud_ratio_db,
+                    report.presence_deficit_db,
+                    report.air_level_db,
+                    len(report.resonances),
+                    {k: v for k, v in report.band_energy_db.items()},
+                )
                 eq_intent = _derive_eq_intent(
                     report, role=role, genre=genre, position=position,
                 )
@@ -1299,7 +1319,15 @@ class MixingEngine:
         # ── Static baseline fallback ─────────────────────────
         bands = _EQ_BASELINE.get(role, [])
         if not bands:
+            log.debug("EQ baseline: no baseline bands for role=%r, skipping", role)
             return
+
+        log.info(
+            "EQ baseline fallback (%s/%s/%s): %d bands — %s",
+            role, genre, position, len(bands),
+            [(b.get("type"), b.get("freq_hz"), b.get("gain_db", 0.0))
+             for b in bands],
+        )
 
         # Build a synthetic EqIntent so the same translators
         # (_apply_proq3_eq / _apply_ssleq_eq) handle normalisation.
@@ -1360,8 +1388,30 @@ class MixingEngine:
 
         If the target already exists a timestamp suffix is appended to avoid
         overwriting a previous project.
+
+        The output directory is validated with a canary write — if REAPER
+        would fail to save (e.g. permissions, path encoding), we fall back
+        to a system temp directory so the pipeline never hangs on a save
+        dialog.
         """
         os.makedirs(output_dir, exist_ok=True)
+
+        # Validate the directory is actually writable by doing a canary write.
+        # REAPER may fail silently on paths with special characters or
+        # permission issues, showing a modal dialog that blocks the pipeline.
+        try:
+            canary = os.path.join(output_dir, ".hermes_canary")
+            with open(canary, "w") as f:
+                f.write("ok")
+            os.unlink(canary)
+        except OSError:
+            import tempfile
+            fallback = tempfile.mkdtemp(prefix="hermes_project_")
+            log.warning(
+                "Output dir %r not writable, falling back to %s", output_dir, fallback,
+            )
+            output_dir = fallback
+
         target = os.path.join(output_dir, f"{name}.rpp")
         if not os.path.exists(target):
             return target, False
@@ -1605,7 +1655,7 @@ class MixingEngine:
         for i, imp in enumerate(imported):
             if not imp["success"]:
                 stems_out.append({
-                    "path": stem_paths[i],
+                    "file_path": stem_paths[i],
                     "role": self._classify_role(i, vocal_indices, backing_indices),
                     "track_index": imp["track_index"],
                     "track_name": imp["name"],
@@ -1651,7 +1701,7 @@ class MixingEngine:
             )
 
             stems_out.append({
-                "path": stem_paths[i],
+                "file_path": stem_paths[i],
                 "role": self._classify_role(i, vocal_indices, backing_indices),
                 "track_index": imp["track_index"],
                 "track_name": imp["name"],

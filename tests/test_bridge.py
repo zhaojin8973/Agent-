@@ -371,34 +371,38 @@ class TestDialogKillerEvents:
             assert events[0].has_modal is True
             assert killer.killed_count == 1
 
-    def test_dismiss_unknown_dialog_skipped(self):
-        """Unknown dialogs are NOT dismissed and do NOT increment killed_count."""
+    def test_dismiss_unknown_dialog_aggressively(self):
+        """Headless mode: unknown dialogs ARE dismissed aggressively (NOT skipped)."""
         killer = DialogKiller(interval=10.0)
-        fake_output = "Bizarre Unknown Popup:::Yes|No|;;;"
+        # side_effect: [inspect_output, click_result]
         with patch.object(
-            killer, "_run_osascript", return_value=fake_output
+            killer, "_run_osascript",
+            side_effect=[
+                "Bizarre Unknown Popup:::Yes|No|;;;",  # _inspect_windows
+                "clicked:Yes",                          # _click_button
+            ]
         ):
             killer._dismiss_dialogs()
             events = killer.get_recent_events()
             assert len(events) == 1
-            assert events[0].action_taken == "skipped_unknown"
-            assert killer.killed_count == 0, (
-                "unknown dialogs must not increment killed_count"
-            )
+            # Headless: never "skipped_unknown" — always dismissed
+            assert events[0].action_taken == "clicked_yes"
+            assert killer.killed_count == 1
 
-    def test_killed_count_only_increments_on_confirmed_close(self):
-        """killed_count increments only for safe+dismissed or diagnosis+clicked."""
+    def test_killed_count_increments_for_all_dialogs(self):
+        """Headless mode: killed_count increments for ALL dismissed dialogs
+        (safe, diagnosis, AND unknown)."""
         killer = DialogKiller(interval=10.0)
 
-        # Unknown dialog -- should NOT increment
+        # Unknown dialog — now increments (headless aggressive dismiss)
         with patch.object(
             killer, "_run_osascript",
             return_value="Unknown Title:::OK|;;;"
         ):
             killer._dismiss_dialogs()
-            assert killer.killed_count == 0
+            assert killer.killed_count == 1
 
-        # Safe dialog with click -- SHOULD increment
+        # Safe dialog with click — SHOULD increment
         with patch.object(
             killer, "_run_osascript", side_effect=[
                 "Nothing to render:::OK|;;;",  # _inspect_windows
@@ -406,7 +410,7 @@ class TestDialogKillerEvents:
             ]
         ):
             killer._dismiss_dialogs()
-            assert killer.killed_count == 1
+            assert killer.killed_count == 2
 
     def test_event_buffer_does_not_grow_unbounded(self):
         """Events list is capped at max_events."""

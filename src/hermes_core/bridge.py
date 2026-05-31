@@ -59,6 +59,19 @@ _KNOWN_SAFE_PATTERNS = [
     "Render failed",
     "missing output directory",
     "output directory",
+    # REAPER file-system / project errors
+    "Error creating project file",
+    "Error opening",
+    "Error writing",
+    "Could not save",
+    "Could not write",
+    "NEWTEMP",
+    "project file",
+    # Plugin warnings that are safe to dismiss
+    "Plugin could not be loaded",
+    "sample rate",
+    "block size",
+    "not responding",
 ]
 
 _NEEDS_DIAGNOSIS_PATTERNS = [
@@ -71,6 +84,20 @@ _NEEDS_DIAGNOSIS_PATTERNS = [
     "iLok",
     "license",
     "activation",
+]
+
+# Windows that are NEVER dialogs — dismiss actions are skipped entirely.
+# These are progress indicators, tool windows, or informational popups
+# that should not be touched.
+_NEVER_DISMISS_PATTERNS = [
+    "Rendering to file",
+    "Render to File",
+    "Building peaks",
+    "Building Peaks",
+    "Saving project",
+    "Save project",
+    "FX: Track",
+    "FX: Master",
 ]
 
 # ── AppleScript fragments ─────────────────────────────────────
@@ -168,6 +195,7 @@ class DialogKiller:
         self._enabled = True
         self._safe_patterns: list[str] = list(_KNOWN_SAFE_PATTERNS)
         self._diagnosis_patterns: list[str] = list(_NEEDS_DIAGNOSIS_PATTERNS)
+        self._never_dismiss_patterns: list[str] = list(_NEVER_DISMISS_PATTERNS)
 
     # ── Lifecycle ──────────────────────────────────────────
 
@@ -211,18 +239,22 @@ class DialogKiller:
         with self._lock:
             return list(self._events)
 
-    def set_rules(self, safe_patterns=None, diagnosis_patterns=None):
+    def set_rules(self, safe_patterns=None, diagnosis_patterns=None,
+                  never_dismiss_patterns=None):
         """Override the built-in dialog classification patterns.
 
         Pass a list of substrings to match.  Dialogs whose title contains
         any safe pattern are auto-dismissed; those matching diagnosis
-        patterns are dismissed with full context recorded; everything
-        else is treated as unknown.
+        patterns are dismissed with full context recorded; never-dismiss
+        windows are left untouched; everything else is dismissed
+        aggressively (headless mode).
         """
         if safe_patterns is not None:
             self._safe_patterns = list(safe_patterns)
         if diagnosis_patterns is not None:
             self._diagnosis_patterns = list(diagnosis_patterns)
+        if never_dismiss_patterns is not None:
+            self._never_dismiss_patterns = list(never_dismiss_patterns)
 
     # ── Internal ───────────────────────────────────────────
 
@@ -261,8 +293,17 @@ class DialogKiller:
         return windows
 
     def _classify(self, title: str) -> str:
-        """Return 'safe' | 'diagnosis' | 'unknown' based on title text."""
+        """Return 'never' | 'safe' | 'diagnosis' | 'unknown' based on title text.
+
+        'never' — progress windows / floating tools that must NOT be dismissed.
+        'safe' — known error dialogs, auto-dismiss.
+        'diagnosis' — known issues worth logging, auto-dismiss.
+        'unknown' — unrecognized, dismissed aggressively in headless mode.
+        """
         title_lower = title.lower()
+        for pat in self._never_dismiss_patterns:
+            if pat.lower() in title_lower:
+                return "never"
         for pat in self._safe_patterns:
             if pat.lower() in title_lower:
                 return "safe"
@@ -272,8 +313,12 @@ class DialogKiller:
         return "unknown"
 
     def _pick_button(self, buttons: list[str], classification: str) -> str:
-        """Pick which button to click.  Returns button name or '' for Escape fallback."""
-        if classification == "safe":
+        """Pick which button to click.  Returns button name or '' for Escape fallback.
+
+        Headless policy: for unknown dialogs, aggressively try OK/Close/Yes
+        in that order — better to dismiss with the wrong button than to hang.
+        """
+        if classification in ("safe", "unknown"):
             for preferred in ("OK", "Close", "Continue", "Yes"):
                 for b in buttons:
                     if preferred.lower() in b.lower():
@@ -315,7 +360,17 @@ class DialogKiller:
         return ""
 
     def _dismiss_dialogs(self):
-        """Inspect windows, classify dialogs, and take targeted action."""
+        """Inspect windows, classify dialogs, and take targeted action.
+
+        Headless guarantee: **every** recognised dialog is dismissed.
+        - ``never`` windows (progress bars, tool windows) are left alone.
+        - ``safe`` dialogs: click OK/Close then fall back to Escape.
+        - ``diagnosis`` dialogs: same as safe but logged with full context.
+        - ``unknown`` dialogs: dismissed aggressively (OK → Escape), logged
+          so patterns can be added later.
+
+        The pipeline must never hang waiting for a user who is not there.
+        """
         windows = self._inspect_windows()
         if not windows:
             return
@@ -324,56 +379,32 @@ class DialogKiller:
             classification = self._classify(title)
             now = time.time()
 
-            if classification == "safe":
-                btn = self._pick_button(buttons, "safe")
-                if btn:
-                    clicked = self._click_button(title, btn)
-                    action = f"clicked_{btn.lower()}" if clicked else "sent_escape"
-                    if not clicked:
-                        self._run_osascript(_AS_DISMISS)
-                else:
+            # ── Never dismiss progress windows / tool windows ─
+            if classification == "never":
+                continue
+
+            # ── All other classifications: dismiss aggressively ─
+            btn = self._pick_button(buttons, classification)
+
+            if btn:
+                clicked = self._click_button(title, btn)
+                action = f"clicked_{btn.lower()}" if clicked else "sent_escape"
+                if not clicked:
                     self._run_osascript(_AS_DISMISS)
-                    action = "sent_escape"
-
-                self._killed_count += 1
-                event = DialogEvent(
-                    has_modal=True,
-                    window_title=title,
-                    buttons=buttons,
-                    text_hits=[title],
-                    action_taken=action,
-                    timestamp=now,
-                )
-
-            elif classification == "diagnosis":
-                btn = self._pick_button(buttons, "diagnosis")
-                if btn:
-                    clicked = self._click_button(title, btn)
-                    action = f"clicked_{btn.lower()}" if clicked else "skipped_unknown"
-                else:
-                    action = "skipped_unknown"
-
-                if "clicked" in action:
-                    self._killed_count += 1
-
-                event = DialogEvent(
-                    has_modal=True,
-                    window_title=title,
-                    buttons=buttons,
-                    text_hits=[title],
-                    action_taken=action,
-                    timestamp=now,
-                )
-
             else:
-                event = DialogEvent(
-                    has_modal=True,
-                    window_title=title,
-                    buttons=buttons,
-                    text_hits=[title],
-                    action_taken="skipped_unknown",
-                    timestamp=now,
-                )
+                self._run_osascript(_AS_DISMISS)
+                action = "sent_escape"
+
+            self._killed_count += 1
+
+            event = DialogEvent(
+                has_modal=True,
+                window_title=title,
+                buttons=buttons,
+                text_hits=[title],
+                action_taken=action,
+                timestamp=now,
+            )
 
             with self._lock:
                 self._events.append(event)
@@ -384,7 +415,7 @@ class DialogKiller:
                 "DialogKiller: %s | %s | %s",
                 classification,
                 title[:80],
-                event.action_taken,
+                action,
             )
 
 
