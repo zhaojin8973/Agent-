@@ -312,7 +312,7 @@ PLUGIN_REGISTRY: dict[str, dict] = {
     # Frequency: stepped controls — lookup tables
     # Q: 0.1 (widest=1.0) – 3.5 (narrowest=0.0), reverse-linear
     # Switches: 0/1 (HP On, LMF Div3, HMF Mul3, Analog, EQ IN)
-    "SSLEQ Mono (Waves)": {
+    "VST3: SSLEQ Mono (Waves)": {
         "type": "eq",
         "params": {
             "Bypass":       {"range": (0.0, 1.0), "curve": "linear"},
@@ -333,6 +333,7 @@ PLUGIN_REGISTRY: dict[str, dict] = {
             "HF Frq":       {"range": (0.0, 1.0), "curve": "linear"},
             "Analog":       {"range": (0.0, 1.0), "curve": "linear"},
             "EQ IN":        {"range": (0.0, 1.0), "curve": "linear"},
+            "Phase Rev":    {"range": (0.0, 1.0), "curve": "linear"},
         },
     },
     # ReaEQ: 4 bands for basic EQ tasks.  Band Types:

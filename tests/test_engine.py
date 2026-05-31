@@ -1388,7 +1388,7 @@ class TestSSLEQEngine:
             eng._apply_eq_baseline(
                 track_index=0, fx_index=0, role="vocal",
                 genre="pop", stem_file_path=wav_path,
-                position="post", fx_name="SSLEQ Mono (Waves)",
+                position="post", fx_name="VST3: SSLEQ Mono (Waves)",
             )
             params = eng._last_eq_params
             # SSL EQ params should be present
