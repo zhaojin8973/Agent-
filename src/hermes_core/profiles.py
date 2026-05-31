@@ -287,7 +287,7 @@ def get_default_vocal_chain() -> list[FXPreset]:
             eq_position="post",
         ),
         FXPreset(
-            name="VST3: RVox (Waves)",
+            name="VST3: RVox Mono (Waves)",
             fx_type="rvox",
         ),
     ]

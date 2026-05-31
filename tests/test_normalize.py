@@ -159,16 +159,35 @@ class TestNormalizeParamTable:
 
 @pytest.mark.unit
 class TestNormalizeParamRVox:
-    PLUGIN = "Waves RVox (Waves)"
+    PLUGIN = "VST3: RVox Mono (Waves)"
 
     def test_compression_mid(self):
-        # range 0..100 → 60 → 0.6
-        assert normalize_param(self.PLUGIN, "Compression", 60.0) == 0.6
+        # range -36..0 → -18 → 0.5
+        assert normalize_param(self.PLUGIN, "Compression", -18.0) == 0.5
+
+    def test_compression_none(self):
+        # 0 dB → no compression → norm 1.0
+        assert normalize_param(self.PLUGIN, "Compression", 0.0) == 1.0
+
+    def test_compression_max(self):
+        # -36 dB → max compression → norm 0.0
+        assert normalize_param(self.PLUGIN, "Compression", -36.0) == 0.0
 
     def test_gain(self):
-        # range -18..18 → 3.0 → (3+18)/36 = 21/36 ≈ 0.583
-        result = normalize_param(self.PLUGIN, "Gain", 3.0)
-        assert result == pytest.approx(21.0 / 36.0)
+        # range -36..0 → -18 → 0.5
+        result = normalize_param(self.PLUGIN, "Gain", -18.0)
+        assert result == 0.5
+
+    def test_gain_unity(self):
+        assert normalize_param(self.PLUGIN, "Gain", 0.0) == 1.0
+
+    def test_gate_off(self):
+        # Gate at -120 dB (-Inf) → norm 0.0
+        assert normalize_param(self.PLUGIN, "Gate", -120.0) == 0.0
+
+    def test_gate_mid(self):
+        # range -120..0 → -60 → 0.5
+        assert normalize_param(self.PLUGIN, "Gate", -60.0) == 0.5
 
 
 # ════════════════════════════════════════════════════════════
@@ -187,8 +206,8 @@ class TestNormalizeParams:
         assert all(0.0 <= v <= 1.0 for v in result.values())
 
     def test_batch_single(self):
-        result = normalize_params("Waves RVox (Waves)", {"Compression": 60.0})
-        assert result["Compression"] == 0.6
+        result = normalize_params("VST3: RVox Mono (Waves)", {"Compression": -18.0})
+        assert result["Compression"] == 0.5
 
 
 # ════════════════════════════════════════════════════════════

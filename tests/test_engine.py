@@ -741,7 +741,8 @@ class TestDeriveCompressorIntent:
     def test_heavy_for_large_crest(self):
         intent = _derive_compressor_intent(-18.0, -3.0)  # crest = 15 dB
         assert intent.amount == "heavy"
-        assert intent.gr_target_db > 4.0
+        # crest 15 * FET coeff 0.2 = 3.0 dB GR (peak control, not body)
+        assert intent.gr_target_db > 2.5
 
     def test_medium_for_moderate_crest(self):
         intent = _derive_compressor_intent(-18.0, -6.0)  # crest = 12 dB
@@ -799,10 +800,17 @@ class TestCompressorTranslators:
         assert "Gain" in params
         assert params["Peak Reduction"] == 6.0
 
-    def test_rvox_returns_compression_pct(self):
+    def test_rvox_returns_db_params(self):
         params = _apply_rvox_params(self.INTENT, self.PRESET)
         assert "Compression" in params
-        assert params["Compression"] == 60.0  # medium → 60
+        assert "Gate" in params
+        assert "Gain" in params
+        # 1:1 mapping: gr_target=6.0 → Compression=-6.0
+        assert params["Compression"] == -6.0
+        # Gain = Comp * 0.6 (level-match)
+        assert params["Gain"] == pytest.approx(-3.6, abs=0.1)
+        # Gate = off (-120 dB)
+        assert params["Gate"] == -120.0
 
     def test_heavy_vca_uses_higher_ratio(self):
         heavy = CompressionIntent("heavy", 8.0, 16.0, -18.0, -2.0)

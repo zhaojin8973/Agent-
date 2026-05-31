@@ -273,18 +273,36 @@ def _apply_rvox_params(intent: CompressionIntent,
                         preset: dict[str, float]) -> dict[str, float]:
     """Waves RVox → physical parameter dict.
 
-    RVox's Compression control is 0–100 (%).  We map the intent amount
-    directly, then let normalisation handle the 0–1 scaling.
+    RVox is a single-fader dynamic processor with fixed internal
+    ceiling (0 dBFS).  The Compression fader combines threshold,
+    auto-ratio, and auto make-up gain into one control.
+
+    Calibration (望归 Vocal, 2026-05-31):
+      Comp  →  GR_peak  (3 data points, 1:1 linear relationship)
+      -12.3  →  -12 dB
+      -6.0   →  -6 dB
+      -3.0   →  -2.5 dB
+
+    Level-match: Gain = Comp × 0.6 (verified by A/B bypass).
+    Gate is a gentle downward expander, defaulting to off.
     """
-    comp = {
-        "light":  40.0,
-        "medium": 60.0,
-        "heavy":  80.0,
-    }.get(intent.amount, 50.0)
+    # Compression: 1:1 with target GR (confirmed by REAPER GR meter).
+    compression_db = -intent.gr_target_db
+    compression_db = max(-36.0, min(0.0, compression_db))
+
+    # Gain: level-match — prevent auto-gain loudness from masking compression.
+    # Coeff 0.6 is the user-verified sweet spot.
+    gain_db = compression_db * 0.6
+    gain_db = max(-36.0, min(0.0, gain_db))
+
+    # Gate: off by default (-120 dB ≈ -Inf).  Signal analysis does not yet
+    # produce a noise-floor estimate to justify an automatic gate.
+    gate_db = -120.0
 
     return {
-        "Compression": comp,
-        "Gain":         round(intent.gr_target_db * 0.5, 1),
+        "Compression": round(compression_db, 1),
+        "Gate":        round(gate_db, 1),
+        "Gain":        round(gain_db, 1),
     }
 
 

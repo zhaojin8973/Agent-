@@ -216,11 +216,12 @@ PLUGIN_REGISTRY: dict[str, dict] = {
     },
 
     # ── Vocal-specific compressors ─────────────────────
-    "Waves RVox (Waves)": {
+    "VST3: RVox Mono (Waves)": {
         "type": "rvox",
         "params": {
-            "Compression": {"range": (0.0, 100.0), "curve": "linear"},
-            "Gain":        {"range": (-18.0, 18.0), "curve": "linear"},
+            "Compression": {"range": (-36.0, 0.0), "curve": "linear"},
+            "Gate":        {"range": (-120.0, 0.0), "curve": "linear"},
+            "Gain":        {"range": (-36.0, 0.0), "curve": "linear"},
         },
     },
     "Waves RCompressor (Waves)": {
