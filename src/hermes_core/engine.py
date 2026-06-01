@@ -155,6 +155,19 @@ _GENRE_CREST_GR_RATIO: dict[str, float] = {
     "electronic":              0.20,   # heaviest — control dynamics
 }
 
+# RVox body compression multiplier (on top of CLA-76 GR).
+# CLA-76 grabs peaks → RVox smooths the body.  The multiplier
+# controls how much ADDITIONAL body compression RVox applies.
+# >1.0 = RVox compresses more than the peak GR (dense genres).
+_GENRE_RVOX_MULTIPLIER: dict[str, float] = {
+    "electronic":              1.8,
+    "pop":                     1.7,
+    "rock":                    1.7,
+    "chinese_folk_bel_canto":  1.5,
+    "folk":                    1.0,   # sparse backing, vocal already forward
+    "ballad":                  1.2,
+}
+
 
 def _derive_compressor_intent(
     rms_db: float, peak_db: float, *, genre: str = "pop"
@@ -307,12 +320,18 @@ def _apply_opto_params(intent: CompressionIntent,
 
 
 def _apply_rvox_params(intent: CompressionIntent,
-                        preset: dict[str, float]) -> dict[str, float]:
+                        preset: dict[str, float],
+                        rvox_multiplier: float = 1.0) -> dict[str, float]:
     """Waves RVox → physical parameter dict.
 
     RVox is a single-fader dynamic processor with fixed internal
     ceiling (0 dBFS).  The Compression fader combines threshold,
     auto-ratio, and auto make-up gain into one control.
+
+    Body compression = CLA-76 GR × *rvox_multiplier*.  Since CLA-76
+    already grabbed the peaks, RVox focuses on body/RMS consistency.
+    Dense genres use >1.0 for more body control; sparse genres use
+    lower values.
 
     Calibration (望归 Vocal, 2026-05-31):
       Comp  →  GR_peak  (3 data points, 1:1 linear relationship)
@@ -323,8 +342,8 @@ def _apply_rvox_params(intent: CompressionIntent,
     Level-match: Gain = Comp × 0.6 (verified by A/B bypass).
     Gate is a gentle downward expander, defaulting to off.
     """
-    # Compression: 1:1 with target GR (confirmed by REAPER GR meter).
-    compression_db = -intent.gr_target_db
+    # Compression: genre-scaled body targeting.
+    compression_db = -intent.gr_target_db * rvox_multiplier
     compression_db = max(-36.0, min(0.0, compression_db))
 
     # Gain: level-match — prevent auto-gain loudness from masking compression.
@@ -1251,6 +1270,9 @@ class MixingEngine:
                     preset["attack_ms"] = _ms_to_cla76_attack(preset["attack_ms"])
                     preset["release_ms"] = _ms_to_cla76_release(preset["release_ms"])
                     physical = _apply_cla76_params(intent, preset)
+                elif fx_type == "rvox":
+                    rvox_mult = _GENRE_RVOX_MULTIPLIER.get(genre, 1.0)
+                    physical = _apply_rvox_params(intent, preset, rvox_mult)
                 else:
                     physical = _TRANSLATORS[fx_type](intent, preset)
 
