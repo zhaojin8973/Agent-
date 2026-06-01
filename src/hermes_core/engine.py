@@ -1362,19 +1362,19 @@ class MixingEngine:
                 spectrum = getattr(self, "_last_spectrum", {}) or {}
                 presence_def = spectrum.get("presence_deficit", 0.0)
 
-                # Threshold: more sensitive formula so Range actually engages.
-                threshold_db = -28.0 + presence_def * 0.2
+                # Threshold: aggressive so Range actually engages as safety net.
+                threshold_db = -32.0 + presence_def * 0.1
                 threshold_db = max(-60.0, min(0.0, threshold_db))
 
                 # Fixed detection band (log: freq ≈ 2000 × 10^n Hz).
-                hpf_norm = math.log10(4600.0 / 2000.0)
+                hpf_norm = math.log10(5000.0 / 2000.0)
                 lpf_norm = math.log10(12000.0 / 2000.0)
 
                 physical = {
                     "Mode":              0.0,      # Single Vocal
                     "Band Processing":   0.0,      # Wide Band (natural)
                     "Threshold":         round(threshold_db, 1),
-                    "Range":             10.0,     # max GR (manual: 10–15 dB)
+                    "Range":             8.5,      # safety ceiling
                     "Lookahead":         10.0,     # ms (manual: ~10 ms optimal)
                     "Lookahead Enabled": 1.0,
                     "High-Pass Frequency": round(hpf_norm, 3),
@@ -1388,7 +1388,7 @@ class MixingEngine:
                 for pname, pval in normalized.items():
                     self._fx.set_param(track_index, idx, pname, pval)
                 log.info(
-                    "Auto-deesser: band=4.6k–12kHz, presence_def=%.1f → threshold=%.1f dB",
+                    "Auto-deesser: band=5k–12kHz, presence_def=%.1f → threshold=%.1f dB",
                     presence_def, threshold_db,
                 )
             else:
