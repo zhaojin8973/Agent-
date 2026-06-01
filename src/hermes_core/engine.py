@@ -1234,6 +1234,12 @@ class MixingEngine:
                     physical = _apply_cla76_params(intent, preset)
                 else:
                     physical = _TRANSLATORS[fx_type](intent, preset)
+
+                # No BPM → leave timing at plugin defaults (don't touch).
+                if bpm is None:
+                    for timing_key in ("Attack", "Release"):
+                        physical.pop(timing_key, None)
+
                 node.params = dict(physical)
                 normalized = normalize_params(fx.name, physical)
                 for pname, pval in normalized.items():

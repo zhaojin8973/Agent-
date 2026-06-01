@@ -199,19 +199,12 @@ _BX_ATTACK_STEPS: list[float] = [0.1, 0.3, 1.0, 3.0, 10.0, 30.0]
 
 def _select_bus_attack(bpm: float | None = None,
                         genre: str = "pop") -> float:
-    """Select bus compressor attack time (ms) based on BPM and genre.
+    """Return bus compressor attack time — always 30 ms.
 
-    Returns a physical attack value from the bx_townhouse stepped attack
-    table.  Slower material gets slower attack for transparency; faster,
-    denser material gets faster attack for tightness.
+    The bx_townhouse SSL-style bus compressor shines at 30 ms attack
+    for glue, regardless of BPM or genre.  Timing variation belongs
+    in the per-track compressors, not the master bus glue.
     """
-    if bpm is not None and bpm > 140:
-        return 10.0
-    if genre in ("electronic",):
-        return 10.0
-    if bpm is not None and bpm < 80:
-        return 30.0
-    # Default: 30 ms — gentle, musical bus glue for most material.
     return 30.0
 
 

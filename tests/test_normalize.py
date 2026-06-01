@@ -450,30 +450,15 @@ class TestBusThreshOffset:
 
 @pytest.mark.unit
 class TestSelectBusAttack:
-    """Attack time selection from BPM and genre."""
+    """Bus compressor attack is always 30 ms regardless of BPM/genre."""
 
-    def test_default_pop_120bpm(self):
+    def test_always_30ms(self):
         from hermes_core.normalize import _select_bus_attack
         assert _select_bus_attack(120, "pop") == 30.0
-
-    def test_fast_bpm_selects_faster_attack(self):
-        from hermes_core.normalize import _select_bus_attack
-        assert _select_bus_attack(160, "pop") == 10.0
-
-    def test_slow_bpm_selects_slow_attack(self):
-        from hermes_core.normalize import _select_bus_attack
+        assert _select_bus_attack(160, "pop") == 30.0
         assert _select_bus_attack(60, "pop") == 30.0
-
-    def test_electronic_genre_fast_attack(self):
-        from hermes_core.normalize import _select_bus_attack
-        assert _select_bus_attack(120, "electronic") == 10.0
-
-    def test_folk_genre_slow_attack(self):
-        from hermes_core.normalize import _select_bus_attack
+        assert _select_bus_attack(120, "electronic") == 30.0
         assert _select_bus_attack(120, "folk") == 30.0
-
-    def test_no_bpm_defaults(self):
-        from hermes_core.normalize import _select_bus_attack
         assert _select_bus_attack(None, "pop") == 30.0
 
 
@@ -524,10 +509,10 @@ class TestComputeBusCompressorParams:
     def test_electronic(self):
         from hermes_core.normalize import compute_bus_compressor_params
         params = compute_bus_compressor_params(peak_db=-5.0, bpm=128, genre="electronic")
-        # Target GR=2.5, attack=10ms → offset = 1.0 × 3.0/2.5 = 1.2
-        # thresh = -5.0 + 1.2 = -3.8
-        assert params["Attack"] == 10.0
-        assert params["Thresh"] == pytest.approx(-3.8, abs=0.1)
+        # Target GR=2.5, attack=30ms → offset = 1.0 × 1.8/2.5 = 0.72
+        # thresh = -5.0 + 0.72 = -4.28
+        assert params["Attack"] == 30.0
+        assert params["Thresh"] == pytest.approx(-4.3, abs=0.1)
         assert params["MakeUp"] == 1.2  # 2.5 × 0.5 = 1.25 → round to 1.2 (banker's)
         assert params["_target_gr"] == 2.5
 
