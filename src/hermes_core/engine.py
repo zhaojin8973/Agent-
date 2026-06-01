@@ -1299,7 +1299,7 @@ class MixingEngine:
                 # BPM-aware timing: override genre preset when BPM is known.
                 # Skip RVox — it has no attack/release params (single-fader).
                 preset = _get_compressor_preset(role, genre)
-                if bpm is not None and bpm > 0 and fx_type not in ("rvox", "cla76"):
+                if bpm is not None and bpm > 0 and "cla-76" not in fx.name.lower() and fx_type != "rvox":
                     bpm_timing = get_bpm_timing(bpm)
                     if bpm_timing is not None:
                         preset = dict(preset, **bpm_timing)
