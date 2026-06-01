@@ -1367,7 +1367,7 @@ class MixingEngine:
                 threshold_db = max(-60.0, min(0.0, threshold_db))
 
                 # Fixed detection band (log: freq ≈ 2000 × 10^n Hz).
-                hpf_norm = math.log10(5000.0 / 2000.0)
+                hpf_norm = math.log10(5500.0 / 2000.0)
                 lpf_norm = math.log10(12000.0 / 2000.0)
 
                 physical = {
@@ -1388,7 +1388,7 @@ class MixingEngine:
                 for pname, pval in normalized.items():
                     self._fx.set_param(track_index, idx, pname, pval)
                 log.info(
-                    "Auto-deesser: band=5k–12kHz, presence_def=%.1f → threshold=%.1f dB",
+                    "Auto-deesser: band=5.5k–12kHz, presence_def=%.1f → threshold=%.1f dB",
                     presence_def, threshold_db,
                 )
             else:
