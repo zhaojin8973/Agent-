@@ -524,7 +524,7 @@ PLUGIN_REGISTRY: dict[str, dict] = {
         "params": {
             "Mode":                   {"range": (0.0, 1.0),    "curve": "linear"},
             "Band Processing":        {"range": (0.0, 1.0),    "curve": "linear"},
-            "Threshold":              {"range": (-36.0, 0.0),  "curve": "linear"},
+            "Threshold":              {"range": (-60.0, 0.0),  "curve": "linear"},  # verified via GUI readback
             "Range":                  {"range": (0.0, 15.0),   "curve": "linear"},
             "Lookahead":              {"range": (0.0, 15.0),   "curve": "linear"},  # verified in GUI
             "Lookahead Enabled":      {"range": (0.0, 1.0),    "curve": "linear"},
