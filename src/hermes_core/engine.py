@@ -1354,23 +1354,21 @@ class MixingEngine:
                     intent.gr_target_db,
                 )
             elif fx_type == "deesser":
-                # Pro-DS: threshold from presence deficit, HPF/LPF from
-                # sibilance peak in spectrum.  Detection band wraps ±2 kHz
-                # around the peak, clamped to Pro-DS range (2–20 kHz).
+                # Pro-DS: threshold from presence deficit.  Fixed detection
+                # band HPF=4.6kHz / LPF=12kHz covers sibilance range.
+                # Single Vocal mode distinguishes sibilance from harmonics
+                # internally — no peak-tracking needed.
                 import math
                 spectrum = getattr(self, "_last_spectrum", {}) or {}
                 presence_def = spectrum.get("presence_deficit", 0.0)
-                sib_peak = spectrum.get("sibilance_peak_hz", 8000.0)
 
                 # Threshold: more sensitive formula so Range actually engages.
                 threshold_db = -28.0 + presence_def * 0.2
                 threshold_db = max(-60.0, min(0.0, threshold_db))
 
-                # Detection band: ±2 kHz around sibilance peak.
-                hpf_hz = max(2000.0, sib_peak - 2000.0)
-                lpf_hz = min(20000.0, sib_peak + 2000.0)
-                hpf_norm = math.log10(hpf_hz / 2000.0)
-                lpf_norm = math.log10(lpf_hz / 2000.0)
+                # Fixed detection band (log: freq ≈ 2000 × 10^n Hz).
+                hpf_norm = math.log10(4600.0 / 2000.0)
+                lpf_norm = math.log10(12000.0 / 2000.0)
 
                 physical = {
                     "Mode":              0.0,      # Single Vocal
@@ -1390,9 +1388,8 @@ class MixingEngine:
                 for pname, pval in normalized.items():
                     self._fx.set_param(track_index, idx, pname, pval)
                 log.info(
-                    "Auto-deesser: sib_peak=%.0f Hz, band=%.0f–%.0f Hz, "
-                    "presence_def=%.1f → threshold=%.1f dB",
-                    sib_peak, hpf_hz, lpf_hz, presence_def, threshold_db,
+                    "Auto-deesser: band=4.6k–12kHz, presence_def=%.1f → threshold=%.1f dB",
+                    presence_def, threshold_db,
                 )
             else:
                 for pname, pval in fx.params.items():
