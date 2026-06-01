@@ -147,12 +147,12 @@ def _friendly_hint(error: str) -> str:
 # Mirrors bus compressor GR targets: transparent genres use lighter
 # multipliers so the whole pipeline breathes consistently.
 _GENRE_CREST_GR_RATIO: dict[str, float] = {
-    "folk":                    0.10,   # lightest — preserve breath
-    "ballad":                  0.10,
-    "chinese_folk_bel_canto":  0.12,   # medium-light — majestic
-    "pop":                     0.15,   # standard
-    "rock":                    0.15,
-    "electronic":              0.20,   # heaviest — control dynamics
+    "folk":                    0.12,   # lightest — preserve breath
+    "ballad":                  0.12,
+    "chinese_folk_bel_canto":  0.14,   # medium-light — majestic
+    "pop":                     0.17,   # standard
+    "rock":                    0.17,
+    "electronic":              0.22,   # heaviest — control dynamics
 }
 
 # RVox body compression multiplier (on top of CLA-76 GR).
