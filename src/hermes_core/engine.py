@@ -1358,11 +1358,14 @@ class MixingEngine:
                 # Detection: Single Vocal, Wide Band (natural for single vox).
                 # Lookahead: ~10 ms (FabFilter recommendation).
                 # Range: -10 dB starting point (manual recommends -10 to -15).
-                # HPF: 5 kHz — focus detection on sibilance band (4–8 kHz).
+                # HPF/LPF: log curve — freq ≈ 2000 × 10^n Hz, pre-normalised.
+                import math
                 spectrum = getattr(self, "_last_spectrum", {}) or {}
                 presence_def = spectrum.get("presence_deficit", 0.0)
                 threshold_db = -20.0 + presence_def * 0.25
                 threshold_db = max(-36.0, min(0.0, threshold_db))
+                hpf_norm = math.log10(5000.0 / 2000.0)  # ≈ 0.398
+                lpf_norm = math.log10(12000.0 / 2000.0)  # ≈ 0.778
                 physical = {
                     "Mode":              0.0,      # Single Vocal
                     "Band Processing":   0.0,      # Wide Band (natural)
@@ -1370,8 +1373,8 @@ class MixingEngine:
                     "Range":             10.0,     # max GR (manual: 10–15 dB)
                     "Lookahead":         10.0,     # ms (manual: ~10 ms optimal)
                     "Lookahead Enabled": 1.0,
-                    "High-Pass Frequency": 5000.0,  # focus on sibilance (4–8 kHz)
-                    "Low-Pass Frequency":  12000.0,
+                    "High-Pass Frequency": round(hpf_norm, 3),
+                    "Low-Pass Frequency":  round(lpf_norm, 3),
                     "Input Level":       0.0,
                     "Output Level":      0.0,
                     "Wet":               1.0,

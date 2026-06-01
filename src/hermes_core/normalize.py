@@ -528,8 +528,8 @@ PLUGIN_REGISTRY: dict[str, dict] = {
             "Range":                  {"range": (0.0, 15.0),   "curve": "linear"},
             "Lookahead":              {"range": (0.0, 15.0),   "curve": "linear"},  # verified in GUI
             "Lookahead Enabled":      {"range": (0.0, 1.0),    "curve": "linear"},
-            "High-Pass Frequency":    {"range": (20.0, 20000.0), "curve": "linear"},
-            "Low-Pass Frequency":     {"range": (20.0, 20000.0), "curve": "linear"},
+            "High-Pass Frequency":    {"range": (0.0, 1.0), "curve": "linear"},
+            "Low-Pass Frequency":     {"range": (0.0, 1.0), "curve": "linear"},
             "Input Level":            {"range": (-30.0, 30.0), "curve": "linear"},
             "Output Level":           {"range": (-30.0, 30.0), "curve": "linear"},
             "Wet":                    {"range": (0.0, 1.0),    "curve": "linear"},
