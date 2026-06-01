@@ -182,12 +182,12 @@ _BUS_ATTACK_GR_TABLE: list[tuple[float, float]] = [
 
 # Genre → target bus compressor GR (dB).
 _GENRE_BUS_GR_TARGET: dict[str, float] = {
-    "electronic":              2.5,   # density and punch
-    "pop":                     2.0,   # standard bus glue
-    "rock":                    2.0,   # tight and punchy
-    "chinese_folk_bel_canto":  1.5,   # preserve dynamics, majestic
-    "folk":                    1.0,   # most transparent
-    "ballad":                  1.0,   # gentle, almost untouched
+    "electronic":              3.5,   # density and punch
+    "pop":                     3.0,   # commercial loudness
+    "rock":                    3.0,   # tight and punchy
+    "chinese_folk_bel_canto":  2.5,   # majestic with weight
+    "folk":                    2.0,   # light glue
+    "ballad":                  2.0,   # gentle glue
 }
 
 # The bx_townhouse plugin name in PLUGIN_REGISTRY.

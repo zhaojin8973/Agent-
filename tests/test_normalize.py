@@ -500,47 +500,47 @@ class TestComputeBusCompressorParams:
         assert params["Mix"] == 1.0
         assert params["Wet"] == 1.0
         assert params["Release"] == 999.0  # auto
-        # Target GR=2.0, attack=30ms → offset=0.9
-        # thresh = -3.0 + 0.9 = -2.1
-        assert params["Thresh"] == pytest.approx(-2.1, abs=0.1)
+        # Target GR=3.0, attack=30ms → offset = 1.0 × 1.8/3.0 = 0.6
+        # thresh = -3.0 + 0.6 = -2.4
+        assert params["Thresh"] == pytest.approx(-2.4, abs=0.1)
         assert params["Attack"] == 30.0
-        assert params["MakeUp"] == 1.0  # 2.0 × 0.5
+        assert params["MakeUp"] == 1.5  # 3.0 × 0.5
 
     def test_electronic(self):
         from hermes_core.normalize import compute_bus_compressor_params
         params = compute_bus_compressor_params(peak_db=-5.0, bpm=128, genre="electronic")
-        # Target GR=2.5, attack=30ms → offset = 1.0 × 1.8/2.5 = 0.72
-        # thresh = -5.0 + 0.72 = -4.28
+        # Target GR=3.5, attack=30ms → offset = 1.0 × 1.8/3.5 = 0.51
+        # thresh = -5.0 + 0.51 = -4.5
         assert params["Attack"] == 30.0
-        assert params["Thresh"] == pytest.approx(-4.3, abs=0.1)
-        assert params["MakeUp"] == 1.2  # 2.5 × 0.5 = 1.25 → round to 1.2 (banker's)
-        assert params["_target_gr"] == 2.5
+        assert params["Thresh"] == pytest.approx(-4.5, abs=0.1)
+        assert params["MakeUp"] == 1.8  # 3.5 × 0.5 = 1.75 → round to 1.8
+        assert params["_target_gr"] == 3.5
 
     def test_folk_transparent(self):
         from hermes_core.normalize import compute_bus_compressor_params
         params = compute_bus_compressor_params(peak_db=-2.0, bpm=90, genre="folk")
-        # Target GR=1.0, attack=30ms → offset = 1.0 × 1.8/1.0 = 1.8
-        # thresh = -2.0 + 1.8 = -0.2
+        # Target GR=2.0, attack=30ms → offset = 1.0 × 1.8/2.0 = 0.9
+        # thresh = -2.0 + 0.9 = -1.1
         assert params["Attack"] == 30.0
-        assert params["Thresh"] == pytest.approx(-0.2, abs=0.1)
-        assert params["MakeUp"] == 0.5  # 1.0 × 0.5
-        assert params["_target_gr"] == 1.0
+        assert params["Thresh"] == pytest.approx(-1.1, abs=0.1)
+        assert params["MakeUp"] == 1.0  # 2.0 × 0.5
+        assert params["_target_gr"] == 2.0
 
     def test_chinese_folk_bel_canto(self):
         from hermes_core.normalize import compute_bus_compressor_params
         params = compute_bus_compressor_params(peak_db=-4.0, genre="chinese_folk_bel_canto")
-        # Target GR=1.5, attack=30ms → offset = 1.0 × 1.8/1.5 = 1.2
-        # thresh = -4.0 + 1.2 = -2.8
-        assert params["_target_gr"] == 1.5
-        assert params["Thresh"] == pytest.approx(-2.8, abs=0.1)
-        assert params["MakeUp"] == 0.8  # 1.5 × 0.5 = 0.75 → round to 0.8
+        # Target GR=2.5, attack=30ms → offset = 1.0 × 1.8/2.5 = 0.72
+        # thresh = -4.0 + 0.72 = -3.3
+        assert params["_target_gr"] == 2.5
+        assert params["Thresh"] == pytest.approx(-3.3, abs=0.1)
+        assert params["MakeUp"] == 1.2  # 2.5 × 0.5 = 1.25 → round to 1.2 (banker's)
 
     def test_unknown_genre_falls_back(self):
         from hermes_core.normalize import compute_bus_compressor_params
         params = compute_bus_compressor_params(peak_db=-3.0, genre="jazz")
         # Unknown genre → target GR = 2.0 (default)
         assert params["_target_gr"] == 2.0
-        assert params["MakeUp"] == 1.0
+        assert params["MakeUp"] == 1.0  # 2.0 × 0.5
 
     def test_all_keys_present(self):
         from hermes_core.normalize import compute_bus_compressor_params
@@ -552,12 +552,12 @@ class TestComputeBusCompressorParams:
     def test_high_peak(self):
         from hermes_core.normalize import compute_bus_compressor_params
         params = compute_bus_compressor_params(peak_db=-1.0, genre="pop")
-        # thresh = -1.0 + 0.9 = -0.1 — thresh should be near 0 but not above
-        assert params["Thresh"] < 0  # below digital ceiling
-        assert params["Thresh"] > -1.0  # but above peak
+        # Target GR=3.0 → offset=0.6 → thresh = -1.0 + 0.6 = -0.4
+        assert params["Thresh"] < 0
+        assert params["Thresh"] > -1.0
 
     def test_low_peak(self):
         from hermes_core.normalize import compute_bus_compressor_params
         params = compute_bus_compressor_params(peak_db=-12.0, genre="pop")
-        # thresh = -12.0 + 0.9 = -11.1
-        assert params["Thresh"] == pytest.approx(-11.1, abs=0.1)
+        # Target GR=3.0 → offset=0.6 → thresh = -12.0 + 0.6 = -11.4
+        assert params["Thresh"] == pytest.approx(-11.4, abs=0.1)
