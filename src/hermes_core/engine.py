@@ -41,16 +41,21 @@ from hermes_core.spectrum import SpectrumAnalyzer, SpectrumReport
 log = logging.getLogger(__name__)
 
 # Genre-based backing track reduction (LU) for prepare_stems.
-# Higher values = backing is more heavily compressed/limited → needs
-# more reduction to create headroom for the lead vocal.
-_GENRE_BACKING_REDUCTION = {
-    "folk":                    (3, 6),    # folk / ballad — wide dynamics
-    "ballad":                  (3, 5),    # ballad — light, sparse backing
-    "pop":                     (6, 9),    # pop — moderate compression
-    "rock":                    (6, 10),   # rock — moderate compression, dynamic
-    "electronic":              (6, 9),    # electronic — dense, heavily compressed
-    "chinese_folk_bel_canto":  (9, 12),   # Chinese folk / bel canto — vocal-forward
+# Genre → vocal/backing ratio (LU).  Higher values = vocal more forward.
+# Backing target LUFS = vocal_LUFS - ratio.
+_GENRE_VOCAL_TO_BACKING: dict[str, float] = {
+    "electronic":              2,     # vocal sits in the mix
+    "pop":                     3,     # standard pop placement
+    "rock":                    3,
+    "folk":                    4,     # vocal-forward, sparse backing
+    "ballad":                  5,     # vocal most prominent
+    "chinese_folk_bel_canto":  5,     # majestic, vocal-forward
 }
+
+# Peak ceiling for combined mix after fader balance.
+# If the full-mix peak exceeds this, both vocal and backing are
+# attenuated equally until peak ≤ ceiling.
+_PEAK_CEILING_DB: float = -3.0
 
 # Genre-based target integrated LUFS for the final master.
 # Calibrated to domestic Chinese streaming platforms, 2026-06.
@@ -138,6 +143,19 @@ def _friendly_hint(error: str) -> str:
 # ════════════════════════════════════════════════════════════════
 
 
+# Genre → crest multiplier for per-track compression GR.
+# Mirrors bus compressor GR targets: transparent genres use lighter
+# multipliers so the whole pipeline breathes consistently.
+_GENRE_CREST_GR_RATIO: dict[str, float] = {
+    "folk":                    0.10,   # lightest — preserve breath
+    "ballad":                  0.10,
+    "chinese_folk_bel_canto":  0.12,   # medium-light — majestic
+    "pop":                     0.15,   # standard
+    "rock":                    0.15,
+    "electronic":              0.20,   # heaviest — control dynamics
+}
+
+
 def _derive_compressor_intent(
     rms_db: float, peak_db: float, *, genre: str = "pop"
 ) -> CompressionIntent:
@@ -151,22 +169,23 @@ def _derive_compressor_intent(
     < 10 dB         ``"light"``   Pre-compressed, synth, EDM
     ==============  ============  ============================
 
-    *gr_target_db* is conservative — FET compressors grab peaks
-    (20 % of crest) while leaving body compression to downstream
-    Opto / RVox stages.  For a single-compressor chain this keeps
-    the vocal breathing instead of flattening it.
+    *gr_target_db* is genre-aware — transparent genres (folk, ballad)
+    use a lighter crest multiplier (0.10) while dense genres
+    (electronic) use 0.20.  This keeps per-track compression aligned
+    with the bus compressor's genre-based GR target.
     """
     crest = peak_db - rms_db
+    ratio = _GENRE_CREST_GR_RATIO.get(genre, 0.15)
 
     if crest >= 15.0:
         amount = "heavy"
-        gr_target = round(crest * 0.2, 1)
+        gr_target = round(crest * ratio, 1)
     elif crest >= 10.0:
         amount = "medium"
-        gr_target = round(crest * 0.2, 1)
+        gr_target = round(crest * ratio, 1)
     else:
         amount = "light"
-        gr_target = round(crest * 0.15, 1)
+        gr_target = round(crest * ratio, 1)
 
     return CompressionIntent(
         amount=amount,
@@ -1657,8 +1676,6 @@ class MixingEngine:
         bpm: float | None = None,
         vocal_indices: list[int] | None = None,
         backing_indices: list[int] | None = None,
-        vocal_to_backing_lu: float = 4.0,
-        backing_reduction_lu: float | None = None,
     ) -> dict:
         """Analyse raw stems and apply clip gain to reference level.
 
@@ -1687,8 +1704,6 @@ class MixingEngine:
             return self._prepare_stems_impl(
                 stem_paths, genre=genre, vocal_indices=vocal_indices,
                 backing_indices=backing_indices,
-                vocal_to_backing_lu=vocal_to_backing_lu,
-                backing_reduction_lu=backing_reduction_lu,
             )
 
         result = self._undo_block("Prepare Stems", _do_prepare)
@@ -1703,8 +1718,6 @@ class MixingEngine:
         genre: str = "pop",
         vocal_indices: list[int] | None = None,
         backing_indices: list[int] | None = None,
-        vocal_to_backing_lu: float = 4.0,
-        backing_reduction_lu: float | None = None,
     ) -> dict:
         # 1. Import stems
         imported = self.import_stems(stem_paths)
@@ -1783,35 +1796,14 @@ class MixingEngine:
                 "success": imp["success"],
             })
 
-        # 4. Fader balancing is deferred to post_fx_balance() — after FX chains
-        #    have been applied the LUFS values change, so balancing pre-FX would
-        #    become inaccurate as soon as EQ/compression/reverb are added.
-        reduction = backing_reduction_lu
-        if reduction is None:
-            reduction = _GENRE_BACKING_REDUCTION.get(
-                genre, _GENRE_BACKING_REDUCTION["pop"]
-            )
-            if isinstance(reduction, tuple):
-                reduction = (reduction[0] + reduction[1]) / 2.0
-
-        backing_lufs_vals = [
-            s["adjusted_lufs"] for i, s in enumerate(stems_out)
-            if i in backing_indices and s["adjusted_lufs"] is not None
-        ]
-        backing_adjusted_lufs = (
-            sum(backing_lufs_vals) / len(backing_lufs_vals)
-            if backing_lufs_vals else -18.0
-        )
+        # 4. Fader balancing and peak ceiling are deferred to
+        #    post_fx_balance() — after FX chains have been applied.
 
         return {
             "stems": stems_out,
             "genre": genre,
-            "genre_reduction_lu": reduction,
-            "backing_adjusted_lufs": round(backing_adjusted_lufs, 1),
             "vocal_indices": vocal_indices,
             "backing_indices": backing_indices,
-            "vocal_to_backing_lu": vocal_to_backing_lu,
-            "backing_reduction_lu": reduction,
         }
 
     @staticmethod
@@ -1832,16 +1824,11 @@ class MixingEngine:
         vocal_indices: list[int] | None = None,
         backing_indices: list[int] | None = None,
         genre: str = "pop",
-        vocal_to_backing_lu: float = 4.0,
-        backing_reduction_lu: float | None = None,
     ) -> dict:
-        """Apply genre-based fader gains using *post-FX* LUFS values.
+        """Set fader gains so backing sits *ratio* LU below vocal.
 
-        Call this after :meth:`apply_profile` so the balance accounts
-        for loudness changes introduced by EQ, compression and reverb.
-
-        *stems* is the cached stem list from :meth:`prepare_stems` with
-        updated ``adjusted_lufs`` fields from post-FX measurement.
+        Vocal fader stays at 0 (reference).  Backing is attenuated to
+        achieve the genre-appropriate vocal/backing ratio.
         """
         if vocal_indices is None:
             vocal_indices = [0]
@@ -1849,45 +1836,44 @@ class MixingEngine:
             backing_indices = [i for i in range(len(stems))
                                if i not in vocal_indices]
 
-        if backing_reduction_lu is not None:
-            reduction = backing_reduction_lu
-        else:
-            reduction = _GENRE_BACKING_REDUCTION.get(
-                genre, _GENRE_BACKING_REDUCTION["pop"]
-            )
-            if isinstance(reduction, tuple):
-                reduction = (reduction[0] + reduction[1]) / 2.0
+        ratio = _GENRE_VOCAL_TO_BACKING.get(genre, 3)
 
+        vocal_lufs_vals = [
+            s["adjusted_lufs"] for i, s in enumerate(stems)
+            if i in vocal_indices and s.get("adjusted_lufs") is not None
+        ]
         backing_lufs_vals = [
             s["adjusted_lufs"] for i, s in enumerate(stems)
-            if i in backing_indices and s["adjusted_lufs"] is not None
+            if i in backing_indices and s.get("adjusted_lufs") is not None
         ]
-        backing_adjusted_lufs = (
-            sum(backing_lufs_vals) / len(backing_lufs_vals)
-            if backing_lufs_vals else -18.0
+        vocal_lufs = (
+            sum(vocal_lufs_vals) / len(vocal_lufs_vals)
+            if vocal_lufs_vals else -20.0
         )
-        backing_target_lufs = backing_adjusted_lufs - reduction
-        vocal_target_lufs = backing_target_lufs + vocal_to_backing_lu
+        backing_lufs = (
+            sum(backing_lufs_vals) / len(backing_lufs_vals)
+            if backing_lufs_vals else -20.0
+        )
+
+        backing_target = vocal_lufs - ratio
 
         for i, s in enumerate(stems):
             if not s.get("success") or s.get("adjusted_lufs") is None:
                 continue
             if i in vocal_indices:
-                target_lufs = vocal_target_lufs
+                fader_gain_db = 0.0  # reference — don't move
             elif i in backing_indices:
-                target_lufs = backing_target_lufs
+                fader_gain_db = backing_target - s["adjusted_lufs"]
             else:
                 continue
-            fader_gain_db = target_lufs - s["adjusted_lufs"]
             s["fader_gain_db"] = round(fader_gain_db, 1)
             self.apply_gain(s["track_index"], fader_gain_db)
 
         return {
-            "reduction_lu": reduction,
-            "backing_adjusted_lufs": round(backing_adjusted_lufs, 1),
-            "backing_target_lufs": round(backing_target_lufs, 1),
-            "vocal_target_lufs": round(vocal_target_lufs, 1),
-            "vocal_to_backing_lu": vocal_to_backing_lu,
+            "ratio_lu": ratio,
+            "vocal_lufs": round(vocal_lufs, 1),
+            "backing_lufs": round(backing_lufs, 1),
+            "backing_target_lufs": round(backing_target, 1),
         }
 
     def _solo_render(
@@ -1931,21 +1917,18 @@ class MixingEngine:
         vocal_indices: list[int] | None = None,
         backing_indices: list[int] | None = None,
         genre: str = "pop",
-        vocal_to_backing_lu: float = 4.0,
-        backing_reduction_lu: float | None = None,
         tmp_dir: str | None = None,
     ) -> dict:
-        """Measure post-FX LUFS and set fader balance.
+        """Measure post-FX LUFS, set fader balance, enforce peak ceiling.
 
-        **Must be called after** :meth:`apply_profile`.  Renders the
-        vocal and backing groups independently (via solo), measures
-        their actual post-FX integrated LUFS, then computes and applies
-        fader gains so the vocal sits at the correct level above the
-        backing.
+        **Must be called after** :meth:`apply_profile`.
 
-        Returns balance metadata plus the **combined LUFS** of the
-        full mix (all tracks unsoloed), which can be used to seed the
-        loudness optimiser in :meth:`finalize_master`.
+        1. Solo-render vocal + backing → measure post-FX LUFS.
+        2. Set faders so backing sits *ratio* LU below vocal (genre-based).
+        3. Render full mix → measure peak.
+        4. If peak > :data:`_PEAK_CEILING_DB`, attenuate both equally.
+
+        Returns balance metadata plus combined LUFS and peak.
         """
         import tempfile
 
@@ -2015,18 +1998,17 @@ class MixingEngine:
             elif i in backing_indices and backing_lufs is not None:
                 s["adjusted_lufs"] = backing_lufs
 
-        # ── Apply fader balance ──
+        # ── Step 1: ratio-based fader balance ──
         balance_info = self._balance_faders(
             stems,
             vocal_indices=vocal_indices,
             backing_indices=backing_indices,
             genre=genre,
-            vocal_to_backing_lu=vocal_to_backing_lu,
-            backing_reduction_lu=backing_reduction_lu,
         )
 
-        # ── Full-mix LUFS (for finalize_master seed) ──
+        # ── Step 2: full-mix render → peak check ──
         combined_lufs = None
+        combined_peak = None
         full_tracks = vocal_tracks + backing_tracks
         if full_tracks:
             full_result = self._solo_render(
@@ -2038,17 +2020,38 @@ class MixingEngine:
                 try:
                     ana = SignalAnalyzer.analyze(full_result["output_path"])
                     combined_lufs = ana.integrated_lufs
+                    combined_peak = ana.peak_db
                 except (OSError, ValueError, RuntimeError):
                     pass
 
+        # ── Step 3: peak ceiling — scale both down if peak > -3 ──
+        atten_db = 0.0
+        if combined_peak is not None and combined_peak > _PEAK_CEILING_DB:
+            atten_db = _PEAK_CEILING_DB - combined_peak  # negative
+            for i, s in enumerate(stems):
+                if not s.get("success") or s.get("track_index") is None:
+                    continue
+                if i in vocal_indices or i in backing_indices:
+                    self.apply_gain(s["track_index"], atten_db)
+                    if s.get("fader_gain_db") is not None:
+                        s["fader_gain_db"] = round(s["fader_gain_db"] + atten_db, 1)
+            combined_peak = _PEAK_CEILING_DB
+            if combined_lufs is not None:
+                combined_lufs = combined_lufs + atten_db
+
+            log.info(
+                "Peak ceiling: peak=%.1f dB → attenuated %.1f dB to hit %.1f dB",
+                combined_peak - atten_db, atten_db, _PEAK_CEILING_DB,
+            )
+
         log.info(
             "Post-FX balance: vocal=%.1f LUFS, backing=%.1f LUFS, "
-            "combined=%.1f LUFS, reduction=%.1f LU, vocal_to_backing=%.1f LU",
+            "combined=%.1f LUFS, peak=%.1f dB, ratio=%.1f LU",
             vocal_lufs or float("nan"),
             backing_lufs or float("nan"),
             combined_lufs or float("nan"),
-            balance_info["reduction_lu"],
-            balance_info["vocal_to_backing_lu"],
+            combined_peak or float("nan"),
+            balance_info["ratio_lu"],
         )
 
         # ── Build reverb wet cache for preview mode ──
@@ -2059,6 +2062,8 @@ class MixingEngine:
             "vocal_lufs": vocal_lufs,
             "backing_lufs": backing_lufs,
             "combined_lufs": combined_lufs,
+            "combined_peak_db": combined_peak,
+            "peak_atten_db": atten_db,
             "reverb_wet_cache": reverb_wet_path,
             "stems": stems,
         }
