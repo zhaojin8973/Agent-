@@ -96,6 +96,9 @@ class SpectrumReport:
     presence_deficit_db: float
     """How much quieter the presence band is vs mid (> 0 → dark)."""
 
+    sibilance_peak_hz: float
+    """Highest-energy frequency in 4–12 kHz (sibilance detection band)."""
+
     air_level_db: float
     """Average A-weighted energy in the air band (dB)."""
 
@@ -150,12 +153,21 @@ class SpectrumAnalyzer:
         presence_deficit = max(0.0, mid_energy - presence_energy)
         air_level = air_energy
 
+        # Sibilance peak: highest-energy frequency in 4–12 kHz.
+        sib_mask = (freqs >= 4000.0) & (freqs <= 12000.0)
+        if np.any(sib_mask):
+            sib_idx = int(np.argmax(a_weighted_db[sib_mask]))
+            sibilance_peak_hz = float(freqs[sib_mask][sib_idx])
+        else:
+            sibilance_peak_hz = 8000.0  # fallback: typical sibilance centre
+
         return SpectrumReport(
             band_energy_db={k: round(v, 1) for k, v in band_energy.items()},
             spectral_tilt_db_per_octave=round(tilt, 2),
             resonances=resonances,
             mud_ratio_db=round(mud_ratio, 1),
             presence_deficit_db=round(presence_deficit, 1),
+            sibilance_peak_hz=round(sibilance_peak_hz, 1),
             air_level_db=round(air_level, 1),
         )
 
