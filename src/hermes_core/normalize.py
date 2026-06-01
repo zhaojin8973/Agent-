@@ -517,6 +517,24 @@ PLUGIN_REGISTRY: dict[str, dict] = {
         },
     },
 
+    # ── FabFilter Pro-DS (de-esser) ──────────────────
+    # Param ranges from FabFilter Pro-DS manual / REAPER readback.
+    "VST: FabFilter Pro-DS (FabFilter)": {
+        "type": "deesser",
+        "params": {
+            "Mode":                   {"range": (0.0, 1.0),    "curve": "linear"},
+            "Threshold":              {"range": (-36.0, 0.0),  "curve": "linear"},
+            "Range":                  {"range": (0.0, 15.0),   "curve": "linear"},
+            "Lookahead":              {"range": (0.0, 2.0),    "curve": "linear"},
+            "Lookahead Enabled":      {"range": (0.0, 1.0),    "curve": "linear"},
+            "High-Pass Frequency":    {"range": (20.0, 20000.0), "curve": "linear"},
+            "Low-Pass Frequency":     {"range": (20.0, 20000.0), "curve": "linear"},
+            "Input Level":            {"range": (-30.0, 30.0), "curve": "linear"},
+            "Output Level":           {"range": (-30.0, 30.0), "curve": "linear"},
+            "Wet":                    {"range": (0.0, 1.0),    "curve": "linear"},
+        },
+    },
+
     # ── Reverbs ────────────────────────────────────────
     "ValhallaVintageVerb (Valhalla DSP)": {
         "type": "reverb",

@@ -1352,6 +1352,31 @@ class MixingEngine:
                     fx.name, intent.amount, intent.crest_factor_db,
                     intent.gr_target_db,
                 )
+            elif fx_type == "deesser":
+                # Pro-DS: threshold from presence deficit, fixed defaults.
+                sd_presence = sd.get("presence_deficit", 0.0) if sd else 0.0
+                threshold_db = -20.0 + sd_presence * 0.25
+                threshold_db = max(-36.0, min(0.0, threshold_db))
+                physical = {
+                    "Mode":              1.0,      # Split band
+                    "Threshold":         round(threshold_db, 1),
+                    "Range":             4.0,      # moderate de-essing
+                    "Lookahead":         1.5,      # ms, fast enough
+                    "Lookahead Enabled": 1.0,
+                    "High-Pass Frequency": 3000.0,  # below = not sibilance
+                    "Low-Pass Frequency":  12000.0, # above = not sibilance
+                    "Input Level":       0.0,       # unity
+                    "Output Level":      0.0,       # unity
+                    "Wet":               1.0,
+                }
+                node.params = dict(physical)
+                normalized = normalize_params(fx.name, physical)
+                for pname, pval in normalized.items():
+                    self._fx.set_param(track_index, idx, pname, pval)
+                log.info(
+                    "Auto-deesser: presence_deficit=%.1f → threshold=%.1f dB",
+                    sd_presence, threshold_db,
+                )
             else:
                 for pname, pval in fx.params.items():
                     self._fx.set_param(track_index, idx, pname, pval)

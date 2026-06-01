@@ -264,10 +264,10 @@ class MixingProfile:
 
 
 def get_default_vocal_chain() -> list[FXPreset]:
-    """Return the default 4-node vocal processing chain.
+    """Return the default 5-node vocal processing chain.
 
-    ``Pro-Q 3 (pre-EQ, subtractive) → CLA-1176 (peak control)
-    → SSL EQ (post-EQ, additive) → RVox (final balance)``
+    ``Pro-Q 3 (pre-EQ) → CLA-76 (peak) → Pro-DS (de-ess)
+    → SSL EQ (post-EQ) → RVox (body)``
 
     This is the recommended starting point for vocal mixing.
     """
@@ -280,6 +280,10 @@ def get_default_vocal_chain() -> list[FXPreset]:
         FXPreset(
             name="VST3: CLA-76 Mono (Waves)",
             fx_type="fet",
+        ),
+        FXPreset(
+            name="VST: FabFilter Pro-DS (FabFilter)",
+            fx_type="deesser",
         ),
         FXPreset(
             name="VST3: SSLEQ Mono (Waves)",
