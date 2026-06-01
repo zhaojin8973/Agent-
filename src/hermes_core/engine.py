@@ -1354,21 +1354,26 @@ class MixingEngine:
                     intent.gr_target_db,
                 )
             elif fx_type == "deesser":
-                # Pro-DS: threshold from presence deficit, fixed defaults.
+                # Pro-DS: threshold from presence deficit, defaults from manual.
+                # Detection: Single Vocal, Wide Band (natural for single vox).
+                # Lookahead: ~10 ms (FabFilter recommendation).
+                # Range: -10 dB starting point (manual recommends -10 to -15).
+                # HPF: 5 kHz — focus detection on sibilance band (4–8 kHz).
                 spectrum = getattr(self, "_last_spectrum", {}) or {}
                 presence_def = spectrum.get("presence_deficit", 0.0)
                 threshold_db = -20.0 + presence_def * 0.25
                 threshold_db = max(-36.0, min(0.0, threshold_db))
                 physical = {
-                    "Mode":              1.0,      # Split band
+                    "Mode":              0.0,      # Single Vocal
+                    "Band Processing":   0.0,      # Wide Band (natural)
                     "Threshold":         round(threshold_db, 1),
-                    "Range":             4.0,      # moderate de-essing
-                    "Lookahead":         1.5,      # ms, fast enough
+                    "Range":             10.0,     # max GR (manual: 10–15 dB)
+                    "Lookahead":         10.0,     # ms (manual: ~10 ms optimal)
                     "Lookahead Enabled": 1.0,
-                    "High-Pass Frequency": 3000.0,  # below = not sibilance
-                    "Low-Pass Frequency":  12000.0, # above = not sibilance
-                    "Input Level":       0.0,       # unity
-                    "Output Level":      0.0,       # unity
+                    "High-Pass Frequency": 5000.0,  # focus on sibilance (4–8 kHz)
+                    "Low-Pass Frequency":  12000.0,
+                    "Input Level":       0.0,
+                    "Output Level":      0.0,
                     "Wet":               1.0,
                 }
                 node.params = dict(physical)
