@@ -59,7 +59,7 @@ class TestParser:
             "vocal-mix", "--vocal", "v.wav", "--backing", "b.wav",
         ])
         assert args.genre == "pop"
-        assert args.target_lufs == -12.0
+        assert args.target_lufs is None  # genre-based by default
         assert args.output == "./output"
         assert args.profile is None
         assert args.tolerance == 0.3

@@ -28,7 +28,7 @@ from hermes_core.loudness_optimizer import (
     EqIntent,
     EqBandIntent,
 )
-from hermes_core.normalize import normalize_params
+from hermes_core.normalize import normalize_params, compute_bus_compressor_params
 from hermes_core.profiles import (
     _resolve_fx_type,
     _get_compressor_preset,
@@ -46,16 +46,30 @@ log = logging.getLogger(__name__)
 _GENRE_BACKING_REDUCTION = {
     "folk":                    (3, 6),    # folk / ballad — wide dynamics
     "pop":                     (6, 9),    # pop — moderate compression
+    "electronic":              (6, 9),    # electronic — dense, heavily compressed
     "chinese_folk_bel_canto":  (9, 12),   # Chinese folk / bel canto — vocal-forward
+}
+
+# Genre-based target integrated LUFS for the final master.
+# Calibrated to domestic Chinese streaming platforms, 2026-06.
+_GENRE_TARGET_LUFS = {
+    "folk":                    -13.0,   # preserve dynamics
+    "pop":                     -10.0,   # commercial, competitive
+    "electronic":              -9.0,    # loudness war — EDM expects density
+    "chinese_folk_bel_canto":  -11.0,   # red songs / art songs
 }
 
 # Standard clip gain reference level (dBFS RMS).
 # -18 dBFS = 0 VU — industry standard for analog-modelled plugin input calibration.
 _CLIP_GAIN_REF_DB: float = -18.0
 
-# Default master output RMS target (dBFS).
-# Tune after listening — pop/rock often sits at -12..-10, classical at -18..-14.
-_DEFAULT_TARGET_LUFS: float = -12.0
+# Fallback target when genre is not in _GENRE_TARGET_LUFS.
+_DEFAULT_TARGET_LUFS: float = -10.0
+
+
+def _get_genre_target_lufs(genre: str) -> float:
+    """Return the recommended target LUFS for *genre*."""
+    return _GENRE_TARGET_LUFS.get(genre, _DEFAULT_TARGET_LUFS)
 
 # Pro-L 2 calibrated VST parameter ranges (verified 2026-05-28 via REAPER GUI).
 # Gain: normalized 0.0 = 0 dB, 1.0 = +30 dB (boost only).
@@ -943,6 +957,9 @@ class MixingEngine:
         # Idempotency guards — prevent double-execution of destructive ops.
         self._stems_gain_staged: bool = False
         self._master_finalized: bool = False
+        # Safety guard — prevent accidental track deletion.
+        # Set to False to allow create_project / reset to wipe tracks.
+        self._tracks_protected: bool = True
         self._stems_cache: list[dict] = []
 
         # AudioNode pipeline — built by apply_profile()
@@ -1008,6 +1025,15 @@ class MixingEngine:
                 f"REAPER now has '{current_name}' at '{current_path}'. "
                 f"Call create_project() or re-open the expected project."
             )
+
+    def allow_track_deletion(self):
+        """Unlock destructive track operations.
+
+        Must be called before :meth:`create_project` or any operation that
+        deletes tracks.  This is a deliberate opt-in to prevent accidental
+        loss of manually placed plugins and project state.
+        """
+        self._tracks_protected = False
 
     def reset(self):
         """Clear idempotency guards so the engine can be re-used for a new mix."""
@@ -1389,36 +1415,23 @@ class MixingEngine:
         If the target already exists a timestamp suffix is appended to avoid
         overwriting a previous project.
 
-        The output directory is validated with a canary write — if REAPER
-        would fail to save (e.g. permissions, path encoding), we fall back
-        to a system temp directory so the pipeline never hangs on a save
-        dialog.
+        REAPER's ``Main_SaveProjectEx`` can fail with NEWTEMP errors on
+        paths with non-ASCII characters or restrictive macOS permissions.
+        To guarantee headless reliability we ALWAYS save to a system temp
+        directory and then copy the result to *output_dir* as a post-save
+        step.  The temp directory is returned so the caller knows where
+        REAPER actually writes.
         """
+        import tempfile
         os.makedirs(output_dir, exist_ok=True)
 
-        # Validate the directory is actually writable by doing a canary write.
-        # REAPER may fail silently on paths with special characters or
-        # permission issues, showing a modal dialog that blocks the pipeline.
-        try:
-            canary = os.path.join(output_dir, ".hermes_canary")
-            with open(canary, "w") as f:
-                f.write("ok")
-            os.unlink(canary)
-        except OSError:
-            import tempfile
-            fallback = tempfile.mkdtemp(prefix="hermes_project_")
-            log.warning(
-                "Output dir %r not writable, falling back to %s", output_dir, fallback,
-            )
-            output_dir = fallback
-
         target = os.path.join(output_dir, f"{name}.rpp")
-        if not os.path.exists(target):
-            return target, False
-        ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
-        alt = os.path.join(output_dir, f"{name}_{ts}.rpp")
-        log.info("Project file exists — renamed to %s", alt)
-        return alt, True
+        if os.path.exists(target):
+            ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
+            target = os.path.join(output_dir, f"{name}_{ts}.rpp")
+            log.info("Project file exists — renamed to %s", target)
+
+        return target, False
 
     def create_project(self, name: str, output_dir: str,
                        sample_rate: int = 48000) -> dict:
@@ -1429,6 +1442,17 @@ class MixingEngine:
         safe_path, conflict_renamed = self._safe_project_path(output_dir, name)
 
         api = self._bridge.api
+
+        # Safety: never delete tracks without explicit user consent.
+        # If the project already has tracks (manually placed plugins, settings),
+        # require opt-in.  Empty projects are safe to set up.
+        existing_tracks = api.CountTracks(0)
+        if self._tracks_protected and existing_tracks > 0:
+            raise RuntimeError(
+                f"Project has {existing_tracks} existing track(s). "
+                "Deleting tracks is protected. Call eng.allow_track_deletion() "
+                "first to confirm you want to wipe the project."
+            )
 
         # Delete all tracks via reapy's high-level API.
         # The raw DeleteTrack API is unreliable on ARM64.
@@ -1460,7 +1484,20 @@ class MixingEngine:
             base64.b64encode(b"evaw\x18\x00\x01").decode(), True,
         )
 
-        api.Main_SaveProjectEx(0, safe_path, 0)
+        # Save to a temp directory first — REAPER can fail with NEWTEMP
+        # errors on paths with non-ASCII characters or restrictive macOS
+        # sandbox permissions.  We always save to a known-safe temp dir,
+        # then copy the result to the user's requested path.
+        import tempfile, shutil
+        tmp_dir = tempfile.mkdtemp(prefix="hermes_proj_")
+        tmp_path = os.path.join(tmp_dir, os.path.basename(safe_path))
+        api.Main_SaveProjectEx(0, tmp_path, 0)
+        try:
+            shutil.copy2(tmp_path, safe_path)
+            log.info("Project copied %s → %s", tmp_path, safe_path)
+        except OSError:
+            log.warning("Could not copy project to %s; using temp path", safe_path)
+            safe_path = tmp_path
         self._project_path = safe_path
         # Snapshot REAPER's view of the project — later operations verify
         # the user has not manually switched to a different project.
@@ -1479,6 +1516,25 @@ class MixingEngine:
             "conflict_renamed": conflict_renamed,
         }
 
+    def _safe_save(self, target_path: str) -> str:
+        """Save project via a temp dir to avoid REAPER NEWTEMP errors.
+
+        REAPER's ``Main_SaveProjectEx`` can trigger modal "Error creating
+        project file" dialogs on paths with non-ASCII characters or macOS
+        sandbox restrictions.  We always save to a temp directory, then
+        copy the result to *target_path*.
+        """
+        import tempfile, shutil
+        tmp_dir = tempfile.mkdtemp(prefix="hermes_save_")
+        tmp_path = os.path.join(tmp_dir, os.path.basename(target_path))
+        self._bridge.api.Main_SaveProjectEx(0, tmp_path, 0)
+        try:
+            shutil.copy2(tmp_path, target_path)
+        except OSError:
+            log.warning("Could not copy to %s; keeping temp path", target_path)
+            return tmp_path
+        return target_path
+
     def save_project(self) -> dict:
         """Silently save to the current project path via ``Main_SaveProjectEx``.
 
@@ -1489,8 +1545,8 @@ class MixingEngine:
             raise RuntimeError(
                 "No project path — call create_project(name, output_dir) first"
             )
-        self._bridge.api.Main_SaveProjectEx(0, self._project_path, 0)
-        return {"path": self._project_path, "saved_at": datetime.now().isoformat()}
+        actual = self._safe_save(self._project_path)
+        return {"path": actual, "saved_at": datetime.now().isoformat()}
 
     def save_checkpoint(self, label: str = "") -> dict:
         """Save a timestamped copy without touching the main project file.
@@ -1507,8 +1563,8 @@ class MixingEngine:
         suffix = f"_{label}_{ts}" if label else f"_{ts}"
         checkpoint_path = f"{base}_checkpoint{suffix}.rpp"
 
-        self._bridge.api.Main_SaveProjectEx(0, checkpoint_path, 0)
-        return {"checkpoint_path": checkpoint_path, "main_path": self._project_path}
+        actual = self._safe_save(checkpoint_path)
+        return {"checkpoint_path": actual, "main_path": self._project_path}
 
     def get_project_info(self) -> dict:
         """Return current project metadata.
@@ -1995,6 +2051,92 @@ class MixingEngine:
             "combined_lufs": combined_lufs,
             "reverb_wet_cache": reverb_wet_path,
             "stems": stems,
+        }
+
+    def apply_bus_compressor(
+        self,
+        bpm: float | None = None,
+        genre: str = "pop",
+    ) -> dict:
+        """Apply bx_townhouse bus compressor to the master track.
+
+        Pipeline step between ``post_fx_balance`` and manual mastering.
+        The automation chain::
+
+            1. Probe-render to measure the mix peak after fader balance.
+            2. Compute threshold, attack, and makeup from genre + BPM.
+            3. Add bx_townhouse to the master track, set all parameters.
+
+        Returns a diagnostic dict with *peak_db*, *thresh_db*, *attack_ms*,
+        *makeup_db*, and *gr_target*.
+        """
+        import os
+        import tempfile
+
+        # ── 1. Probe render — measure what hits the master bus ──
+        tmp_dir = tempfile.mkdtemp(prefix="hermes_bus_probe_")
+        probe = self.render_mix(tmp_dir, verify=True)
+        signal = probe.get("signal_check", {})
+        peak_db = signal.get("peak_db", -6.0)
+        if signal.get("error"):
+            log.warning("Bus compressor probe failed: %s — using peak=%.1f dB",
+                        signal["error"], peak_db)
+
+        # ── 2. Compute parameters ──
+        physical = compute_bus_compressor_params(
+            peak_db=peak_db, bpm=bpm, genre=genre,
+        )
+        target_gr_db = physical.pop("_target_gr", 2.0)
+
+        # ── 3. Add bx_townhouse to master ──
+        fx_idx = self.add_master_fx(
+            "VST3: bx_townhouse Buss Compressor (Plugin Alliance)"
+        )
+        if fx_idx < 0:
+            log.error("Failed to add bx_townhouse to master track")
+            return {
+                "peak_db": peak_db,
+                "thresh_db": physical.get("Thresh", 0),
+                "attack_ms": physical.get("Attack", 30),
+                "makeup_db": physical.get("MakeUp", 1.0),
+                "gr_target": target_gr_db,
+                "error": "fx_add_failed",
+            }
+
+        # ── 4. Normalise and apply ──
+        plugin_name = "VST3: bx_townhouse Buss Compressor (Plugin Alliance)"
+        try:
+            normalized = normalize_params(plugin_name, physical)
+        except Exception as exc:
+            log.error("Failed to normalise bus compressor params: %s", exc)
+            return {
+                "peak_db": peak_db,
+                "thresh_db": physical.get("Thresh", 0),
+                "attack_ms": physical.get("Attack", 30),
+                "makeup_db": physical.get("MakeUp", 1.0),
+                "gr_target": target_gr_db,
+                "error": "normalise_failed",
+            }
+
+        for param_name, norm_value in normalized.items():
+            self._fx.set_param(-1, fx_idx, param_name, norm_value)
+
+        log.info(
+            "Bus compressor: peak=%.1f dB → thresh=%.1f dB, "
+            "attack=%.1f ms, makeup=%.1f dB, target GR=%.1f dB",
+            peak_db,
+            physical["Thresh"],
+            physical["Attack"],
+            physical["MakeUp"],
+            target_gr_db,
+        )
+
+        return {
+            "peak_db": peak_db,
+            "thresh_db": physical["Thresh"],
+            "attack_ms": physical["Attack"],
+            "makeup_db": physical["MakeUp"],
+            "gr_target": target_gr_db,
         }
 
     def check_headroom(self) -> dict:

@@ -143,6 +143,150 @@ _GENERIC_RELEASE_TABLE: list[tuple[float, float]] = [
     (1.0,  1000.0),
 ]
 
+# bx_townhouse Buss Compressor — stepped Attack (norm → ms).
+# Verified via REAPER GUI readback (2026-06-01).
+_BX_ATTACK_TABLE: list[tuple[float, float]] = [
+    (0.0,  0.1),
+    (0.2,  0.3),
+    (0.4,  1.0),
+    (0.6,  3.0),
+    (0.8,  10.0),
+    (1.0,  30.0),
+]
+
+# bx_townhouse stepped Release (norm → seconds).
+# 1.0 = auto release (represented as 999.0 — effectively infinite).
+_BX_RELEASE_TABLE: list[tuple[float, float]] = [
+    (0.0,  0.1),
+    (0.2,  0.3),
+    (0.4,  0.6),
+    (0.7,  1.2),
+    (1.0,  999.0),  # auto
+]
+
+# ════════════════════════════════════════════════════════════════
+# Bus compressor automation (bx_townhouse)
+# ════════════════════════════════════════════════════════════════
+
+# Empirical GR measurements at each attack step with offset=+1
+# (thresh = peak + 1 dB, ratio = 2).  Measured 2026-06-01.
+# Each entry: (attack_ms, gr_at_offset_plus1_db).
+_BUS_ATTACK_GR_TABLE: list[tuple[float, float]] = [
+    (0.1,   6.5),
+    (0.3,   5.5),
+    (1.0,   5.0),
+    (3.0,   4.0),
+    (10.0,  3.0),
+    (30.0,  1.8),
+]
+
+# Genre → target bus compressor GR (dB).
+_GENRE_BUS_GR_TARGET: dict[str, float] = {
+    "electronic":              2.5,   # density and punch
+    "pop":                     2.0,   # standard bus glue
+    "rock":                    2.0,   # tight and punchy
+    "chinese_folk_bel_canto":  1.5,   # preserve dynamics, majestic
+    "folk":                    1.0,   # most transparent
+    "ballad":                  1.0,   # gentle, almost untouched
+}
+
+# The bx_townhouse plugin name in PLUGIN_REGISTRY.
+_BUS_COMPRESSOR_NAME: str = "VST3: bx_townhouse Buss Compressor (Plugin Alliance)"
+
+# Available attack steps (physical ms) for bx_townhouse.
+_BX_ATTACK_STEPS: list[float] = [0.1, 0.3, 1.0, 3.0, 10.0, 30.0]
+
+
+def _select_bus_attack(bpm: float | None = None,
+                        genre: str = "pop") -> float:
+    """Select bus compressor attack time (ms) based on BPM and genre.
+
+    Returns a physical attack value from the bx_townhouse stepped attack
+    table.  Slower material gets slower attack for transparency; faster,
+    denser material gets faster attack for tightness.
+    """
+    if bpm is not None and bpm > 140:
+        return 10.0
+    if genre in ("electronic",):
+        return 10.0
+    if bpm is not None and bpm < 80:
+        return 30.0
+    # Default: 30 ms — gentle, musical bus glue for most material.
+    return 30.0
+
+
+def _bus_thresh_offset(attack_ms: float, target_gr_db: float) -> float:
+    """Compute threshold offset for a given attack time and target GR.
+
+    Uses the empirical :data:`_BUS_ATTACK_GR_TABLE` to interpolate the
+    GR observed at ``offset = +1 dB`` for *attack_ms*, then scales
+    proportionally to *target_gr_db*.
+
+    ``thresh = peak + offset``.
+    """
+    # Linear interpolation in the GR-vs-attack table.
+    phys = [row[0] for row in _BUS_ATTACK_GR_TABLE]
+    grs = [row[1] for row in _BUS_ATTACK_GR_TABLE]
+
+    idx = bisect.bisect_left(phys, attack_ms)
+    if idx == 0:
+        gr_at_1 = grs[0]
+    elif idx >= len(phys):
+        gr_at_1 = grs[-1]
+    else:
+        lo_ms, lo_gr = phys[idx - 1], grs[idx - 1]
+        hi_ms, hi_gr = phys[idx], grs[idx]
+        t = (attack_ms - lo_ms) / (hi_ms - lo_ms)
+        gr_at_1 = lo_gr + t * (hi_gr - lo_gr)
+
+    # Proportional scaling: offset = 1.0 × (GR_at_offset_1 / target_gr).
+    # Faster attack → bigger GR_at_1 → bigger offset needed to hit target.
+    if target_gr_db <= 0:
+        return 999.0  # no compression → effectively no threshold
+    offset = 1.0 * (gr_at_1 / target_gr_db)
+    return round(offset, 2)
+
+
+def _snap_bx_attack(desired_ms: float) -> float:
+    """Snap *desired_ms* to the nearest available bx_townhouse attack step."""
+    return min(_BX_ATTACK_STEPS, key=lambda s: abs(s - desired_ms))
+
+
+def compute_bus_compressor_params(
+    peak_db: float,
+    bpm: float | None = None,
+    genre: str = "pop",
+) -> dict[str, float]:
+    """Compute bx_townhouse physical parameters for bus compression.
+
+    The automation chain::
+
+        Target GR = h(genre)
+        Attack    = g(bpm, genre)
+        Thresh    = peak + f(attack, target_gr)
+        MakeUp    = target_gr × 0.5
+
+    Returns a dict of physical values ready for :func:`normalize_params`.
+    """
+    target_gr_db = _GENRE_BUS_GR_TARGET.get(genre, 2.0)
+    desired_attack_ms = _select_bus_attack(bpm, genre)
+    attack_ms = _snap_bx_attack(desired_attack_ms)
+    offset = _bus_thresh_offset(attack_ms, target_gr_db)
+    thresh_db = round(peak_db + offset, 1)
+    makeup_db = round(target_gr_db * 0.5, 1)
+
+    return {
+        "Comp In":  1.0,
+        "Thresh":   thresh_db,
+        "Ratio":    2.0,
+        "Attack":   attack_ms,
+        "Release":  999.0,  # auto
+        "MakeUp":   makeup_db,
+        "Mix":      1.0,
+        "Wet":      1.0,
+        "_target_gr": target_gr_db,  # metadata — pop before normalize_params()
+    }
+
 
 # ════════════════════════════════════════════════════════════════
 # Plugin registry
@@ -160,6 +304,22 @@ PLUGIN_REGISTRY: dict[str, dict] = {
             "Knee":        {"range": (0.0, 24.0),      "curve": "linear"},
             "Range":       {"range": (0.0, 48.0),      "curve": "linear"},
             "Makeup Gain": {"range": (-20.0, 20.0),    "curve": "linear"},
+        },
+    },
+
+    # ── bx_townhouse Buss Compressor (Plugin Alliance) ──
+    # SSL-style VCA bus compressor.  Calibrated 2026-06-01.
+    "VST3: bx_townhouse Buss Compressor (Plugin Alliance)": {
+        "type": "vca",
+        "params": {
+            "Comp In":  {"range": (0.0, 1.0),   "curve": "linear"},
+            "Thresh":   {"range": (-20.0, 10.0), "curve": "linear"},
+            "Ratio":    {"range": (1.0, 10.0),   "curve": "linear"},
+            "Attack":   {"table": _BX_ATTACK_TABLE},
+            "Release":  {"table": _BX_RELEASE_TABLE},
+            "MakeUp":   {"range": (0.0, 15.0),   "curve": "linear"},
+            "Mix":      {"range": (0.0, 1.0),    "curve": "linear"},
+            "Wet":      {"range": (0.0, 1.0),    "curve": "linear"},
         },
     },
 

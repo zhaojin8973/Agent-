@@ -367,3 +367,212 @@ class TestEQBatchNormalize:
         for n in range(1, 9):
             assert params.get(f"Band {n} Enabled") == 0.0
         assert params["Output Level"] == 0.5
+
+
+# ════════════════════════════════════════════════════════════════
+# Bus compressor automation (bx_townhouse)
+# ════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestBusThreshOffset:
+    """Threshold offset computation from empirical GR data."""
+
+    def test_30ms_attack_2db_target(self):
+        from hermes_core.normalize import _bus_thresh_offset
+        # GR_at_1(30ms) = 1.8 → offset = 1.0 × 1.8/2.0 = 0.9
+        offset = _bus_thresh_offset(30.0, 2.0)
+        assert offset == pytest.approx(0.9, abs=0.05)
+
+    def test_10ms_attack_2db_target(self):
+        from hermes_core.normalize import _bus_thresh_offset
+        # GR_at_1(10ms) = 3.0 → offset = 1.0 × 3.0/2.0 = 1.5
+        offset = _bus_thresh_offset(10.0, 2.0)
+        assert offset == pytest.approx(1.5, abs=0.05)
+
+    def test_3ms_attack_2db_target(self):
+        from hermes_core.normalize import _bus_thresh_offset
+        # GR_at_1(3ms) = 4.0 → offset = 1.0 × 4.0/2.0 = 2.0
+        offset = _bus_thresh_offset(3.0, 2.0)
+        assert offset == pytest.approx(2.0, abs=0.05)
+
+    def test_30ms_attack_25db_target(self):
+        from hermes_core.normalize import _bus_thresh_offset
+        # GR_at_1(30ms) = 1.8 → offset = 1.0 × 1.8/2.5 = 0.72
+        offset = _bus_thresh_offset(30.0, 2.5)
+        assert offset == pytest.approx(0.72, abs=0.05)
+
+    def test_10ms_attack_1db_target(self):
+        from hermes_core.normalize import _bus_thresh_offset
+        # GR_at_1(10ms) = 3.0 → offset = 1.0 × 3.0/1.0 = 3.0
+        offset = _bus_thresh_offset(10.0, 1.0)
+        assert offset == pytest.approx(3.0, abs=0.1)
+
+    def test_faster_attack_gives_larger_offset(self):
+        from hermes_core.normalize import _bus_thresh_offset
+        # Same target GR — faster attack should need bigger offset
+        offset_slow = _bus_thresh_offset(30.0, 2.0)
+        offset_fast = _bus_thresh_offset(3.0, 2.0)
+        assert offset_fast > offset_slow
+
+    def test_larger_gr_target_gives_smaller_offset(self):
+        from hermes_core.normalize import _bus_thresh_offset
+        # Same attack — bigger target GR needs smaller offset (thresh closer to peak)
+        offset_1db = _bus_thresh_offset(30.0, 1.0)
+        offset_2db = _bus_thresh_offset(30.0, 2.0)
+        assert offset_1db > offset_2db
+
+    def test_interpolated_attack(self):
+        from hermes_core.normalize import _bus_thresh_offset
+        # Attack=5ms should be between 3ms (GR=4.0) and 10ms (GR=3.0)
+        offset = _bus_thresh_offset(5.0, 2.0)
+        assert 1.5 < offset < 2.0
+
+    def test_out_of_range_low(self):
+        from hermes_core.normalize import _bus_thresh_offset
+        # Below 0.1ms — should clamp to 0.1ms entry
+        offset = _bus_thresh_offset(0.01, 2.0)
+        # GR_at_1(0.1ms) = 6.5 → offset = 1.0 × 6.5/2.0 = 3.25
+        assert offset == pytest.approx(3.25, abs=0.05)
+
+    def test_out_of_range_high(self):
+        from hermes_core.normalize import _bus_thresh_offset
+        # Above 30ms — should clamp to 30ms entry
+        offset = _bus_thresh_offset(100.0, 2.0)
+        assert offset == pytest.approx(0.9, abs=0.05)
+
+    def test_zero_target_gr_returns_large_offset(self):
+        from hermes_core.normalize import _bus_thresh_offset
+        # target_gr=0 → no compression → huge offset
+        offset = _bus_thresh_offset(10.0, 0.0)
+        assert offset > 100  # effectively disables compression
+
+
+@pytest.mark.unit
+class TestSelectBusAttack:
+    """Attack time selection from BPM and genre."""
+
+    def test_default_pop_120bpm(self):
+        from hermes_core.normalize import _select_bus_attack
+        assert _select_bus_attack(120, "pop") == 30.0
+
+    def test_fast_bpm_selects_faster_attack(self):
+        from hermes_core.normalize import _select_bus_attack
+        assert _select_bus_attack(160, "pop") == 10.0
+
+    def test_slow_bpm_selects_slow_attack(self):
+        from hermes_core.normalize import _select_bus_attack
+        assert _select_bus_attack(60, "pop") == 30.0
+
+    def test_electronic_genre_fast_attack(self):
+        from hermes_core.normalize import _select_bus_attack
+        assert _select_bus_attack(120, "electronic") == 10.0
+
+    def test_folk_genre_slow_attack(self):
+        from hermes_core.normalize import _select_bus_attack
+        assert _select_bus_attack(120, "folk") == 30.0
+
+    def test_no_bpm_defaults(self):
+        from hermes_core.normalize import _select_bus_attack
+        assert _select_bus_attack(None, "pop") == 30.0
+
+
+@pytest.mark.unit
+class TestSnapBxAttack:
+    """Snapping to available bx_townhouse attack steps."""
+
+    def test_exact_match(self):
+        from hermes_core.normalize import _snap_bx_attack
+        assert _snap_bx_attack(10.0) == 10.0
+        assert _snap_bx_attack(30.0) == 30.0
+        assert _snap_bx_attack(0.1) == 0.1
+
+    def test_snap_down(self):
+        from hermes_core.normalize import _snap_bx_attack
+        # 15ms → closer to 10ms than 30ms → should snap to 10
+        assert _snap_bx_attack(15.0) == 10.0
+
+    def test_snap_up(self):
+        from hermes_core.normalize import _snap_bx_attack
+        # 25ms → closer to 30ms → should snap to 30
+        assert _snap_bx_attack(25.0) == 30.0
+
+    def test_rounding(self):
+        from hermes_core.normalize import _snap_bx_attack
+        # 20ms → equidistant from 10 and 30, snaps to 10 (lower index)
+        assert _snap_bx_attack(20.0) == 10.0
+
+
+@pytest.mark.unit
+class TestComputeBusCompressorParams:
+    """Full parameter computation for bus compressor."""
+
+    def test_pop_default(self):
+        from hermes_core.normalize import compute_bus_compressor_params
+        params = compute_bus_compressor_params(peak_db=-3.0, bpm=120, genre="pop")
+        assert params["Ratio"] == 2.0
+        assert params["Comp In"] == 1.0
+        assert params["Mix"] == 1.0
+        assert params["Wet"] == 1.0
+        assert params["Release"] == 999.0  # auto
+        # Target GR=2.0, attack=30ms → offset=0.9
+        # thresh = -3.0 + 0.9 = -2.1
+        assert params["Thresh"] == pytest.approx(-2.1, abs=0.1)
+        assert params["Attack"] == 30.0
+        assert params["MakeUp"] == 1.0  # 2.0 × 0.5
+
+    def test_electronic(self):
+        from hermes_core.normalize import compute_bus_compressor_params
+        params = compute_bus_compressor_params(peak_db=-5.0, bpm=128, genre="electronic")
+        # Target GR=2.5, attack=10ms → offset = 1.0 × 3.0/2.5 = 1.2
+        # thresh = -5.0 + 1.2 = -3.8
+        assert params["Attack"] == 10.0
+        assert params["Thresh"] == pytest.approx(-3.8, abs=0.1)
+        assert params["MakeUp"] == 1.2  # 2.5 × 0.5 = 1.25 → round to 1.2 (banker's)
+        assert params["_target_gr"] == 2.5
+
+    def test_folk_transparent(self):
+        from hermes_core.normalize import compute_bus_compressor_params
+        params = compute_bus_compressor_params(peak_db=-2.0, bpm=90, genre="folk")
+        # Target GR=1.0, attack=30ms → offset = 1.0 × 1.8/1.0 = 1.8
+        # thresh = -2.0 + 1.8 = -0.2
+        assert params["Attack"] == 30.0
+        assert params["Thresh"] == pytest.approx(-0.2, abs=0.1)
+        assert params["MakeUp"] == 0.5  # 1.0 × 0.5
+        assert params["_target_gr"] == 1.0
+
+    def test_chinese_folk_bel_canto(self):
+        from hermes_core.normalize import compute_bus_compressor_params
+        params = compute_bus_compressor_params(peak_db=-4.0, genre="chinese_folk_bel_canto")
+        # Target GR=1.5, attack=30ms → offset = 1.0 × 1.8/1.5 = 1.2
+        # thresh = -4.0 + 1.2 = -2.8
+        assert params["_target_gr"] == 1.5
+        assert params["Thresh"] == pytest.approx(-2.8, abs=0.1)
+        assert params["MakeUp"] == 0.8  # 1.5 × 0.5 = 0.75 → round to 0.8
+
+    def test_unknown_genre_falls_back(self):
+        from hermes_core.normalize import compute_bus_compressor_params
+        params = compute_bus_compressor_params(peak_db=-3.0, genre="jazz")
+        # Unknown genre → target GR = 2.0 (default)
+        assert params["_target_gr"] == 2.0
+        assert params["MakeUp"] == 1.0
+
+    def test_all_keys_present(self):
+        from hermes_core.normalize import compute_bus_compressor_params
+        params = compute_bus_compressor_params(peak_db=-3.0, genre="pop")
+        expected_keys = {"Comp In", "Thresh", "Ratio", "Attack",
+                         "Release", "MakeUp", "Mix", "Wet", "_target_gr"}
+        assert set(params.keys()) == expected_keys
+
+    def test_high_peak(self):
+        from hermes_core.normalize import compute_bus_compressor_params
+        params = compute_bus_compressor_params(peak_db=-1.0, genre="pop")
+        # thresh = -1.0 + 0.9 = -0.1 — thresh should be near 0 but not above
+        assert params["Thresh"] < 0  # below digital ceiling
+        assert params["Thresh"] > -1.0  # but above peak
+
+    def test_low_peak(self):
+        from hermes_core.normalize import compute_bus_compressor_params
+        params = compute_bus_compressor_params(peak_db=-12.0, genre="pop")
+        # thresh = -12.0 + 0.9 = -11.1
+        assert params["Thresh"] == pytest.approx(-11.1, abs=0.1)

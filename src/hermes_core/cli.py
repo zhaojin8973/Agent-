@@ -22,7 +22,7 @@ def _build_vocal_mix_parser(subparsers) -> None:
     p.add_argument("--vocal", required=True, help="Path to vocal stem WAV")
     p.add_argument("--backing", required=True, nargs="+", help="Path(s) to backing stem(s)")
     p.add_argument("--genre", default="pop", help="Genre key (pop, folk, chinese_folk_bel_canto)")
-    p.add_argument("--target-lufs", type=float, default=-12.0, help="Target integrated LUFS")
+    p.add_argument("--target-lufs", type=float, default=None, help="Target integrated LUFS (default: genre-based)")
     p.add_argument("--output", "-o", default="./output", help="Output directory")
     p.add_argument("--profile", "-p", default=None, help="Path to YAML mixing profile")
     p.add_argument("--tolerance", type=float, default=0.3, help="LUFS tolerance")
@@ -41,7 +41,7 @@ def _build_batch_parser(subparsers) -> None:
     p.add_argument("--input-dir", required=True, help="Directory of song folders")
     p.add_argument("--profile", "-p", required=True, help="Path to YAML mixing profile")
     p.add_argument("--output-dir", default="./masters", help="Output directory")
-    p.add_argument("--target-lufs", type=float, default=-12.0)
+    p.add_argument("--target-lufs", type=float, default=None)
     p.add_argument("--bpm", type=float, default=None, help="Project BPM for tempo-synced compression")
     p.add_argument("--midi", type=Path, default=None, help="MIDI file to extract tempo from")
 
@@ -65,7 +65,7 @@ def _build_adjust_parser(subparsers) -> None:
     p.add_argument("--eq-presence", type=float, default=None, help="EQ presence gain (dB)")
     p.add_argument("--threshold", type=float, default=None, help="Compressor threshold (dB)")
     p.add_argument("--reverb-level", type=float, default=None, help="Reverb send level (dB)")
-    p.add_argument("--target-lufs", type=float, default=-12.0)
+    p.add_argument("--target-lufs", type=float, default=None)
     p.add_argument("--preview", action="store_true", help="Fast preview (numpy mix, no Pro-L 2)")
     p.add_argument("--watchdog", action="store_true", help="Enable DialogKiller")
 
@@ -150,29 +150,25 @@ def cmd_vocal_mix(args) -> int:
             balance.get("combined_lufs", float("nan")),
         )
 
-        # Master
-        log.info("Finalizing master (target: %.1f LUFS)...", args.target_lufs)
-        result = eng.finalize_master(
-            target_lufs=args.target_lufs,
-            limiter_fx=profile.master_limiter.name if profile else
-                       "VST: FabFilter Pro-L 2 (FabFilter)",
-            tolerance=args.tolerance,
+        # Bus compressor (master track — user handles TGP + Pro-L 2 manually)
+        log.info("Applying bus compressor ...")
+        bus_result = eng.apply_bus_compressor(
+            bpm=resolved_bpm,
+            genre=args.genre,
+        )
+        if bus_result.get("error"):
+            log.warning("Bus compressor: %s", bus_result["error"])
+        log.info(
+            "Bus comp: peak=%.1f dB → thresh=%.1f dB, attack=%.1f ms, "
+            "makeup=%.1f dB, target GR=%.1f dB",
+            bus_result["peak_db"],
+            bus_result["thresh_db"],
+            bus_result["attack_ms"],
+            bus_result["makeup_db"],
+            bus_result["gr_target"],
         )
 
-        if result.get("passed"):
-            log.info(
-                "✓ Done — %s | %.1f LUFS | gain %+.1f dB",
-                result["output_path"],
-                result["achieved_lufs"],
-                result["gain_db"],
-            )
-        else:
-            log.error(
-                "✗ Failed — achieved %.1f LUFS (target %.1f)",
-                result.get("achieved_lufs", float("nan")),
-                args.target_lufs,
-            )
-            return 1
+        log.info("✓ Pipeline complete — master fader untouched for manual mastering")
 
     return 0
 
@@ -236,7 +232,9 @@ def cmd_batch(args) -> int:
                 eng.prepare_stems(stem_paths, genre="pop", bpm=resolved_bpm)
                 eng.apply_profile(profile, genre="pop", bpm=resolved_bpm)
                 eng.post_fx_balance()
-                result = eng.finalize_master(target_lufs=args.target_lufs)
+                from hermes_core.engine import _get_genre_target_lufs
+                target_lufs = args.target_lufs if args.target_lufs is not None else _get_genre_target_lufs("pop")
+                result = eng.finalize_master(target_lufs=target_lufs)
                 if result.get("passed"):
                     ok += 1
                     log.info("  ✓ %.1f LUFS", result["achieved_lufs"])
@@ -336,11 +334,14 @@ def cmd_adjust(args) -> int:
             balance.get("backing_lufs", float("nan")),
         )
 
+        from hermes_core.engine import _get_genre_target_lufs
+        target_lufs = args.target_lufs if args.target_lufs is not None else _get_genre_target_lufs(args.genre)
+
         if args.preview:
             log.info("Preview render (numpy mix, no Pro-L 2) ...")
             result = eng.render_preview(
                 output_dir=args.project,
-                target_lufs=args.target_lufs,
+                target_lufs=target_lufs,
             )
             if result.get("output_path"):
                 log.info("✓ Preview — %s | ~%.1f LUFS (bypassed mastering)",
@@ -350,8 +351,8 @@ def cmd_adjust(args) -> int:
                 return 1
         else:
             log.info("Finalizing master (target: %.1f LUFS) ...",
-                     args.target_lufs)
-            result = eng.finalize_master(target_lufs=args.target_lufs)
+                     target_lufs)
+            result = eng.finalize_master(target_lufs=target_lufs)
             if result.get("passed"):
                 log.info("✓ Finalized — %s | %.1f LUFS",
                          result["output_path"], result["achieved_lufs"])
