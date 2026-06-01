@@ -2116,9 +2116,11 @@ class MixingEngine:
                 if not s.get("success") or s.get("track_index") is None:
                     continue
                 if i in vocal_indices or i in backing_indices:
-                    self.apply_gain(s["track_index"], atten_db)
-                    if s.get("fader_gain_db") is not None:
-                        s["fader_gain_db"] = round(s["fader_gain_db"] + atten_db, 1)
+                    # Accumulate — ratio faders were already set by _balance_faders.
+                    current_fader = s.get("fader_gain_db", 0.0)
+                    new_fader = current_fader + atten_db
+                    self.apply_gain(s["track_index"], new_fader)
+                    s["fader_gain_db"] = round(new_fader, 1)
             combined_peak = _PEAK_CEILING_DB
             if combined_lufs is not None:
                 combined_lufs = combined_lufs + atten_db
