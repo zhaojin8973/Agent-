@@ -525,7 +525,7 @@ PLUGIN_REGISTRY: dict[str, dict] = {
             "Mode":                   {"range": (0.0, 1.0),    "curve": "linear"},
             "Band Processing":        {"range": (0.0, 1.0),    "curve": "linear"},
             "Threshold":              {"range": (-60.0, 0.0),  "curve": "linear"},  # verified via GUI readback
-            "Range":                  {"range": (0.0, 15.0),   "curve": "linear"},
+            "Range":                  {"range": (0.0, 24.0),   "curve": "linear"},  # verified via GUI readback
             "Lookahead":              {"range": (0.0, 15.0),   "curve": "linear"},  # verified in GUI
             "Lookahead Enabled":      {"range": (0.0, 1.0),    "curve": "linear"},
             "High-Pass Frequency":    {"range": (0.0, 1.0), "curve": "linear"},
