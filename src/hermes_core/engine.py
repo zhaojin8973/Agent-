@@ -1129,6 +1129,7 @@ class MixingEngine:
         self._backing_chain_nodes.clear()
         self._reverb_send_node = None
         self._bpm = None
+        self._last_spectrum: dict = {}
 
     def preflight_plugins(self, fx_names: list[str]) -> list[str]:
         """Check which of *fx_names* are available in REAPER.  Returns the
@@ -1354,8 +1355,9 @@ class MixingEngine:
                 )
             elif fx_type == "deesser":
                 # Pro-DS: threshold from presence deficit, fixed defaults.
-                sd_presence = sd.get("presence_deficit", 0.0) if sd else 0.0
-                threshold_db = -20.0 + sd_presence * 0.25
+                spectrum = getattr(self, "_last_spectrum", {}) or {}
+                presence_def = spectrum.get("presence_deficit", 0.0)
+                threshold_db = -20.0 + presence_def * 0.25
                 threshold_db = max(-36.0, min(0.0, threshold_db))
                 physical = {
                     "Mode":              1.0,      # Split band
@@ -1375,7 +1377,7 @@ class MixingEngine:
                     self._fx.set_param(track_index, idx, pname, pval)
                 log.info(
                     "Auto-deesser: presence_deficit=%.1f → threshold=%.1f dB",
-                    sd_presence, threshold_db,
+                    presence_def, threshold_db,
                 )
             else:
                 for pname, pval in fx.params.items():
@@ -1441,9 +1443,11 @@ class MixingEngine:
         if stem_file_path and os.path.exists(stem_file_path):
             try:
                 report = SpectrumAnalyzer.analyze(stem_file_path)
-                # Persist spectrum data so downstream FX (de-esser) can use it.
-                sd["presence_deficit"] = report.presence_deficit_db
-                sd["air_level_db"] = report.air_level_db
+                # Cache spectrum data so downstream FX (de-esser) can use it.
+                self._last_spectrum = {
+                    "presence_deficit": report.presence_deficit_db,
+                    "air_level_db": report.air_level_db,
+                }
                 log.info(
                     "Spectrum analysis: tilt=%.1f dB/oct, mud=%.1f dB, "
                     "presence_deficit=%.1f dB, air=%.1f dB, "
