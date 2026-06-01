@@ -168,6 +168,43 @@ _GENRE_RVOX_MULTIPLIER: dict[str, float] = {
     "ballad":                  1.2,
 }
 
+# CLA-76 attack knob — continuous, crest-driven, genre-aware.
+# Formula: attack_knob = base - (crest - 10) × k, clamped [1, 6.5].
+# Base = genre "normal" attack when crest ≈ 10 dB.
+# k    = how much crest deviates from the attack (higher k = more responsive).
+_GENRE_CLA76_ATTACK_BASE: dict[str, float] = {
+    "electronic":              5.0,
+    "pop":                     4.0,
+    "rock":                    4.0,
+    "chinese_folk_bel_canto":  3.5,
+    "folk":                    3.0,
+    "ballad":                  3.0,
+}
+_GENRE_CLA76_ATTACK_K: dict[str, float] = {
+    "electronic":              0.05,
+    "pop":                     0.10,
+    "rock":                    0.10,
+    "chinese_folk_bel_canto":  0.08,
+    "folk":                    0.05,
+    "ballad":                  0.05,
+}
+_CLA76_ATTACK_KNOB_MIN: float = 1.0
+_CLA76_ATTACK_KNOB_MAX: float = 6.5
+
+
+def _compute_cla76_attack_knob(crest_db: float, genre: str = "pop") -> float:
+    """Continuous CLA-76 attack knob from crest factor and genre.
+
+    ``attack_knob = base - (crest - 10) × k``, clamped to
+    [``_CLA76_ATTACK_KNOB_MIN``, ``_CLA76_ATTACK_KNOB_MAX``].
+
+    Higher crest → slower attack (smaller knob) to preserve transients.
+    """
+    base = _GENRE_CLA76_ATTACK_BASE.get(genre, 4.0)
+    k = _GENRE_CLA76_ATTACK_K.get(genre, 0.10)
+    knob = base - (crest_db - 10.0) * k
+    return round(max(_CLA76_ATTACK_KNOB_MIN, min(_CLA76_ATTACK_KNOB_MAX, knob)), 2)
+
 
 def _derive_compressor_intent(
     rms_db: float, peak_db: float, *, genre: str = "pop"
@@ -277,16 +314,20 @@ def _gr_to_cla76_input(gr_target: float) -> float:
 
 
 def _apply_cla76_params(intent: CompressionIntent,
-                        preset: dict[str, float]) -> dict[str, float]:
+                        attack_knob: float,
+                        release_knob: float | None = None) -> dict[str, float]:
     r"""CLA-76 (Waves) physical parameter dict.
 
     CLA-76 (1176-style FET) has a **fixed internal threshold**.
     *Input* drives signal into that threshold.  *Output* attenuates
     to balance the boosted uncompressed signal.
 
-    Input is determined by a measured GR calibration table
-    (pink noise -18 dBFS).  Output follows GR proportionally:
-    heavier compression needs more output attenuation.
+    *attack_knob* is the CLA-76 knob position (1–7, CW=fast) computed
+    from crest + genre via :func:`_compute_cla76_attack_knob`.
+
+    *release_knob* is the BPM-derived knob position (1–7).  When
+    ``None`` the release parameter is not included in the output
+    (plugin default is left untouched).
     """
     gr = intent.gr_target_db
     peak = intent.peak_db
@@ -302,12 +343,14 @@ def _apply_cla76_params(intent: CompressionIntent,
     output_db = -gr * 3.25
     output_db = max(-48.0, min(0.0, output_db))
 
-    return {
-        "Input":    round(input_db, 1),
-        "Output":   round(output_db, 1),
-        "Attack":   preset["attack_ms"],
-        "Release":  preset["release_ms"],
+    physical = {
+        "Input":  round(input_db, 1),
+        "Output": round(output_db, 1),
+        "Attack": attack_knob,
     }
+    if release_knob is not None:
+        physical["Release"] = release_knob
+    return physical
 
 
 def _apply_opto_params(intent: CompressionIntent,
@@ -1264,12 +1307,26 @@ class MixingEngine:
                             bpm, bpm_timing["attack_ms"], bpm_timing["release_ms"],
                         )
 
-                # CLA-76: use dedicated translator (Input=drive, Output=unity)
-                # + ms → knob conversion (1-7, CW=fast).
+                # CLA-76: crest-driven attack + BPM-driven release
                 if "cla-76" in fx.name.lower():
-                    preset["attack_ms"] = _ms_to_cla76_attack(preset["attack_ms"])
-                    preset["release_ms"] = _ms_to_cla76_release(preset["release_ms"])
-                    physical = _apply_cla76_params(intent, preset)
+                    attack_knob = _compute_cla76_attack_knob(
+                        intent.crest_factor_db, genre,
+                    )
+                    release_knob = None
+                    if bpm is not None and bpm > 0:
+                        release_ms = 60000.0 / bpm
+                        release_knob = _ms_to_cla76_release(release_ms)
+                        log.info(
+                            "BPM-aware timing: %.0f BPM → release=%.0fms (knob %.2f)",
+                            bpm, release_ms, release_knob,
+                        )
+                    physical = _apply_cla76_params(
+                        intent, attack_knob, release_knob,
+                    )
+                    log.info(
+                        "CLA-76 attack: crest=%.1f → knob=%.2f (genre=%s)",
+                        intent.crest_factor_db, attack_knob, genre,
+                    )
                 elif fx_type == "rvox":
                     rvox_mult = _GENRE_RVOX_MULTIPLIER.get(genre, 1.0)
                     physical = _apply_rvox_params(intent, preset, rvox_mult)
@@ -1277,9 +1334,13 @@ class MixingEngine:
                     physical = _TRANSLATORS[fx_type](intent, preset)
 
                 # No BPM → leave timing at plugin defaults (don't touch).
+                # CLA-76 exception: attack is always set (crest-driven).
                 if bpm is None:
-                    for timing_key in ("Attack", "Release"):
-                        physical.pop(timing_key, None)
+                    if "cla-76" in fx.name.lower():
+                        physical.pop("Release", None)
+                    else:
+                        for timing_key in ("Attack", "Release"):
+                            physical.pop(timing_key, None)
 
                 node.params = dict(physical)
                 normalized = normalize_params(fx.name, physical)
