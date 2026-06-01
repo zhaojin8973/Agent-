@@ -1441,6 +1441,9 @@ class MixingEngine:
         if stem_file_path and os.path.exists(stem_file_path):
             try:
                 report = SpectrumAnalyzer.analyze(stem_file_path)
+                # Persist spectrum data so downstream FX (de-esser) can use it.
+                sd["presence_deficit"] = report.presence_deficit_db
+                sd["air_level_db"] = report.air_level_db
                 log.info(
                     "Spectrum analysis: tilt=%.1f dB/oct, mud=%.1f dB, "
                     "presence_deficit=%.1f dB, air=%.1f dB, "
