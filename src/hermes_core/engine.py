@@ -45,7 +45,9 @@ log = logging.getLogger(__name__)
 # more reduction to create headroom for the lead vocal.
 _GENRE_BACKING_REDUCTION = {
     "folk":                    (3, 6),    # folk / ballad — wide dynamics
+    "ballad":                  (3, 5),    # ballad — light, sparse backing
     "pop":                     (6, 9),    # pop — moderate compression
+    "rock":                    (6, 10),   # rock — moderate compression, dynamic
     "electronic":              (6, 9),    # electronic — dense, heavily compressed
     "chinese_folk_bel_canto":  (9, 12),   # Chinese folk / bel canto — vocal-forward
 }
@@ -54,7 +56,9 @@ _GENRE_BACKING_REDUCTION = {
 # Calibrated to domestic Chinese streaming platforms, 2026-06.
 _GENRE_TARGET_LUFS = {
     "folk":                    -13.0,   # preserve dynamics
+    "ballad":                  -13.0,   # same as folk — gentle, dynamic
     "pop":                     -10.0,   # commercial, competitive
+    "rock":                    -10.0,   # same as pop — competitive
     "electronic":              -9.0,    # loudness war — EDM expects density
     "chinese_folk_bel_canto":  -11.0,   # red songs / art songs
 }
