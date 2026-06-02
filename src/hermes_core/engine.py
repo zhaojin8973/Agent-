@@ -168,6 +168,18 @@ _GENRE_RVOX_MULTIPLIER: dict[str, float] = {
     "ballad":                  1.2,
 }
 
+# Pro-DS de-esser Range (max gain reduction in dB) per genre.
+# Sparse genres → lower Range (natural vocal, light touch).
+# Dense genres → higher Range (stronger sibilance control).
+_GENRE_PRODS_RANGE: dict[str, float] = {
+    "folk":                    6.0,   # 自然人声，轻触
+    "ballad":                  6.0,   # 柔和，保留呼吸感
+    "chinese_folk_bel_canto":  7.0,   # 中等，兼顾力度
+    "pop":                     8.5,   # 标准商业控制
+    "rock":                    8.5,   # 与 pop 一致
+    "electronic":              10.0,  # 强力控制，密集混音
+}
+
 # CLA-76 attack knob — continuous, crest-driven, genre-aware.
 # Formula: attack_knob = base - (crest - 10) × k, clamped [1, 6.5].
 # Base = genre "normal" attack when crest ≈ 10 dB.
@@ -1366,6 +1378,9 @@ class MixingEngine:
                 threshold_db = -32.0 + presence_def * 0.1
                 threshold_db = max(-60.0, min(0.0, threshold_db))
 
+                # Range: genre-aware max gain reduction (dB).
+                range_db = _GENRE_PRODS_RANGE.get(genre, 8.5)
+
                 # Fixed detection band (log: freq ≈ 2000 × 10^n Hz).
                 hpf_norm = math.log10(5500.0 / 2000.0)
                 lpf_norm = math.log10(12000.0 / 2000.0)
@@ -1374,7 +1389,7 @@ class MixingEngine:
                     "Mode":              0.0,      # Single Vocal
                     "Band Processing":   0.0,      # Wide Band (natural)
                     "Threshold":         round(threshold_db, 1),
-                    "Range":             8.5,      # safety ceiling
+                    "Range":             range_db,
                     "Lookahead":         10.0,     # ms (manual: ~10 ms optimal)
                     "Lookahead Enabled": 1.0,
                     "High-Pass Frequency": round(hpf_norm, 3),
@@ -1388,8 +1403,9 @@ class MixingEngine:
                 for pname, pval in normalized.items():
                     self._fx.set_param(track_index, idx, pname, pval)
                 log.info(
-                    "Auto-deesser: band=5.5k–12kHz, presence_def=%.1f → threshold=%.1f dB",
-                    presence_def, threshold_db,
+                    "Auto-deesser: band=5.5k–12kHz, presence_def=%.1f → "
+                    "threshold=%.1f dB, range=%.1f dB (genre=%s)",
+                    presence_def, threshold_db, range_db, genre,
                 )
             else:
                 for pname, pval in fx.params.items():
