@@ -596,3 +596,38 @@ class ReaperBridge:
     def dialog_killer_active(self) -> bool:
         """True when the dialog-killer daemon thread is alive."""
         return self._dialog_killer.is_running
+
+    # ── REAPER 窗口焦点 ───────────────────────────────────────
+
+    def focus_reaper(self) -> bool:
+        """将 REAPER 窗口聚焦到前台（仅 macOS）。
+
+        REAPER 的非模态渲染命令 (42230) 在窗口不聚焦时可能产生
+        静音输出。通过 AppleScript 激活 REAPER 应用来规避此问题。
+
+        Returns True on success, False on failure (non-macOS, subprocess
+        error, or REAPER not running).
+        """
+        import sys
+        import platform
+        if platform.system() != "Darwin":
+            log.debug("focus_reaper: skipped (platform=%s)", platform.system())
+            return False
+
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", 'tell application "REAPER" to activate'],
+                capture_output=True, timeout=5.0,
+            )
+            if result.returncode == 0:
+                log.debug("focus_reaper: REAPER window activated")
+                return True
+            log.warning("focus_reaper: osascript returned %d: %s",
+                        result.returncode, result.stderr.decode(errors="replace"))
+            return False
+        except subprocess.TimeoutExpired:
+            log.warning("focus_reaper: AppleScript timed out after 5s")
+            return False
+        except Exception as exc:
+            log.warning("focus_reaper: failed — %s", exc)
+            return False

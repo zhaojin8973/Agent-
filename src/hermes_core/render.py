@@ -195,6 +195,10 @@ class RenderManager:
         if sample_rate > 0:
             api.GetSetProjectInfo(0, "RENDER_SRATE", sample_rate, True)
 
+        # 聚焦 REAPER 窗口以防止渲染输出静音（macOS 专有）
+        self._bridge.focus_reaper()
+        time.sleep(0.3)
+
         # Trigger non-modal render
         api.Main_OnCommand(_REAPER_RENDER_ACTION, 0)
 
@@ -245,6 +249,108 @@ class RenderManager:
 
         log.error("Render failed after %d attempts: %s", max_retries, last_error)
         return {"output_path": None, "error": last_error, "retries_exhausted": True}
+
+    def render_with_silence_retry(
+        self,
+        output_dir: str,
+        bounds: str = "entire_project",
+        fmt: str = "wav",
+        sample_rate: int = 0,
+        timeout: float = 120.0,
+        silence_threshold_db: float = -80.0,
+    ) -> dict:
+        """Render with silence detection — retries once if output is near-silent.
+
+        The silence bug occurs when REAPER window is not in focus: the render
+        command succeeds (produces a WAV file) but the output is silent
+        (LUFS ≈ -120, peak ≈ -99).
+
+        On silence detection:
+        1. Focus REAPER window via AppleScript
+        2. Wait 0.5s for focus switch
+        3. Re-render
+
+        Returns the render result dict.  If the retry also produces silence,
+        the silent result is returned with ``"silent": True`` so the caller
+        can decide what to do.
+        """
+        # ── 第一次渲染（render_mix 内部已调用 focus_reaper） ──
+        result = self.render_mix(
+            output_dir=output_dir, bounds=bounds, fmt=fmt,
+            sample_rate=sample_rate, timeout=timeout,
+        )
+
+        if result.get("output_path") is None:
+            return result
+
+        # ── 静音检测 ──
+        if not self._is_output_silent(
+            result["output_path"], silence_threshold_db,
+        ):
+            return result
+
+        # ── 检测到静音 → 强制聚焦 + 重试 ──
+        log.warning(
+            "Render produced silent output — REAPER window may not be in focus. "
+            "Re-focusing and retrying ..."
+        )
+        self._bridge.focus_reaper()
+        time.sleep(0.5)
+
+        # 清理静音文件
+        import os
+        try:
+            os.remove(result["output_path"])
+        except OSError:
+            pass
+
+        retry_result = self.render_mix(
+            output_dir=output_dir, bounds=bounds, fmt=fmt,
+            sample_rate=sample_rate, timeout=timeout,
+        )
+
+        if retry_result.get("output_path") and self._is_output_silent(
+            retry_result["output_path"], silence_threshold_db,
+        ):
+            log.error(
+                "Retry also produced silent output — please ensure REAPER "
+                "window is visible and not minimized."
+            )
+            retry_result["silent"] = True
+
+        return retry_result
+
+    def _is_output_silent(
+        self, file_path: str, threshold_db: float = -80.0,
+    ) -> bool:
+        """Check if a rendered WAV is near-silent.
+
+        Uses lightweight peak detection (numpy) without importing the full
+        SignalAnalyzer to avoid circular dependencies.
+        """
+        import os
+        if not os.path.exists(file_path):
+            return False
+
+        try:
+            import soundfile as sf
+            import numpy as np
+
+            data, _ = sf.read(file_path, dtype="float64")
+            if data.size == 0:
+                return True
+            peak = float(np.max(np.abs(data)))
+            peak_db = float(20.0 * np.log10(peak + 1e-12))
+            is_silent = bool(peak_db < threshold_db)
+            if is_silent:
+                log.warning(
+                    "Silence detected: peak=%.1f dB (threshold=%.1f dB) — %s",
+                    peak_db, threshold_db, file_path,
+                )
+            return is_silent
+        except Exception as exc:
+            log.debug("_is_output_silent failed: %s", exc)
+            return False
 
     def set_time_selection(self, start: float, end: float):
         """Set REAPER's time selection loop range."""

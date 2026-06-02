@@ -1257,3 +1257,216 @@ class TestDiskSpaceCheck:
         from hermes_core.render import RenderManager
         result = RenderManager._check_disk_space("/nonexistent_path_xyz", required_mb=1.0)
         assert result["ok"] is False
+
+
+# ══════════════════════════════════════════════════════════════
+# focus_reaper（渲染静音修复）
+# ══════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestFocusReaper:
+    """ReaperBridge.focus_reaper() — AppleScript 聚焦 REAPER 窗口。"""
+
+    def test_focus_succeeds_on_macos(self):
+        """AppleScript 返回 0 → focus_reaper 返回 True。"""
+        bridge = ReaperBridge(dialog_killer=False)
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            with patch("platform.system", return_value="Darwin"):
+                ok = bridge.focus_reaper()
+        assert ok is True
+        mock_run.assert_called_once()
+        # 验证 osascript 被调用
+        call_args = mock_run.call_args
+        assert "osascript" in call_args[0][0]
+
+    def test_focus_fails_on_non_macos(self):
+        """非 macOS 平台直接返回 False。"""
+        bridge = ReaperBridge(dialog_killer=False)
+        with patch("platform.system", return_value="Linux"):
+            ok = bridge.focus_reaper()
+        assert ok is False
+
+    def test_focus_handles_osascript_failure(self):
+        """AppleScript 返回非零 → focus_reaper 返回 False。"""
+        bridge = ReaperBridge(dialog_killer=False)
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stderr = b"REAPER not found"
+        with patch("subprocess.run", return_value=mock_result):
+            with patch("platform.system", return_value="Darwin"):
+                ok = bridge.focus_reaper()
+        assert ok is False
+
+    def test_focus_handles_timeout(self):
+        """AppleScript 超时 → focus_reaper 返回 False。"""
+        import subprocess as _subprocess
+        bridge = ReaperBridge(dialog_killer=False)
+        with patch("subprocess.run", side_effect=_subprocess.TimeoutExpired("osascript", 5)):
+            with patch("platform.system", return_value="Darwin"):
+                ok = bridge.focus_reaper()
+        assert ok is False
+
+
+@pytest.mark.unit
+class TestRenderMixCallsFocus:
+    """render_mix 在触发渲染前调用 focus_reaper。"""
+
+    def test_focus_called_before_render(self, tmp_path):
+        """render_mix 应在 Main_OnCommand 前调用 focus_reaper。"""
+        mock_bridge, mock_api = _make_bridge()
+        manager = RenderManager(mock_bridge)
+
+        # 模拟渲染成功（文件出现）
+        output_file = tmp_path / "render.wav"
+        original_exists = os.path.exists
+
+        call_order = []
+
+        def fake_exists(path):
+            if str(path) == str(output_file):
+                return True
+            return original_exists(path)
+
+        def track_focus():
+            call_order.append("focus")
+            return True
+
+        def track_render(*args, **kwargs):
+            call_order.append("render")
+
+        mock_bridge.focus_reaper = MagicMock(side_effect=track_focus)
+        mock_api.Main_OnCommand = MagicMock(side_effect=track_render)
+
+        with patch("os.path.exists", side_effect=fake_exists):
+            manager.render_mix(str(tmp_path))
+
+        assert call_order == ["focus", "render"], (
+            f"focus_reaper 应在 Main_OnCommand 前调用，实际顺序: {call_order}"
+        )
+
+
+# ══════════════════════════════════════════════════════════════
+# render_with_silence_retry（渲染后静音检测）
+# ══════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestRenderWithSilenceRetry:
+    """render_with_silence_retry — 检测静音并重试。"""
+
+    def test_no_retry_when_audio_is_normal(self, tmp_path):
+        """正常音频不触发重试。"""
+        mock_bridge, mock_api = _make_bridge()
+        mock_bridge.focus_reaper = MagicMock(return_value=True)
+        manager = RenderManager(mock_bridge)
+
+        # 第一次渲染成功且非静音
+        fake_path = str(tmp_path / "render.wav")
+        manager.render_mix = MagicMock(return_value={"output_path": fake_path})
+        manager._is_output_silent = MagicMock(return_value=False)
+
+        result = manager.render_with_silence_retry(str(tmp_path))
+        assert result["output_path"] == fake_path
+        assert manager.render_mix.call_count == 1  # 没有重试
+
+    def test_retry_on_silent_output(self, tmp_path):
+        """静音输出触发一次重试。"""
+        mock_bridge, mock_api = _make_bridge()
+        mock_bridge.focus_reaper = MagicMock(return_value=True)
+        manager = RenderManager(mock_bridge)
+
+        silent_path = str(tmp_path / "render_silent.wav")
+        good_path = str(tmp_path / "render_good.wav")
+
+        call_count = [0]
+
+        def fake_render(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return {"output_path": silent_path}
+            return {"output_path": good_path}
+
+        manager.render_mix = MagicMock(side_effect=fake_render)
+
+        # 第一次静音，第二次正常
+        silence_results = [True, False]
+        manager._is_output_silent = MagicMock(side_effect=silence_results)
+
+        with patch("os.remove"):
+            result = manager.render_with_silence_retry(str(tmp_path))
+
+        assert result["output_path"] == good_path
+        assert manager.render_mix.call_count == 2
+        mock_bridge.focus_reaper.assert_called()
+
+    def test_marks_silent_when_retry_also_silent(self, tmp_path):
+        """重试后仍静音 → 返回结果带 silent=True 标记。"""
+        mock_bridge, mock_api = _make_bridge()
+        mock_bridge.focus_reaper = MagicMock(return_value=True)
+        manager = RenderManager(mock_bridge)
+
+        silent_path = str(tmp_path / "render.wav")
+        manager.render_mix = MagicMock(return_value={"output_path": silent_path})
+        manager._is_output_silent = MagicMock(return_value=True)  # 每次都静音
+
+        with patch("os.remove"):
+            result = manager.render_with_silence_retry(str(tmp_path))
+
+        assert result.get("silent") is True
+
+    def test_render_failure_returns_error(self, tmp_path):
+        """渲染失败（无 output_path）直接返回错误。"""
+        mock_bridge, mock_api = _make_bridge()
+        mock_bridge.focus_reaper = MagicMock(return_value=True)
+        manager = RenderManager(mock_bridge)
+
+        manager.render_mix = MagicMock(return_value={
+            "output_path": None, "error": "preflight_failed",
+        })
+
+        result = manager.render_with_silence_retry(str(tmp_path))
+        assert result["output_path"] is None
+        assert result["error"] == "preflight_failed"
+
+
+@pytest.mark.unit
+class TestIsOutputSilent:
+    """_is_output_silent — 轻量级静音检测。"""
+
+    def test_silent_file(self, tmp_path):
+        """全零 WAV → 静音。"""
+        import soundfile as sf
+        import numpy as np
+
+        wav_path = str(tmp_path / "silent.wav")
+        sf.write(wav_path, np.zeros((48000, 2), dtype="float64"), 48000)
+
+        mock_bridge, _ = _make_bridge()
+        manager = RenderManager(mock_bridge)
+        assert manager._is_output_silent(wav_path) is True
+
+    def test_normal_file(self, tmp_path):
+        """有音频内容的 WAV → 非静音。"""
+        import soundfile as sf
+        import numpy as np
+
+        wav_path = str(tmp_path / "normal.wav")
+        # 生成 -6 dBFS 正弦波
+        t = np.linspace(0, 1.0, 48000, endpoint=False)
+        signal = 0.5 * np.sin(2 * np.pi * 440 * t)
+        stereo = np.column_stack([signal, signal])
+        sf.write(wav_path, stereo, 48000)
+
+        mock_bridge, _ = _make_bridge()
+        manager = RenderManager(mock_bridge)
+        assert manager._is_output_silent(wav_path) is False
+
+    def test_nonexistent_file(self):
+        """文件不存在 → 返回 False（不报错）。"""
+        mock_bridge, _ = _make_bridge()
+        manager = RenderManager(mock_bridge)
+        assert manager._is_output_silent("/nonexistent/file.wav") is False
+
