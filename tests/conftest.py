@@ -1,9 +1,12 @@
 """Shared fixtures and helpers for hermes-core tests."""
 
-import numpy as np
-import pytest
+import logging
+import shutil
 import struct
 import wave
+
+import numpy as np
+import pytest
 
 from hermes_core.bridge import ReaperBridge
 
@@ -42,3 +45,61 @@ def clean_project(bridge):
         if tr:
             api.DeleteTrack(tr)
     return api.CountTracks(0)
+
+
+# ════════════════════════════════════════════════════════════════
+# 集成测试自动清理 fixture
+# ════════════════════════════════════════════════════════════════
+
+log = logging.getLogger(__name__)
+
+# REAPER 关闭工程不保存的命令 ID
+_REAPER_CLOSE_PROJECT_NO_SAVE = 40859
+
+# 集成测试可能创建的临时目录
+_INTEGRATION_TMP_DIRS = [
+    "/tmp/hermes_test",
+    "/tmp/hermes_vocal_test",
+    "/tmp/hermes_balance_test",
+]
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_after_integration_test(request):
+    """集成测试后自动关闭 REAPER 工程并清理临时文件。
+
+    仅对标记了 @pytest.mark.integration 的测试生效。
+    使用 yield 确保测试失败时仍执行清理。
+    """
+    yield  # 先执行测试
+
+    # 仅清理集成测试
+    if not request.node.get_closest_marker("integration"):
+        return
+
+    # 清理 REAPER 工程（删除所有轨道 + 关闭工程 tab）
+    try:
+        bridge = ReaperBridge()
+        if bridge.connect():
+            api = bridge.api
+            with bridge:  # 上下文管理器锁/解锁 UI
+                # 反向删除所有轨道
+                n = api.CountTracks(0)
+                for i in range(n - 1, -1, -1):
+                    tr = api.GetTrack(0, i)
+                    if tr:
+                        try:
+                            api.DeleteTrack(tr)
+                        except Exception:
+                            pass
+                # 关闭当前工程（不保存）
+                api.Main_OnCommand(_REAPER_CLOSE_PROJECT_NO_SAVE, 0)
+    except Exception as e:
+        log.debug("Integration test REAPER cleanup failed: %s", e)
+
+    # 清理临时目录
+    for tmpdir in _INTEGRATION_TMP_DIRS:
+        try:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception:
+            pass
