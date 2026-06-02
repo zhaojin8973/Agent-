@@ -10,6 +10,8 @@ from dataclasses import dataclass
 import numpy as np
 import soundfile as sf
 
+from hermes_core.audio_utils import read_pcm, to_mono
+
 # ITU-R BS.1770-4 calibration offset for 1 kHz full-scale sine reference
 _LUFS_CALIBRATION = -0.691
 # Silence threshold in dBFS
@@ -83,7 +85,7 @@ class SignalAnalyzer:
         Multi-channel files are measured with power-preserving channel
         averaging for RMS and LUFS (per ITU-R BS.1770-4).
         """
-        pcm, sample_rate = SignalAnalyzer._read_pcm(file_path)
+        pcm, sample_rate = read_pcm(file_path)
         if pcm.size == 0:
             return SignalReport(
                 rms_db=-200.0, peak_db=-200.0, integrated_lufs=-120.0,
@@ -109,7 +111,7 @@ class SignalAnalyzer:
 
         integrated_lufs = SignalAnalyzer._compute_lufs(pcm, sample_rate)
 
-        mono = SignalAnalyzer._to_mono(pcm)
+        mono = to_mono(pcm)
         true_peak_dbtp = SignalAnalyzer._compute_true_peak(mono)
 
         return SignalReport(

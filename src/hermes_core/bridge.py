@@ -14,7 +14,8 @@ from typing import Optional
 # reapy is imported lazily to avoid importing it before REAPER is running.
 _reapy = None
 
-def _get_reapy():
+def _get_reapy() -> object:
+    """Lazy import reapy to avoid import-time side effects."""
     global _reapy
     if _reapy is None:
         import reapy as _reapy_mod
@@ -24,7 +25,7 @@ def _get_reapy():
 log = logging.getLogger(__name__)
 
 
-def _extract_reaper_string(result) -> str:
+def _extract_reaper_string(result: object) -> str:
     """Extract a useful string from reapy/RPR return variants."""
     if isinstance(result, str):
         return result
@@ -199,7 +200,7 @@ class DialogKiller:
 
     # ── Lifecycle ──────────────────────────────────────────
 
-    def start(self):
+    def start(self) -> None:
         """Start the killer daemon thread.
 
         Safe to call multiple times -- subsequent calls are no-ops
@@ -211,7 +212,7 @@ class DialogKiller:
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
-    def stop(self):
+    def stop(self) -> None:
         """Signal the thread to stop and wait for it.
 
         Safe to call on an already-stopped killer -- no-op.
@@ -232,15 +233,17 @@ class DialogKiller:
     @property
     def killed_count(self) -> int:
         """Number of dialogs that were confirmed closed (not just script runs)."""
-        return self._killed_count
+        with self._lock:
+            return self._killed_count
 
     def get_recent_events(self) -> list[DialogEvent]:
         """Return a copy of recent dialog events, most recent last."""
         with self._lock:
             return list(self._events)
 
-    def set_rules(self, safe_patterns=None, diagnosis_patterns=None,
-                  never_dismiss_patterns=None):
+    def set_rules(self, safe_patterns: list[str] | None = None,
+                  diagnosis_patterns: list[str] | None = None,
+                  never_dismiss_patterns: list[str] | None = None) -> None:
         """Override the built-in dialog classification patterns.
 
         Pass a list of substrings to match.  Dialogs whose title contains
@@ -258,7 +261,7 @@ class DialogKiller:
 
     # ── Internal ───────────────────────────────────────────
 
-    def _run(self):
+    def _run(self) -> None:
         """Main loop: wait for interval, then inspect and dismiss dialogs."""
         while not self._stop_event.wait(self._interval):
             if self._enabled:
@@ -273,7 +276,8 @@ class DialogKiller:
                 timeout=timeout,
             )
             return proc.stdout.decode("utf-8", errors="replace").strip()
-        except Exception:
+        except Exception as e:
+            log.debug("osascript failed: %s", e)
             return ""
 
     def _inspect_windows(self) -> list[tuple[str, list[str]]]:
@@ -359,7 +363,7 @@ class DialogKiller:
             return result.split(":", 1)[1]
         return ""
 
-    def _dismiss_dialogs(self):
+    def _dismiss_dialogs(self) -> None:
         """Inspect windows, classify dialogs, and take targeted action.
 
         Headless guarantee: **every** recognised dialog is dismissed.
@@ -395,8 +399,6 @@ class DialogKiller:
                 self._run_osascript(_AS_DISMISS)
                 action = "sent_escape"
 
-            self._killed_count += 1
-
             event = DialogEvent(
                 has_modal=True,
                 window_title=title,
@@ -407,6 +409,7 @@ class DialogKiller:
             )
 
             with self._lock:
+                self._killed_count += 1
                 self._events.append(event)
                 if len(self._events) > self._max_events:
                     self._events = self._events[-self._max_events:]
@@ -438,7 +441,8 @@ class ReaperBridge:
             try:
                 self._api.GetAppVersion()
                 return True
-            except Exception:
+            except Exception as e:
+                log.debug("Connection check failed: %s", e)
                 self._api = None
         return self.connect() or self.reconnect(max_retries=3, base_delay=1.0)
 
@@ -458,21 +462,21 @@ class ReaperBridge:
                 result["os"] = self._api.GetOS()
                 result["reapy_connected"] = True
                 result["audio_running"] = bool(self._api.Audio_IsRunning())
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("health_check failed: %s", e)
         return result
 
     # ── Properties ──────────────────────────────────────────
 
     @property
-    def api(self):
+    def api(self) -> object:
         """Raw REAPER ReaScript API. Ensure connected before using."""
         if self._api is None:
             self.ensure_connected()
         return self._api
 
     @property
-    def rpr(self):
+    def rpr(self) -> object:
         """reapy module handle for high-level operations."""
         if self._reapy_module is None:
             self.ensure_connected()
@@ -480,26 +484,26 @@ class ReaperBridge:
 
     # ── UI Suppression ──────────────────────────────────────
 
-    def lock_ui(self):
+    def lock_ui(self) -> None:
         """PreventUIRefresh(1) — nesting-safe, call before batch operations."""
         if self._api is not None:
             try:
                 self._api.PreventUIRefresh(1)
                 self._ui_refresh_depth += 1
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("lock_ui failed: %s", e)
 
-    def unlock_ui(self):
+    def unlock_ui(self) -> None:
         """PreventUIRefresh(-1) — nesting-safe, call after batch operations."""
         if self._ui_refresh_depth > 0 and self._api is not None:
             try:
                 self._api.PreventUIRefresh(-1)
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("unlock_ui failed: %s", e)
             finally:
                 self._ui_refresh_depth -= 1
 
-    def _emergency_cleanup(self):
+    def _emergency_cleanup(self) -> None:
         """atexit hook — unlock REAPER UI even if Python crashes mid-operation."""
         if self._ui_refresh_depth <= 0:
             return
@@ -508,14 +512,16 @@ class ReaperBridge:
                 self._api.PreventUIRefresh(-1)
                 self._ui_refresh_depth -= 1
             log.warning("Emergency UI unlock: restored %d levels", self._ui_refresh_depth)
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("_emergency_cleanup failed: %s", e)
 
-    def __enter__(self):
+    def __enter__(self) -> "ReaperBridge":
+        """Context manager entry — lock UI."""
         self.lock_ui()
         return self
 
-    def __exit__(self, *args):
+    def __exit__(self, *args: object) -> None:
+        """Context manager exit — unlock UI."""
         self.unlock_ui()
 
     # ── Connection / reconnection ───────────────────────────
@@ -559,7 +565,7 @@ class ReaperBridge:
 
     # ── Safe RPC call with timeout ─────────────────────────
 
-    def call_rpc(self, fn, *args, timeout: float = 30.0, **kwargs):
+    def call_rpc(self, fn: object, *args: object, timeout: float = 30.0, **kwargs: object) -> tuple[bool, object]:
         """Call *fn* with a timeout.  Returns ``(ok, result_or_error)``.
 
         Use this for any RPR call that may hang (FX ops, render, etc.)

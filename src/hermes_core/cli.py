@@ -61,6 +61,7 @@ def _build_calibrate_parser(subparsers) -> None:
 def _build_adjust_parser(subparsers) -> None:
     p = subparsers.add_parser("adjust", help="Modify mix params with dirty-flag cascade")
     p.add_argument("--project", required=True, help="Project output directory")
+    p.add_argument("--genre", default="pop", help="Genre key (pop, folk, rock, electronic, ballad, chinese_folk_bel_canto)")
     p.add_argument("--comp-ratio", type=float, default=None, help="New compressor ratio")
     p.add_argument("--eq-presence", type=float, default=None, help="EQ presence gain (dB)")
     p.add_argument("--threshold", type=float, default=None, help="Compressor threshold (dB)")
@@ -335,7 +336,8 @@ def cmd_adjust(args) -> int:
         )
 
         from hermes_core.engine import _get_genre_target_lufs
-        target_lufs = args.target_lufs if args.target_lufs is not None else _get_genre_target_lufs(args.genre)
+        genre = getattr(args, "genre", "pop")
+        target_lufs = args.target_lufs if args.target_lufs is not None else _get_genre_target_lufs(genre)
 
         if args.preview:
             log.info("Preview render (numpy mix, no Pro-L 2) ...")

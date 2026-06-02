@@ -76,13 +76,15 @@ class FxManager:
         proj = self._proj()
         try:
             n = len(proj.tracks)
-        except Exception:
+        except Exception as e:
+            log.debug("Failed to get track count: %s", e)
             return None
         if index < 0 or index >= n:
             return None
         try:
             return proj.tracks[index]
-        except Exception:
+        except Exception as e:
+            log.debug("Failed to get track at index %d: %s", index, e)
             return None
 
     def _get_track_ptr(self, index: int):
@@ -283,7 +285,8 @@ class FxManager:
             return ""
         try:
             return fx.params[param_index].name
-        except Exception:
+        except Exception as e:
+            log.debug("Failed to get param name at index %d: %s", param_index, e)
             return ""
 
     def get_param_list(

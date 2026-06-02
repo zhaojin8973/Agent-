@@ -3,12 +3,12 @@ Layer 2: SendManager — track send/return management via raw RPR API.
 Depends only on bridge.py. Does NOT import fx.py.
 """
 
-import math
 import logging
 from enum import IntEnum
 from typing import Optional, Union
 
 from hermes_core.bridge import ReaperBridge
+from hermes_core.audio_utils import db_to_norm
 
 log = logging.getLogger(__name__)
 
@@ -37,25 +37,18 @@ _CATEGORY_HW_OUT = -1    # hardware outputs
 _MODE_VALUES = {"post-fader": 0, "pre-fx": 1, "pre-fader": 3}
 
 
-def _db_to_norm(db: float) -> float:
-    """Convert dB to REAPER normalized send volume (0..1)."""
-    if not math.isfinite(db) or db <= -150:
-        return 0.0
-    return 10 ** (db / 20)
-
-
 class SendManager:
     """Track send CRUD. No create_aux_return — that lives in engine.py."""
 
-    def __init__(self, bridge: ReaperBridge):
+    def __init__(self, bridge: ReaperBridge) -> None:
         self._bridge = bridge
 
     @property
-    def bridge(self):
+    def bridge(self) -> ReaperBridge:
         return self._bridge
 
     @property
-    def api(self):
+    def api(self) -> object:
         return self._bridge.api
 
     # ── Create / Remove ───────────────────────────────────
@@ -83,7 +76,7 @@ class SendManager:
         idx = self.api.CreateTrackSend(src_track, dest_track)
 
         if idx >= 0:
-            vol_norm = _db_to_norm(level_db)
+            vol_norm = db_to_norm(level_db)
             self.api.SetTrackSendInfo_Value(
                 src_track, _CATEGORY_SENDS, idx, "D_VOL", vol_norm
             )
@@ -96,7 +89,7 @@ class SendManager:
 
         return {"category": _CATEGORY_SENDS, "index": idx}
 
-    def remove(self, src: int, send_idx: int, mode: Union[str, SendMode] = SendMode.POST_FADER):
+    def remove(self, src: int, send_idx: int, mode: Union[str, SendMode] = SendMode.POST_FADER) -> None:
         """Remove a send from a track.
 
         The *mode* parameter is accepted for API compatibility but is
@@ -112,7 +105,7 @@ class SendManager:
 
     def set_level(
         self, src: int, send_idx: int, level_db: float, mode: Union[str, SendMode] = SendMode.POST_FADER
-    ):
+    ) -> None:
         """Set send level in dB.
 
         The *mode* parameter is accepted for API compatibility;
@@ -122,12 +115,12 @@ class SendManager:
         if src_track is None:
             return
         self.api.SetTrackSendInfo_Value(
-            src_track, _CATEGORY_SENDS, send_idx, "D_VOL", _db_to_norm(level_db)
+            src_track, _CATEGORY_SENDS, send_idx, "D_VOL", db_to_norm(level_db)
         )
 
     def set_pan(
         self, src: int, send_idx: int, pan: float, mode: Union[str, SendMode] = SendMode.POST_FADER
-    ):
+    ) -> None:
         """Set send pan (-1.0 to 1.0).
 
         The *mode* parameter is accepted for API compatibility;
@@ -143,7 +136,7 @@ class SendManager:
 
     def set_mute(
         self, src: int, send_idx: int, mute: bool, mode: Union[str, SendMode] = SendMode.POST_FADER
-    ):
+    ) -> None:
         """Mute or unmute a send.
 
         The *mode* parameter is accepted for API compatibility;
@@ -173,8 +166,8 @@ class SendManager:
                     if send_idx < n:
                         category = cat
                         break
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.debug("Failed to check send category %s: %s", cat, e)
             if category is None:
                 return None
 
@@ -200,7 +193,8 @@ class SendManager:
                 "mode": int(mode_val),
                 "category": category,
             }
-        except Exception:
+        except Exception as e:
+            log.debug("Failed to get send info: %s", e)
             return None
 
     def list_all(self, track_index: int) -> list[dict]:
@@ -212,7 +206,8 @@ class SendManager:
         for category in (_CATEGORY_SENDS, _CATEGORY_HW_OUT):
             try:
                 n = self.api.GetTrackNumSends(src_track, category)
-            except Exception:
+            except Exception as e:
+                log.debug("Failed to get send count for category %s: %s", category, e)
                 n = 0
             for i in range(n):
                 info = self.get_info(track_index, i, category)
@@ -223,7 +218,7 @@ class SendManager:
 
     # ── Internal ──────────────────────────────────────────
 
-    def _get_track_ptr(self, index: int):
+    def _get_track_ptr(self, index: int) -> Optional[object]:
         """Return a valid track pointer or None."""
         if index < 0:
             return None

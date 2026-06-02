@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from hermes_core.bridge import ReaperBridge
+from hermes_core.audio_utils import db_to_norm, norm_to_db
 
 log = logging.getLogger(__name__)
 
@@ -172,7 +173,7 @@ class TrackManager:
 
     def set_volume(self, index: int, db: float):
         """Set track fader volume in dB. 0dB = unity."""
-        self._set_prop(index, "D_VOL", self._db_to_norm(db))
+        self._set_prop(index, "D_VOL", db_to_norm(db))
 
     def set_pan(self, index: int, pan: float):
         """Set track pan. 0=center, -1=left, 1=right."""
@@ -209,7 +210,7 @@ class TrackManager:
             return TrackInfo(
                 index=index,
                 name=name.strip(),
-                volume_db=self._norm_to_db(float(api.GetMediaTrackInfo_Value(track, "D_VOL"))),
+                volume_db=norm_to_db(float(api.GetMediaTrackInfo_Value(track, "D_VOL"))),
                 pan=float(api.GetMediaTrackInfo_Value(track, "D_PAN")),
                 mute=bool(api.GetMediaTrackInfo_Value(track, "B_MUTE")),
                 solo=bool(api.GetMediaTrackInfo_Value(track, "I_SOLO")),
@@ -218,7 +219,8 @@ class TrackManager:
                 item_count=api.CountTrackMediaItems(track),
                 selected=bool(api.IsTrackSelected(track)),
             )
-        except Exception:
+        except Exception as e:
+            log.debug("Failed to get track info: %s", e)
             return None
 
     def list_all(self) -> list[TrackInfo]:
@@ -304,7 +306,8 @@ class TrackManager:
             return 0.0
         try:
             return float(api.GetMediaItemInfo_Value(item, "D_POSITION"))
-        except Exception:
+        except Exception as e:
+            log.debug("Failed to get item position: %s", e)
             return 0.0
 
     def set_item_volume(self, track_index: int, db: float,
@@ -317,18 +320,4 @@ class TrackManager:
         item = api.GetTrackMediaItem(track, item_index)
         if item is None:
             return
-        api.SetMediaItemInfo_Value(item, "D_VOL", self._db_to_norm(db))
-
-    # ── Internal ──────────────────────────────────────────────
-
-    @staticmethod
-    def _db_to_norm(db: float) -> float:
-        if not math.isfinite(db) or db <= -150:
-            return 0.0
-        return 10.0 ** (db / 20.0)
-
-    @staticmethod
-    def _norm_to_db(norm: float) -> float:
-        if norm <= 0.0:
-            return -150.0
-        return 20.0 * math.log10(norm)
+        api.SetMediaItemInfo_Value(item, "D_VOL", db_to_norm(db))

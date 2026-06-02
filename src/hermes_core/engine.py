@@ -7,6 +7,8 @@ import bisect
 import logging
 import math
 import os
+import shutil
+import tempfile
 import time
 from datetime import datetime
 from typing import Callable
@@ -278,6 +280,8 @@ def _apply_vca_params(intent: CompressionIntent,
         "Ratio":       ratio,
         "Attack":      preset["attack_ms"],
         "Release":     preset["release_ms"],
+        # 0.6: conservative makeup gain coefficient (60% of GR)
+        #      prevents over-compensation while restoring perceived loudness
         "Makeup Gain": round(intent.gr_target_db * 0.6, 1),
     }
 
@@ -348,10 +352,17 @@ def _apply_cla76_params(intent: CompressionIntent,
     # Input positions signal relative to 1176 fixed threshold.
     # Higher peak → less Input needed (signal already near threshold).
     # More GR → more Input needed (push harder into threshold).
+    #
+    # Formula: input_db = BASELINE + (gr * SLOPE) - peak
+    #   -40.4: baseline offset at -18 dBFS RMS (0 VU reference)
+    #   0.8:   empirical slope from linear regression on calibration data
+    #          (Input vs GR at fixed peak level)
     input_db = -40.4 + gr * 0.8 - peak
     input_db = max(-48.0, min(0.0, input_db))
 
     # Output: level-match — keep signal roughly unity through the 76
+    # 3.25: empirical makeup gain coefficient (dB output per dB GR)
+    #       tuned to compensate for perceived loudness loss
     output_db = -gr * 3.25
     output_db = max(-48.0, min(0.0, output_db))
 
@@ -421,11 +432,13 @@ def _apply_rvox_params(intent: CompressionIntent,
 # Compressor dispatcher
 # ════════════════════════════════════════════════════════════════
 
+# Note: "rvox" is NOT in this dictionary because it requires special handling
+# (rvox_multiplier parameter). See dispatch logic at line ~1344.
+# CLA-76 is also handled separately (different signature: attack_knob, release_knob).
 _TRANSLATORS = {
     "vca":  _apply_vca_params,
     "fet":  _apply_fet_params,
     "opto": _apply_opto_params,
-    "rvox": _apply_rvox_params,
 }
 
 
@@ -550,6 +563,12 @@ def _derive_eq_intent(
     mid_energy = report.band_energy_db.get("mid", -60.0)
     sub_excess = sub_energy - mid_energy
 
+    # HPF frequency selection based on sub-bass energy relative to midrange
+    # 3.0 dB: threshold for "excessive" sub-bass (triggers HPF raise)
+    # 10 Hz/dB: slope - how aggressively to raise HPF as sub-bass increases
+    # 80/120 Hz (vocal) and 40/80 Hz (backing): safe HPF limits
+    #   - vocal: 80 Hz default, max 120 Hz (avoid cutting fundamental)
+    #   - backing: 40 Hz default, max 80 Hz (preserve low-end instruments)
     if role == "vocal":
         hpf_freq = 80.0
         if sub_excess > 3.0:
@@ -606,6 +625,12 @@ def _derive_eq_intent(
 
     # ── Rule 4: Presence boost ──────────────────────────────
     # Pre-comp: higher threshold (4 dB deficit) to be conservative.
+    # Post-comp: lower threshold (2 dB) since compression can reduce presence.
+    #
+    # 4.0 / 2.0 dB: presence deficit thresholds (dB below midrange)
+    # 0.5: boost coefficient (50% of deficit, conservative correction)
+    # 3.0 dB: maximum boost cap (avoid over-EQing)
+    # 3000 Hz: presence band center frequency (vocal intelligibility region)
     presence_deficit_threshold = 4.0 if conservative else 2.0
     if report.presence_deficit_db > presence_deficit_threshold:
         boost = min(report.presence_deficit_db * 0.5, 3.0)
@@ -1088,11 +1113,12 @@ class MixingEngine:
             result = fn(*args, **kwargs)
             api.Undo_EndBlock(f"Hermes: {label}", -1)
             return result
-        except Exception:
+        except Exception as e:
             try:
                 api.Undo_EndBlock(f"Hermes: {label} (failed)", 0)
-            except Exception:
-                pass
+            except Exception as inner_e:
+                log.debug("Undo_EndBlock cleanup failed: %s", inner_e)
+            raise
             raise
 
     def _ensure_project_match(self):
@@ -1370,7 +1396,6 @@ class MixingEngine:
                 # band HPF=4.6kHz / LPF=12kHz covers sibilance range.
                 # Single Vocal mode distinguishes sibilance from harmonics
                 # internally — no peak-tracking needed.
-                import math
                 spectrum = getattr(self, "_last_spectrum", {}) or {}
                 presence_def = spectrum.get("presence_deficit", 0.0)
 
@@ -1597,16 +1622,16 @@ class MixingEngine:
         step.  The temp directory is returned so the caller knows where
         REAPER actually writes.
         """
-        import tempfile
         os.makedirs(output_dir, exist_ok=True)
 
         target = os.path.join(output_dir, f"{name}.rpp")
-        if os.path.exists(target):
+        conflict = os.path.exists(target)
+        if conflict:
             ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
             target = os.path.join(output_dir, f"{name}_{ts}.rpp")
             log.info("Project file exists — renamed to %s", target)
 
-        return target, False
+        return target, conflict
 
     def create_project(self, name: str, output_dir: str,
                        sample_rate: int = 48000) -> dict:
@@ -1629,14 +1654,22 @@ class MixingEngine:
                 "first to confirm you want to wipe the project."
             )
 
-        # Delete all tracks via reapy's high-level API.
-        # The raw DeleteTrack API is unreliable on ARM64.
-        proj = self._bridge.rpr.Project()
-        for track in list(proj.tracks):
-            try:
-                track.delete()
-            except Exception:
-                pass
+        # Delete all tracks using raw API (reverse order to avoid index shifting).
+        # Try both raw API and reapy's high-level API for reliability.
+        n_tracks = api.CountTracks(0)
+        for i in range(n_tracks - 1, -1, -1):
+            tr = api.GetTrack(0, i)
+            if tr:
+                try:
+                    api.DeleteTrack(tr)
+                except Exception:
+                    # Fallback to reapy's high-level API if raw API fails
+                    try:
+                        proj = self._bridge.rpr.Project()
+                        if i < len(proj.tracks):
+                            proj.tracks[i].delete()
+                    except Exception as e:
+                        log.warning("Failed to delete track %d: %s", i, e)
 
         # Reset master track
         master = api.GetMasterTrack(0)
@@ -1663,7 +1696,6 @@ class MixingEngine:
         # errors on paths with non-ASCII characters or restrictive macOS
         # sandbox permissions.  We always save to a known-safe temp dir,
         # then copy the result to the user's requested path.
-        import tempfile, shutil
         tmp_dir = tempfile.mkdtemp(prefix="hermes_proj_")
         tmp_path = os.path.join(tmp_dir, os.path.basename(safe_path))
         api.Main_SaveProjectEx(0, tmp_path, 0)
@@ -1699,7 +1731,6 @@ class MixingEngine:
         sandbox restrictions.  We always save to a temp directory, then
         copy the result to *target_path*.
         """
-        import tempfile, shutil
         tmp_dir = tempfile.mkdtemp(prefix="hermes_save_")
         tmp_path = os.path.join(tmp_dir, os.path.basename(target_path))
         self._bridge.api.Main_SaveProjectEx(0, tmp_path, 0)
@@ -2039,7 +2070,8 @@ class MixingEngine:
             if tr:
                 try:
                     solo = api.GetMediaTrackInfo_Value(tr, "I_SOLO")
-                except Exception:
+                except Exception as e:
+                    log.debug("Failed to get solo state for track %d: %s", i, e)
                     solo = 0.0
                 saved[i] = bool(solo)
                 api.SetMediaTrackInfo_Value(tr, "I_SOLO", 1.0 if i in indices else 0.0)
@@ -2076,11 +2108,11 @@ class MixingEngine:
 
         Returns balance metadata plus combined LUFS and peak.
         """
-        import tempfile
 
         tmp = tmp_dir or tempfile.mkdtemp(prefix="hermes_balance_")
 
-        stems = list(self._stems_cache)
+        # Deep copy to avoid mutating the cached stem data
+        stems = [dict(s) for s in self._stems_cache]
         if not stems:
             raise RuntimeError(
                 "No cached stems — call prepare_stems() first"
@@ -2233,8 +2265,6 @@ class MixingEngine:
         Returns a diagnostic dict with *peak_db*, *thresh_db*, *attack_ms*,
         *makeup_db*, and *gr_target*.
         """
-        import os
-        import tempfile
 
         # ── 1. Probe render — measure what hits the master bus ──
         tmp_dir = tempfile.mkdtemp(prefix="hermes_bus_probe_")
@@ -2576,7 +2606,6 @@ class MixingEngine:
             if on_progress:
                 on_progress(stage, pct)
 
-        import tempfile
 
         _progress("setup", 0.0)
         tmp = tmp_dir or tempfile.mkdtemp(prefix="hermes_master_")
@@ -2765,7 +2794,6 @@ class MixingEngine:
         The ``"mastering"`` key is ``"bypassed"`` — callers should
         not base final loudness decisions on the preview.
         """
-        import tempfile
         import numpy as np
 
         tmp = cache_dir or tempfile.mkdtemp(prefix="hermes_preview_")
@@ -2933,8 +2961,8 @@ class MixingEngine:
             # ── Clean up temp track ──
             try:
                 api.DeleteTrack(temp_track)
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("Failed to clean up temp track: %s", e)
 
     def _make_chain_executor(self, cache_dir: str) -> ChainExecutor:
         """Return a :class:`ChainExecutor` wired to :meth:`_micro_render_node`."""
@@ -2949,7 +2977,6 @@ class MixingEngine:
         Dirty nodes are re-rendered; clean nodes with valid caches are
         skipped.  Returns the (mutated) node list.
         """
-        import tempfile
         cdir = cache_dir or tempfile.mkdtemp(prefix="hermes_chain_")
         executor = self._make_chain_executor(cdir)
         first = executor.first_dirty(nodes)
@@ -2998,7 +3025,6 @@ class MixingEngine:
         cache_dir:
             Temp directory for intermediate renders.
         """
-        import tempfile
 
         tmp = cache_dir or tempfile.mkdtemp(prefix="hermes_cal_")
 

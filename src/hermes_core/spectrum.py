@@ -15,6 +15,8 @@ from dataclasses import dataclass
 import numpy as np
 import soundfile as sf
 
+from hermes_core.audio_utils import read_pcm, to_mono
+
 # ── Constants ────────────────────────────────────────────────────
 
 # Minimum energy floor in dB to avoid log10(0)
@@ -125,8 +127,8 @@ class SpectrumAnalyzer:
             6. Resonance detection (Q + harmonic filter).
             7. Spectral tilt regression.
         """
-        audio, sr = SpectrumAnalyzer._read_pcm(file_path)
-        mono = SpectrumAnalyzer._to_mono(audio)
+        audio, sr = read_pcm(file_path)
+        mono = to_mono(audio)
 
         # STFT + P90 aggregate
         magnitude_db, freqs = SpectrumAnalyzer._stft_p90(mono, sr)
