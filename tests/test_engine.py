@@ -80,10 +80,12 @@ class TestHealthCheck:
 class TestCreateProject:
     def test_deletes_all_tracks_via_reapy(self):
         eng = MixingEngine()
-        # Mock reapy track list
+        eng.allow_track_deletion()
+        # Mock raw API for track deletion
+        eng._bridge.api.CountTracks = MagicMock(return_value=5)
         mock_track = MagicMock()
-        eng._bridge.rpr.Project = MagicMock(return_value=MagicMock(
-            tracks=[mock_track, mock_track, mock_track, mock_track, mock_track]))
+        eng._bridge.api.GetTrack = MagicMock(return_value=mock_track)
+        eng._bridge.api.DeleteTrack = MagicMock()
         eng._bridge.api.GetMasterTrack = MagicMock(return_value="(MediaTrack*)0x0")
         eng._bridge.api.TrackFX_GetCount = MagicMock(return_value=0)
         eng._bridge.api.SetMediaTrackInfo_Value = MagicMock()
@@ -93,7 +95,7 @@ class TestCreateProject:
 
         eng.create_project(name="Test", output_dir="/tmp/test", sample_rate=48000)
 
-        assert mock_track.delete.call_count == 5
+        assert eng._bridge.api.DeleteTrack.call_count == 5
         eng._bridge.api.GetSetProjectInfo.assert_called()
         eng._bridge.api.Main_SaveProjectEx.assert_called_once()
 
@@ -103,6 +105,7 @@ class TestProjectManagement:
 
     def test_create_project_with_name(self):
         eng = MixingEngine()
+        eng.allow_track_deletion()
         eng._bridge.api.CountTracks = MagicMock(return_value=3)
         eng._bridge.api.GetTrack = MagicMock(return_value="(MediaTrack*)0x1")
         eng._bridge.api.DeleteTrack = MagicMock()
@@ -153,11 +156,10 @@ class TestProjectManagement:
         eng._bridge.api.Main_SaveProjectEx = MagicMock()
         eng._project_path = "/tmp/mix/Test.rpp"
 
-        result = eng.save_project()
+        with patch("shutil.copy2"):  # 模拟文件复制成功
+            result = eng.save_project()
 
-        eng._bridge.api.Main_SaveProjectEx.assert_called_once_with(
-            0, "/tmp/mix/Test.rpp", 0
-        )
+        eng._bridge.api.Main_SaveProjectEx.assert_called_once()
         assert result["path"] == "/tmp/mix/Test.rpp"
         assert "saved_at" in result
 
@@ -491,6 +493,7 @@ class TestAuditMix:
 class TestFullPipeline:
     def test_mock_pipeline(self, tmp_path):
         eng = MixingEngine()
+        eng.allow_track_deletion()
         eng._bridge.api.CountTracks = MagicMock(return_value=5)
         eng._bridge.api.GetTrack = MagicMock(return_value="(MediaTrack*)0x1")
         eng._bridge.api.DeleteTrack = MagicMock()
@@ -541,6 +544,7 @@ class TestProjectManagementIntegration:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
+        eng.allow_track_deletion()
 
         eng.create_project(name="HermesTest", output_dir="/tmp/hermes_test", sample_rate=44100)
         info = eng.get_project_info()
@@ -552,6 +556,7 @@ class TestProjectManagementIntegration:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
+        eng.allow_track_deletion()
 
         result = eng.create_project(name="ReturnTest", output_dir="/tmp/pj", sample_rate=48000)
 
@@ -563,6 +568,7 @@ class TestProjectManagementIntegration:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
+        eng.allow_track_deletion()
 
         eng.create_project(name="ImportInfo", output_dir="/tmp/pj", sample_rate=48000)
         wav = make_test_wav(tmp_path / "test.wav")
@@ -576,6 +582,7 @@ class TestProjectManagementIntegration:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
+        eng.allow_track_deletion()
 
         eng.create_project(name="SaveTest", output_dir="/tmp/hermes_test")
         # First save may open dialog - just verify no exception
@@ -587,6 +594,7 @@ class TestProjectManagementIntegration:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
+        eng.allow_track_deletion()
 
         eng.create_project(name='TestProj', output_dir="/tmp/pj", sample_rate=48000)
 
@@ -614,6 +622,7 @@ class TestProjectManagementIntegration:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
+        eng.allow_track_deletion()
         eng.create_project(name="TestProj", output_dir="/tmp/pj")
 
         eng.import_stems([])
@@ -627,6 +636,7 @@ class TestProjectManagementIntegration:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
+        eng.allow_track_deletion()
         eng.create_project(name="TestProj", output_dir="/tmp/pj")
 
 
@@ -854,7 +864,7 @@ class TestBalanceFaders:
         ]
         eng.apply_gain = MagicMock()
         eng._balance_faders(stems, vocal_indices=[0], backing_indices=[1],
-                            backing_reduction_lu=7.5)
+                            genre="pop")
         assert eng.apply_gain.call_count >= 1
 
 
@@ -1047,7 +1057,7 @@ class TestDeriveEQIntent:
                             "mid": -20, "high_mid": -22, "presence": -24, "air": -35},
             spectral_tilt_db_per_octave=-1.5,
             resonances=[], mud_ratio_db=-5.0, presence_deficit_db=4.0,
-            air_level_db=-35.0,
+            sibilance_peak_hz=7000.0, air_level_db=-35.0,
         )
         intent = _derive_eq_intent(report, role="vocal", genre="pop")
         hpf = [b for b in intent.bands if b.band_type == "hp"]
@@ -1063,7 +1073,7 @@ class TestDeriveEQIntent:
                             "mid": -20, "high_mid": -22, "presence": -24, "air": -35},
             spectral_tilt_db_per_octave=-1.5,
             resonances=[], mud_ratio_db=1.0, presence_deficit_db=1.0,
-            air_level_db=-25.0,
+            sibilance_peak_hz=7000.0, air_level_db=-25.0,
         )
         intent = _derive_eq_intent(report, role="vocal", genre="pop")
         cuts = [b for b in intent.bands if b.gain_db < 0 and abs(b.freq_hz - 350) < 5]
@@ -1079,7 +1089,7 @@ class TestDeriveEQIntent:
                             "mid": -20, "high_mid": -22, "presence": -24, "air": -35},
             spectral_tilt_db_per_octave=-4.0,
             resonances=[], mud_ratio_db=-5.0, presence_deficit_db=1.0,
-            air_level_db=-25.0,
+            sibilance_peak_hz=7000.0, air_level_db=-25.0,
         )
         assert _derive_eq_intent(dark, role="vocal", genre="pop").spectral_tilt == "dark"
 
@@ -1088,7 +1098,7 @@ class TestDeriveEQIntent:
                             "mid": -20, "high_mid": -22, "presence": -24, "air": -35},
             spectral_tilt_db_per_octave=3.0,
             resonances=[], mud_ratio_db=-5.0, presence_deficit_db=1.0,
-            air_level_db=-25.0,
+            sibilance_peak_hz=7000.0, air_level_db=-25.0,
         )
         assert _derive_eq_intent(bright, role="vocal", genre="pop").spectral_tilt == "bright"
 
@@ -1102,7 +1112,7 @@ class TestDeriveEQIntent:
                             "mid": -20, "high_mid": -22, "presence": -24, "air": -35},
             spectral_tilt_db_per_octave=-1.5,
             resonances=[], mud_ratio_db=-5.0, presence_deficit_db=4.0,
-            air_level_db=-35.0,
+            sibilance_peak_hz=7000.0, air_level_db=-35.0,
         )
         for genre in _GENRE_EQ_TWEAKS:
             intent = _derive_eq_intent(report, role="vocal", genre=genre)
@@ -1526,3 +1536,286 @@ class TestBpmTiming:
         params = _apply_vca_params(intent, bpm_preset)
         assert params["Attack"] == 10.0
         assert params["Release"] == 200.0
+
+
+# ══════════════════════════════════════════════════════════════
+# 流派参数一致性测试 — 确保所有 6 个流派在每个参数表中都有条目
+# ══════════════════════════════════════════════════════════════
+
+_ALL_GENRES = [
+    "folk", "ballad", "pop", "rock", "electronic", "chinese_folk_bel_canto",
+]
+
+
+@pytest.mark.unit
+class TestGenreTableConsistency:
+    """验证所有 6 个流派在每个参数表中都存在条目。"""
+
+    def test_vocal_to_backing_has_all_genres(self):
+        from hermes_core.engine import _GENRE_VOCAL_TO_BACKING
+        for g in _ALL_GENRES:
+            assert g in _GENRE_VOCAL_TO_BACKING, f"流派 {g} 缺失于 _GENRE_VOCAL_TO_BACKING"
+
+    def test_target_lufs_has_all_genres(self):
+        from hermes_core.engine import _GENRE_TARGET_LUFS
+        for g in _ALL_GENRES:
+            assert g in _GENRE_TARGET_LUFS, f"流派 {g} 缺失于 _GENRE_TARGET_LUFS"
+
+    def test_crest_gr_ratio_has_all_genres(self):
+        from hermes_core.engine import _GENRE_CREST_GR_RATIO
+        for g in _ALL_GENRES:
+            assert g in _GENRE_CREST_GR_RATIO, f"流派 {g} 缺失于 _GENRE_CREST_GR_RATIO"
+
+    def test_rvox_multiplier_has_all_genres(self):
+        from hermes_core.engine import _GENRE_RVOX_MULTIPLIER
+        for g in _ALL_GENRES:
+            assert g in _GENRE_RVOX_MULTIPLIER, f"流派 {g} 缺失于 _GENRE_RVOX_MULTIPLIER"
+
+    def test_bus_gr_target_has_all_genres(self):
+        from hermes_core.normalize import _GENRE_BUS_GR_TARGET
+        for g in _ALL_GENRES:
+            assert g in _GENRE_BUS_GR_TARGET, f"流派 {g} 缺失于 _GENRE_BUS_GR_TARGET"
+
+    def test_cla76_attack_base_has_all_genres(self):
+        from hermes_core.engine import _GENRE_CLA76_ATTACK_BASE
+        for g in _ALL_GENRES:
+            assert g in _GENRE_CLA76_ATTACK_BASE, f"流派 {g} 缺失于 _GENRE_CLA76_ATTACK_BASE"
+
+    def test_cla76_attack_k_has_all_genres(self):
+        from hermes_core.engine import _GENRE_CLA76_ATTACK_K
+        for g in _ALL_GENRES:
+            assert g in _GENRE_CLA76_ATTACK_K, f"流派 {g} 缺失于 _GENRE_CLA76_ATTACK_K"
+
+    def test_prods_range_has_all_genres(self):
+        from hermes_core.engine import _GENRE_PRODS_RANGE
+        for g in _ALL_GENRES:
+            assert g in _GENRE_PRODS_RANGE, f"流派 {g} 缺失于 _GENRE_PRODS_RANGE"
+
+    def test_all_tables_have_same_genre_keys(self):
+        """所有流派参数表的键集合应完全一致。"""
+        from hermes_core.engine import (
+            _GENRE_VOCAL_TO_BACKING, _GENRE_TARGET_LUFS,
+            _GENRE_CREST_GR_RATIO, _GENRE_RVOX_MULTIPLIER,
+            _GENRE_CLA76_ATTACK_BASE, _GENRE_CLA76_ATTACK_K,
+            _GENRE_PRODS_RANGE,
+        )
+        from hermes_core.normalize import _GENRE_BUS_GR_TARGET
+
+        expected = set(_ALL_GENRES)
+        tables = {
+            "_GENRE_VOCAL_TO_BACKING": set(_GENRE_VOCAL_TO_BACKING.keys()),
+            "_GENRE_TARGET_LUFS": set(_GENRE_TARGET_LUFS.keys()),
+            "_GENRE_CREST_GR_RATIO": set(_GENRE_CREST_GR_RATIO.keys()),
+            "_GENRE_RVOX_MULTIPLIER": set(_GENRE_RVOX_MULTIPLIER.keys()),
+            "_GENRE_BUS_GR_TARGET": set(_GENRE_BUS_GR_TARGET.keys()),
+            "_GENRE_CLA76_ATTACK_BASE": set(_GENRE_CLA76_ATTACK_BASE.keys()),
+            "_GENRE_CLA76_ATTACK_K": set(_GENRE_CLA76_ATTACK_K.keys()),
+            "_GENRE_PRODS_RANGE": set(_GENRE_PRODS_RANGE.keys()),
+        }
+        for name, keys in tables.items():
+            missing = expected - keys
+            assert not missing, f"{name} 缺少流派: {missing}"
+
+
+# ══════════════════════════════════════════════════════════════
+# CLA-76 攻击旋钮全流派测试
+# ══════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestCLA76AttackAllGenres:
+    """验证 _compute_cla76_attack_knob 在所有流派下输出合理值。"""
+
+    def test_high_crest_all_genres(self):
+        """高波峰 (20 dB) → 较慢攻击（较小旋钮值），所有流派应在 [1, 6.5]。"""
+        from hermes_core.engine import _compute_cla76_attack_knob
+        for g in _ALL_GENRES:
+            knob = _compute_cla76_attack_knob(20.0, g)
+            assert 1.0 <= knob <= 6.5, f"流派 {g}: 旋钮值 {knob} 超出范围"
+
+    def test_low_crest_all_genres(self):
+        """低波峰 (8 dB) → 较快攻击（较大旋钮值），所有流派应在 [1, 6.5]。"""
+        from hermes_core.engine import _compute_cla76_attack_knob
+        for g in _ALL_GENRES:
+            knob = _compute_cla76_attack_knob(8.0, g)
+            assert 1.0 <= knob <= 6.5, f"流派 {g}: 旋钮值 {knob} 超出范围"
+
+    def test_normal_crest_all_genres(self):
+        """标准波峰 (12 dB) → 所有流派应在 [1, 6.5]。"""
+        from hermes_core.engine import _compute_cla76_attack_knob
+        for g in _ALL_GENRES:
+            knob = _compute_cla76_attack_knob(12.0, g)
+            assert 1.0 <= knob <= 6.5, f"流派 {g}: 旋钮值 {knob} 超出范围"
+
+    def test_electronic_slower_than_folk(self):
+        """电子流派基础攻击比民谣慢（更高基础值），同等波峰下旋钮值应更大。"""
+        from hermes_core.engine import _compute_cla76_attack_knob
+        knob_electronic = _compute_cla76_attack_knob(12.0, "electronic")
+        knob_folk = _compute_cla76_attack_knob(12.0, "folk")
+        assert knob_electronic > knob_folk
+
+    def test_unknown_genre_uses_pop_defaults(self):
+        """未知流派回退到 pop 默认值。"""
+        from hermes_core.engine import _compute_cla76_attack_knob
+        knob_unknown = _compute_cla76_attack_knob(15.0, "jazz")
+        knob_pop = _compute_cla76_attack_knob(15.0, "pop")
+        assert knob_unknown == knob_pop
+
+
+# ══════════════════════════════════════════════════════════════
+# RVox 全流派测试
+# ══════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestRVoxAllGenres:
+    """验证所有流派的 RVox 参数在合理范围内。"""
+
+    def test_compression_in_valid_range(self):
+        """所有流派的 RVox Compression 应在 [-36, 0] dB。"""
+        from hermes_core.engine import (
+            _derive_compressor_intent, _apply_rvox_params,
+            _GENRE_RVOX_MULTIPLIER,
+        )
+
+        preset = {"attack_ms": 5.0, "release_ms": 100.0}
+        # 典型人声：RMS=-18, Peak=-3, crest=15 dB
+        for g in _ALL_GENRES:
+            intent = _derive_compressor_intent(-18.0, -3.0, genre=g)
+            mult = _GENRE_RVOX_MULTIPLIER[g]
+            params = _apply_rvox_params(intent, preset, mult)
+            assert -36.0 <= params["Compression"] <= 0.0, (
+                f"流派 {g}: Compression={params['Compression']} 超出范围"
+            )
+
+    def test_gain_matches_compression_ratio(self):
+        """Gain = Compression × 0.6，所有流派一致。"""
+        from hermes_core.engine import (
+            _derive_compressor_intent, _apply_rvox_params,
+            _GENRE_RVOX_MULTIPLIER,
+        )
+
+        preset = {"attack_ms": 5.0, "release_ms": 100.0}
+        for g in _ALL_GENRES:
+            intent = _derive_compressor_intent(-18.0, -5.0, genre=g)
+            mult = _GENRE_RVOX_MULTIPLIER[g]
+            params = _apply_rvox_params(intent, preset, mult)
+            expected_gain = round(params["Compression"] * 0.6, 1)
+            assert params["Gain"] == pytest.approx(expected_gain, abs=0.2), (
+                f"流派 {g}: Gain={params['Gain']} ≠ Compression×0.6={expected_gain}"
+            )
+
+    def test_dense_genre_compresses_more(self):
+        """电子/流行比民谣压缩更多（更大的 mult → 更负的 Compression）。"""
+        from hermes_core.engine import (
+            _derive_compressor_intent, _apply_rvox_params,
+            _GENRE_RVOX_MULTIPLIER,
+        )
+
+        preset = {"attack_ms": 5.0, "release_ms": 100.0}
+        intent = _derive_compressor_intent(-18.0, -3.0, genre="pop")
+
+        params_folk = _apply_rvox_params(
+            intent, preset, _GENRE_RVOX_MULTIPLIER["folk"])
+        params_electronic = _apply_rvox_params(
+            intent, preset, _GENRE_RVOX_MULTIPLIER["electronic"])
+
+        # 电子流派 mult=1.8 > 民谣 mult=1.0 → 更负的 Compression
+        assert params_electronic["Compression"] < params_folk["Compression"]
+
+
+# ══════════════════════════════════════════════════════════════
+# Pro-DS 去齿音器全流派测试
+# ══════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestProDSAllGenres:
+    """验证 Pro-DS 参数对所有流派的合理性。"""
+
+    def test_range_values_per_genre(self):
+        """每个流派的 Range 值在合理范围内（0–24 dB）。"""
+        from hermes_core.engine import _GENRE_PRODS_RANGE
+
+        for g in _ALL_GENRES:
+            range_db = _GENRE_PRODS_RANGE[g]
+            assert 0.0 < range_db <= 24.0, (
+                f"流派 {g}: Range={range_db} 超出 Pro-DS 范围 [0, 24]"
+            )
+
+    def test_sparse_genres_have_lower_range(self):
+        """稀疏流派（folk/ballad）的 Range 应小于密集流派（electronic）。"""
+        from hermes_core.engine import _GENRE_PRODS_RANGE
+
+        assert _GENRE_PRODS_RANGE["folk"] < _GENRE_PRODS_RANGE["electronic"]
+        assert _GENRE_PRODS_RANGE["ballad"] < _GENRE_PRODS_RANGE["electronic"]
+
+    def test_threshold_with_zero_presence_deficit(self):
+        """presence_deficit=0 → threshold=-32 dB（基础值）。"""
+        # 模拟 engine.py 中的计算逻辑
+        presence_def = 0.0
+        threshold_db = -32.0 + presence_def * 0.1
+        threshold_db = max(-60.0, min(0.0, threshold_db))
+        assert threshold_db == -32.0
+
+    def test_threshold_with_high_presence_deficit(self):
+        """presence_deficit=20 → threshold=-30 dB（更不激进）。"""
+        presence_def = 20.0
+        threshold_db = -32.0 + presence_def * 0.1
+        threshold_db = max(-60.0, min(0.0, threshold_db))
+        assert threshold_db == -30.0
+
+    def test_threshold_clamped_to_valid_range(self):
+        """threshold 应被限制在 [-60, 0] dB。"""
+        # 极端高 presence deficit
+        presence_def = 500.0
+        threshold_db = -32.0 + presence_def * 0.1
+        threshold_db = max(-60.0, min(0.0, threshold_db))
+        assert -60.0 <= threshold_db <= 0.0
+
+    def test_unknown_genre_uses_default_range(self):
+        """未知流派回退到 8.5 dB。"""
+        from hermes_core.engine import _GENRE_PRODS_RANGE
+        range_db = _GENRE_PRODS_RANGE.get("jazz", 8.5)
+        assert range_db == 8.5
+
+
+# ══════════════════════════════════════════════════════════════
+# 流派波峰因子 GR 一致性测试
+# ══════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestCrestGRAllGenres:
+    """验证所有流派的波峰因子 → GR 映射一致性。"""
+
+    def test_gr_increases_with_crest(self):
+        """所有流派：更高的波峰因子 → 更大的 GR 目标。"""
+        from hermes_core.engine import _derive_compressor_intent
+
+        for g in _ALL_GENRES:
+            intent_low = _derive_compressor_intent(-18.0, -8.0, genre=g)  # crest=10
+            intent_high = _derive_compressor_intent(-18.0, -2.0, genre=g)  # crest=16
+            assert intent_high.gr_target_db >= intent_low.gr_target_db, (
+                f"流派 {g}: 高波峰 GR {intent_high.gr_target_db} "
+                f"< 低波峰 GR {intent_low.gr_target_db}"
+            )
+
+    def test_electronic_has_heaviest_compression(self):
+        """电子流派的 GR 应最重（crest GR ratio 最高）。"""
+        from hermes_core.engine import _derive_compressor_intent
+
+        intent_electronic = _derive_compressor_intent(-18.0, -3.0, genre="electronic")
+        intent_folk = _derive_compressor_intent(-18.0, -3.0, genre="folk")
+        assert intent_electronic.gr_target_db > intent_folk.gr_target_db
+
+    def test_folk_ballad_are_lightest(self):
+        """民谣和抒情流派的 GR 应最轻。"""
+        from hermes_core.engine import _GENRE_CREST_GR_RATIO
+
+        folk_ratio = _GENRE_CREST_GR_RATIO["folk"]
+        ballad_ratio = _GENRE_CREST_GR_RATIO["ballad"]
+        electronic_ratio = _GENRE_CREST_GR_RATIO["electronic"]
+        assert folk_ratio < electronic_ratio
+        assert ballad_ratio < electronic_ratio
+

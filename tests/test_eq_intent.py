@@ -32,6 +32,7 @@ def _make_report(**overrides) -> SpectrumReport:
         "resonances": [],
         "mud_ratio_db": -5.0,       # low_mid - mid = -25 - (-20) = -5
         "presence_deficit_db": 4.0,  # mid - presence = -20 - (-24) = 4
+        "sibilance_peak_hz": 6500.0,  # default sibilance peak in 4-12 kHz range
         "air_level_db": -35.0,
     }
     defaults.update(overrides)

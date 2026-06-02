@@ -535,6 +535,26 @@ class TestComputeBusCompressorParams:
         assert params["Thresh"] == pytest.approx(-3.3, abs=0.1)
         assert params["MakeUp"] == 1.2  # 2.5 × 0.5 = 1.25 → round to 1.2 (banker's)
 
+    def test_ballad(self):
+        from hermes_core.normalize import compute_bus_compressor_params
+        params = compute_bus_compressor_params(peak_db=-3.0, bpm=70, genre="ballad")
+        # Target GR=2.0 (与 folk 相同), attack=30ms → offset = 1.8/2.0 = 0.9
+        # thresh = -3.0 + 0.9 = -2.1
+        assert params["_target_gr"] == 2.0
+        assert params["Attack"] == 30.0
+        assert params["Thresh"] == pytest.approx(-2.1, abs=0.1)
+        assert params["MakeUp"] == 1.0  # 2.0 × 0.5
+
+    def test_rock(self):
+        from hermes_core.normalize import compute_bus_compressor_params
+        params = compute_bus_compressor_params(peak_db=-4.0, bpm=130, genre="rock")
+        # Target GR=3.0 (与 pop 相同), attack=30ms → offset = 1.8/3.0 = 0.6
+        # thresh = -4.0 + 0.6 = -3.4
+        assert params["_target_gr"] == 3.0
+        assert params["Attack"] == 30.0
+        assert params["Thresh"] == pytest.approx(-3.4, abs=0.1)
+        assert params["MakeUp"] == 1.5  # 3.0 × 0.5
+
     def test_unknown_genre_falls_back(self):
         from hermes_core.normalize import compute_bus_compressor_params
         params = compute_bus_compressor_params(peak_db=-3.0, genre="jazz")

@@ -5,7 +5,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from hermes_core.send import SendManager, _db_to_norm
+from hermes_core.send import SendManager
+from hermes_core.audio_utils import db_to_norm
 from hermes_core.track import TrackManager
 from hermes_core.bridge import ReaperBridge
 from tests.conftest import require_reaper, clean_project
@@ -25,16 +26,16 @@ def _mock_bridge(**api_overrides):
 @pytest.mark.unit
 class TestDbToNorm:
     def test_unity(self):
-        assert _db_to_norm(0.0) == pytest.approx(1.0)
+        assert db_to_norm(0.0) == pytest.approx(1.0)
 
     def test_minus_6_db(self):
-        assert _db_to_norm(-6.0) == pytest.approx(0.5, abs=0.01)
+        assert db_to_norm(-6.0) == pytest.approx(0.5, abs=0.01)
 
     def test_minus_infinity(self):
-        assert _db_to_norm(-150.0) == 0.0
+        assert db_to_norm(-150.0) == 0.0
 
     def test_plus_6_db(self):
-        assert _db_to_norm(6.0) == pytest.approx(2.0, abs=0.05)
+        assert db_to_norm(6.0) == pytest.approx(2.0, abs=0.05)
 
 
 @pytest.mark.unit

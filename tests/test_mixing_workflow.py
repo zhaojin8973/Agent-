@@ -17,8 +17,8 @@ from tests.conftest import require_reaper, clean_project, make_test_wav
 _STEM_DIR = "Hermes 测试/大湾区的梦 分轨/分轨"
 
 # Path to vocal mixing (贴唱混音) test audio files
-_VOCAL_FILE = "Hermes 测试/望归 贴唱/望归 Vocal.wav"
-_BACKING_FILE = "Hermes 测试/望归 贴唱/望归 伴奏.wav"
+_VOCAL_FILE = "Hermes 测试/望归 贴唱/望归 Vocal（测试）.wav"
+_BACKING_FILE = "Hermes 测试/望归 贴唱/望归 伴奏（测试）.wav"
 
 # Third-party plugin names (substring-matched by TrackFX_AddByName)
 _EQ_PLUGIN = "FabFilter Pro-Q 3"
@@ -38,6 +38,8 @@ class TestMixingWorkflow:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
+
+        eng.allow_track_deletion()
 
         eng.create_project(name="TestMixingWorkflow", output_dir="/tmp/hermes_test", sample_rate=48000)
 
@@ -66,6 +68,7 @@ class TestMixingWorkflow:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
+        eng.allow_track_deletion()
         eng.create_project(name="TestMixingWorkflow", output_dir="/tmp/hermes_test")
 
         stems = [_STEM_DIR + "/Drum Kick.wav", _STEM_DIR + "/Bass.wav"]
@@ -85,6 +88,7 @@ class TestMixingWorkflow:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
+        eng.allow_track_deletion()
         eng.create_project(name="TestMixingWorkflow", output_dir="/tmp/hermes_test")
 
         stems = [_STEM_DIR + "/Drum Kick.wav", _STEM_DIR + "/Drum Snare.wav"]
@@ -109,6 +113,7 @@ class TestMixingWorkflow:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
+        eng.allow_track_deletion()
         eng.create_project(name="TestMixingWorkflow", output_dir="/tmp/hermes_test")
 
         stems = [_STEM_DIR + "/Drum Kick.wav", _STEM_DIR + "/Drum Snare.wav"]
@@ -136,6 +141,7 @@ class TestMixingWorkflow:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
+        eng.allow_track_deletion()
         eng.create_project(name="TestMixingWorkflow", output_dir="/tmp/hermes_test", sample_rate=48000)
 
         stems = [_STEM_DIR + "/Drum Kick.wav", _STEM_DIR + "/Bass.wav"]
@@ -164,6 +170,7 @@ class TestMixingWorkflow:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
+        eng.allow_track_deletion()
         eng.create_project(name="TestMixingWorkflow", output_dir="/tmp/hermes_test")
 
         stems = [_STEM_DIR + "/Drum Kick.wav"]
@@ -186,6 +193,7 @@ class TestMixingWorkflow:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
+        eng.allow_track_deletion()
         eng.create_project(name="TestMixingWorkflow", output_dir="/tmp/hermes_test", sample_rate=48000)
 
         stems = [_STEM_DIR + "/Drum Kick.wav"]
@@ -209,6 +217,7 @@ class TestMixingWorkflow:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
+        eng.allow_track_deletion()
 
         # 1. Create project
         eng.create_project(name="TestMixingWorkflow", output_dir="/tmp/hermes_test", sample_rate=48000)
@@ -274,6 +283,7 @@ class TestVocalMixing:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
+        eng.allow_track_deletion()
 
         info = eng.create_project(
             name="TestVocalMixing", output_dir="/tmp/hermes_vocal_test",
@@ -307,6 +317,7 @@ class TestVocalMixing:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
+        eng.allow_track_deletion()
         eng.create_project(
             name="TestVocalMixing", output_dir="/tmp/hermes_vocal_test",
             sample_rate=48000,
@@ -348,6 +359,7 @@ class TestVocalMixing:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
+        eng.allow_track_deletion()
         eng.create_project(
             name="TestPostFxBalance", output_dir="/tmp/hermes_balance_test",
             sample_rate=48000,
@@ -382,6 +394,7 @@ class TestVocalMixing:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
+        eng.allow_track_deletion()
         eng.create_project(
             name="TestVocalMixing", output_dir="/tmp/hermes_vocal_test",
             sample_rate=48000,
@@ -411,6 +424,7 @@ class TestVocalMixing:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
+        eng.allow_track_deletion()
         eng.create_project(
             name="TestVocalMixing", output_dir="/tmp/hermes_vocal_test",
             sample_rate=48000,
@@ -451,6 +465,7 @@ class TestVocalMixing:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
+        eng.allow_track_deletion()
         eng.create_project(
             name="TestVocalMixing", output_dir="/tmp/hermes_vocal_test",
             sample_rate=48000,
@@ -485,6 +500,7 @@ class TestVocalMixing:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
+        eng.allow_track_deletion()
         eng.create_project(
             name="TestVocalMixing", output_dir="/tmp/hermes_vocal_test",
             sample_rate=48000,
@@ -523,6 +539,7 @@ class TestVocalMixing:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
+        eng.allow_track_deletion()
         eng.create_project(
             name="TestVocalMixing", output_dir="/tmp/hermes_vocal_test",
             sample_rate=48000,
@@ -554,6 +571,7 @@ class TestVocalMixing:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
+        eng.allow_track_deletion()
 
         # 1. Create project
         eng.create_project(
@@ -619,6 +637,7 @@ class TestProductionGapsFeatures:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
+        eng.allow_track_deletion()
         eng.create_project("PreflightTest", "/tmp/hermes_test")
         missing = eng.preflight_plugins(["ReaEQ", "ReaComp"])
         assert missing == [], f"Expected all built-in FX found, missing: {missing}"
@@ -628,6 +647,7 @@ class TestProductionGapsFeatures:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
+        eng.allow_track_deletion()
         eng.create_project("PreflightTest", "/tmp/hermes_test")
         missing = eng.preflight_plugins(["DefinitelyNotARealPlugin_XYZ_123"])
         assert len(missing) == 1
@@ -638,6 +658,7 @@ class TestProductionGapsFeatures:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
+        eng.allow_track_deletion()
         eng.create_project("ProgressTest", "/tmp/hermes_test", sample_rate=48000)
         eng.import_stems([_STEM_DIR + "/Drum Kick.wav"])
 
@@ -658,6 +679,7 @@ class TestProductionGapsFeatures:
         require_reaper()
         eng = MixingEngine()
         eng._bridge.connect()
+        eng.allow_track_deletion()
         eng.create_project("ResetTest", "/tmp/hermes_test", sample_rate=48000)
         eng.import_stems([_STEM_DIR + "/Drum Kick.wav"])
 

@@ -239,15 +239,15 @@ class TestGetItemPosition:
 @pytest.mark.unit
 class TestDbConversion:
     def test_round_trip(self):
-        mgr = TrackManager(_mock_bridge())
+        from hermes_core.audio_utils import db_to_norm, norm_to_db
         for db in [-12, -6, -3, 0, 3, 6]:
-            norm = mgr._db_to_norm(db)
-            back = mgr._norm_to_db(norm)
+            norm = db_to_norm(db)
+            back = norm_to_db(norm)
             assert back == pytest.approx(db, abs=0.01)
 
     def test_norm_to_db_handles_zero(self):
-        mgr = TrackManager(_mock_bridge())
-        assert mgr._norm_to_db(0.0) == -150.0
+        from hermes_core.audio_utils import norm_to_db
+        assert norm_to_db(0.0) == -150.0
 
 
 # ══════════════════════════════════════════════════════════════
