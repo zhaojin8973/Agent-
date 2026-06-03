@@ -367,26 +367,26 @@ _GENRE_RETURN_EQ: dict[str, dict[str, dict[str, float]]] = {
 
 # Bus type → REAPER plugin name (substring-matched by TrackFX_AddByName).
 # Each bus maps to the user's preferred plugin for that role.
-_SPATIAL_PLUGIN: dict[str, str] = {
-    "plate":        "SuperPlate",       # Soundtoys（首选板混响）
-    "hall":         "LX480",            # Relab（Lexicon 480L 大厅）
-    "room":         "ValhallaRoom",     # Valhalla（近场房间）
-    "delay_slap":   "EchoBoy",          # Soundtoys（Slapback 延迟）
-    "delay_rhythm": "EchoBoy",          # Soundtoys（节奏延迟）
+_SPATIAL_PLUGIN: dict[str, list[str]] = {
+    "plate":   ["Little Plate", "ValhallaPlate"],        # Soundtoys → Valhalla
+    "hall":    ["LX480", "ValhallaVintageVerb"],         # Relab → Valhalla
+    "room":    ["ValhallaRoom", "FabFilter Pro-R"],      # Valhalla → FabFilter
+    "slap":    ["EchoBoy", "ValhallaDelay"],             # Soundtoys → Valhalla
+    "rhythm":  ["EchoBoy", "ValhallaDelay"],             # Soundtoys → Valhalla
 }
 
 # 返回轨名称（中文，REAPER 中可读）
 _SPATIAL_BUS_NAMES: dict[str, str] = {
-    "plate":        "Plate Verb",
-    "hall":         "Hall Verb",
-    "room":         "Room Verb",
-    "delay_slap":   "Slap Delay",
-    "delay_rhythm": "Rhythm Delay",
+    "plate":   "Plate Verb",
+    "hall":    "Hall Verb",
+    "room":    "Room Verb",
+    "slap":    "Slap Delay",
+    "rhythm":  "Rhythm Delay",
 }
 
 # Reverb bus types (for EQ routing).
 _REVERB_BUS_TYPES = frozenset({"plate", "hall", "room"})
-_DELAY_BUS_TYPES = frozenset({"delay_slap", "delay_rhythm"})
+_DELAY_BUS_TYPES = frozenset({"slap", "rhythm"})
 
 
 _CLA76_ATTACK_KNOB_MIN: float = 1.0
@@ -2688,7 +2688,7 @@ class MixingEngine:
         result: dict[str, dict] = {}
 
         # Order matters: create reverbs first, then delays.
-        bus_order = ["plate", "hall", "room", "delay_slap", "delay_rhythm"]
+        bus_order = ["plate", "hall", "room", "slap", "rhythm"]
 
         for bus in bus_order:
             send_key = f"delay_{bus}" if bus in _DELAY_BUS_TYPES else f"reverb_{bus}"
@@ -2699,8 +2699,8 @@ class MixingEngine:
                 continue
 
             bus_name = _SPATIAL_BUS_NAMES.get(bus, f"{bus} Return")
-            plugin_name = _SPATIAL_PLUGIN.get(bus)
-            if not plugin_name:
+            plugin_names = _SPATIAL_PLUGIN.get(bus, [])
+            if not plugin_names:
                 log.warning("build_spatial_chain: no plugin mapped for bus=%s", bus)
                 continue
 
@@ -2712,8 +2712,19 @@ class MixingEngine:
             if eq_idx >= 0:
                 self._apply_return_eq(aux_idx, eq_idx, bus, genre)
 
-            # 3. Spatial plugin (reverb or delay)
-            fx_idx = self._fx.add(aux_idx, plugin_name)
+            # 3. Spatial plugin — try each candidate until one loads
+            fx_idx = -1
+            loaded_name = ""
+            for candidate in plugin_names:
+                fx_idx = self._fx.add(aux_idx, candidate)
+                if fx_idx >= 0:
+                    loaded_name = candidate
+                    break
+            if fx_idx < 0:
+                log.warning(
+                    "build_spatial_chain: failed to load any plugin for "
+                    "bus=%s (tried %s)", bus, plugin_names,
+                )
 
             # 4. Create send from vocal track
             send_info = self._send.create(
@@ -2730,7 +2741,7 @@ class MixingEngine:
 
             log.info(
                 "Spatial chain: %s → aux %d [%s + %s], send=%.1f dB (genre=%s)",
-                bus_name, aux_idx, "Pro-Q 3", plugin_name, level_db, genre,
+                bus_name, aux_idx, "Pro-Q 3", loaded_name or "?", level_db, genre,
             )
 
         return result

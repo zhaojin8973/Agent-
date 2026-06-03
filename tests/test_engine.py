@@ -2027,7 +2027,7 @@ class TestBuildSpatialChainLogic:
     def test_spatial_plugin_mapping_complete(self):
         """每种总线类型都有对应的插件和名称。"""
         from hermes_core.engine import _SPATIAL_PLUGIN, _SPATIAL_BUS_NAMES
-        expected = {"plate", "hall", "room", "delay_slap", "delay_rhythm"}
+        expected = {"plate", "hall", "room", "slap", "rhythm"}
         assert set(_SPATIAL_PLUGIN.keys()) == expected
         assert set(_SPATIAL_BUS_NAMES.keys()) == expected
 
