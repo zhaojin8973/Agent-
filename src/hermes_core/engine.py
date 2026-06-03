@@ -21,6 +21,9 @@ from hermes_core.send import SendManager
 from hermes_core.render import RenderManager
 from hermes_core.signal import SignalAnalyzer
 from hermes_core.exceptions import ConnectionError as HermesConnectionError
+from hermes_core.project_meta import (
+    ProjectMeta, ProjectIndex, make_project_path,
+)
 from hermes_core.loudness_optimizer import (
     find_optimal_gain,
     verify_output,
@@ -1261,6 +1264,8 @@ class MixingEngine:
         self._render = RenderManager(self._bridge)
         self._watchdog_enabled = watchdog
         self._project_path: str | None = None
+        self._meta: ProjectMeta | None = None  # 工程元数据
+        self._meta_dir: str | None = None      # 工程文件夹路径
         self._snapshot_project_path: str | None = None  # from GetProjectPath at init
         self._snapshot_project_name: str | None = None  # from GetProjectName at init
         # Idempotency guards — prevent double-execution of destructive ops.
@@ -1821,12 +1826,27 @@ class MixingEngine:
 
         return target, conflict
 
-    def create_project(self, name: str, output_dir: str,
-                       sample_rate: int = 48000) -> dict:
-        """Create a named project and save it to *output_dir* without dialogs.
+    def create_project(self, name: str, output_dir: str = "",
+                       sample_rate: int = 48000, *,
+                       category: str = "", producer: str = "",
+                       genre: str = "pop") -> dict:
+        """Create a named project and save it without dialogs.
 
-        Returns ``{name, path, sample_rate, track_count, conflict_renamed}``.
+        If *output_dir* is empty, the project is placed under the configured
+        project root (``~/REAPER 工程文件/`` by default), organised as::
+
+            {project_root}/{category}/{name}/
+
+        A ``.hermes_meta.json`` is created automatically and the global
+        ``.hermes_index.json`` is updated.
+
+        Returns ``{name, path, sample_rate, track_count, conflict_renamed,
+        meta_dir}``.
         """
+        if not output_dir:
+            output_dir = str(make_project_path(name, category))
+        self._meta_dir = output_dir
+        os.makedirs(output_dir, exist_ok=True)
         safe_path, conflict_renamed = self._safe_project_path(output_dir, name)
 
         api = self._bridge.api
@@ -1903,9 +1923,27 @@ class MixingEngine:
         # Fresh project — clear all idempotency guards.
         self.reset()
 
+        # ── 创建工程元数据 ────────────────────────────────────
+        self._meta = ProjectMeta(
+            name=name, category=category, producer=producer or None,
+            genre=genre,
+        )
+        self._meta.save(output_dir)
+        # 更新全局索引
+        try:
+            cfg = HermesConfig.load()
+            idx = ProjectIndex.load(cfg.project_root_expanded)
+            idx.add_or_update(
+                str(Path(output_dir).relative_to(cfg.project_root_expanded)),
+                self._meta, root_dir=cfg.project_root_expanded,
+            )
+        except Exception as exc:
+            log.debug("Failed to update project index: %s", exc)
+
         return {
             "name": name,
             "path": safe_path,
+            "meta_dir": output_dir,
             "sample_rate": sample_rate,
             "track_count": 0,
             "conflict_renamed": conflict_renamed,
@@ -1929,17 +1967,61 @@ class MixingEngine:
             return tmp_path
         return target_path
 
-    def save_project(self) -> dict:
-        """Silently save to the current project path via ``Main_SaveProjectEx``.
+    # ── 元数据同步 ───────────────────────────────────────────
 
-        Raises ``RuntimeError`` when no project path has been established
-        (i.e. ``create_project`` was never called).
+    def _sync_meta(self) -> None:
+        """将当前工程状态同步到 ``self._meta``。
+
+        在 save_project() 前自动调用，确保元数据始终是最新的。
+        """
+        if self._meta is None:
+            return
+        # 轨道信息
+        try:
+            tracks = self.list_tracks()
+            self._meta.track_count = len(tracks)
+            vocal_track = None
+            for t in tracks:
+                chain = self.get_fx_chain(t.index)
+                fx_names = [fx["name"] for fx in chain] if chain else []
+                if t.index == 0:
+                    self._meta.vocal_fx = fx_names
+                    vocal_track = t
+                elif t.index == 1 and fx_names:
+                    self._meta.backing_fx = fx_names
+        except Exception as exc:
+            log.debug("_sync_meta: failed to read tracks — %s", exc)
+
+        # 空间总线信息
+        if hasattr(self, "_reverb_send_node") and self._reverb_send_node:
+            try:
+                self._meta.spatial_buses = {
+                    "reverb": {
+                        "level_db": self._reverb_send_node.params.get("level_db"),
+                        "aux_index": self._reverb_send_node.params.get("aux_index"),
+                    }
+                }
+            except Exception:
+                pass
+
+    def save_project(self) -> dict:
+        """保存工程并同步元数据。
+
+        在保存 ``.rpp`` 之前自动调用 :meth:`_sync_meta` 刷新状态快照，
+        然后将 ``.hermes_meta.json`` 一并写入工程目录。
         """
         if not self._project_path:
             raise RuntimeError(
                 "No project path — call create_project(name, output_dir) first"
             )
+        self._sync_meta()
         actual = self._safe_save(self._project_path)
+        # 同步元数据到磁盘
+        if self._meta and self._meta_dir:
+            try:
+                self._meta.save(self._meta_dir)
+            except Exception as exc:
+                log.debug("Failed to save meta: %s", exc)
         return {"path": actual, "saved_at": datetime.now().isoformat()}
 
     def save_checkpoint(self, label: str = "") -> dict:
@@ -1958,6 +2040,13 @@ class MixingEngine:
         checkpoint_path = f"{base}_checkpoint{suffix}.rpp"
 
         actual = self._safe_save(checkpoint_path)
+        # 记录 checkpoint 到元数据
+        if self._meta:
+            self._meta.checkpoints.append({
+                "label": label or ts,
+                "path": os.path.basename(actual),
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+            })
         return {"checkpoint_path": actual, "main_path": self._project_path}
 
     def get_project_info(self) -> dict:
