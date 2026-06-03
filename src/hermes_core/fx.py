@@ -251,11 +251,23 @@ class FxManager:
             )
             return True
 
-        # Regular tracks: use reapy
-        track = self._track(track_index)
-        if track is None or fx_index < 0 or fx_index >= len(track.fxs):
+        # Regular tracks: use raw RPR API (same as master track)
+        # Avoids reapy dependency — reapy server can crash inside REAPER.
+        track = self._get_track_ptr(track_index)
+        if track is None:
             return False
-        track.fxs[fx_index].params[param] = normalized
+        cache_key = (track_index, fx_index)
+        if cache_key not in self._param_cache:
+            self._param_cache[cache_key] = {}
+        param_idx = _resolve_param_index(
+            self._bridge.api, track, fx_index, param,
+            cache=self._param_cache[cache_key],
+        )
+        if param_idx < 0:
+            return False
+        self._bridge.api.TrackFX_SetParam(
+            track, fx_index, param_idx, normalized,
+        )
         return True
 
     def get_param(
