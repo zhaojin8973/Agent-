@@ -202,6 +202,121 @@ _GENRE_CLA76_ATTACK_K: dict[str, float] = {
     "folk":                    0.05,
     "ballad":                  0.05,
 }
+
+# ── 空间效果器发送量基准 ─────────────────────────────────────
+
+# Reverb send level base per genre (dB, post-fader send).
+# Values are confirmed mid-range from professional mixing practice.
+# Sparse genres: lower sends (natural, intimate).
+# Dense genres: higher sends (bigger space, more competitive).
+_GENRE_REVERB_SEND_BASE: dict[str, dict[str, float]] = {
+    "folk":                    {"plate": -18.0, "hall": -20.0, "room": -14.0},
+    "ballad":                  {"plate": -14.0, "hall": -16.0, "room": -12.0},
+    "pop":                     {"plate": -12.0, "hall": -14.0, "room": -16.0},
+    "rock":                    {"plate": -16.0, "hall": -14.0, "room": -14.0},
+    "electronic":              {"plate": -10.0, "hall": -10.0, "room": -18.0},
+    "chinese_folk_bel_canto":  {"plate": -14.0, "hall": -14.0, "room": -12.0},
+}
+
+# Delay send level base per genre (dB).  -99.0 = disabled for this genre.
+_GENRE_DELAY_SEND_BASE: dict[str, dict[str, float]] = {
+    "folk":                    {"slap": -99.0, "rhythm": -99.0},
+    "ballad":                  {"slap": -20.0, "rhythm": -22.0},
+    "pop":                     {"slap": -14.0, "rhythm": -16.0},
+    "rock":                    {"slap": -12.0, "rhythm": -18.0},
+    "electronic":              {"slap": -10.0, "rhythm": -12.0},
+    "chinese_folk_bel_canto":  {"slap": -18.0, "rhythm": -20.0},
+}
+
+# Send level range (dB).  Outside these bounds is impractical.
+_SEND_LEVEL_MIN: float = -24.0
+_SEND_LEVEL_MAX: float = -6.0
+_SEND_DISABLED_THRESHOLD: float = -90.0  # below this = bus not created
+
+# Crest factor reference point (dB).  Vocals with crest ≈ 12 dB are
+# "normally dynamic" — no adjustment applied.
+_CREST_REFERENCE: float = 12.0
+# Presence deficit threshold (dB).  Below 2 dB deficit is normal;
+# above that the vocal sounds dull → reduce sends so reverb doesn't
+# push it further back.
+_PRESENCE_DEFICIT_THRESHOLD: float = 2.0
+# Sibilance reference peak (dBFS).  Peaks above this trigger a
+# plate-send reduction because plates resonate in the 5–8 kHz range.
+_SIBILANCE_REFERENCE_PEAK: float = -32.0
+
+# Section boost amounts (dB) — added to all send buses.
+_SECTION_BOOST: dict[str, float] = {
+    "verse":  0.0,
+    "chorus": 2.0,
+    "bridge": 3.0,
+}
+
+
+def _compute_spatial_sends(
+    genre: str,
+    crest_factor_db: float,
+    presence_deficit_db: float,
+    mud_ratio_db: float,
+    sibilance_peak_db: float | None = None,
+    section: str = "verse",
+) -> dict[str, float | None]:
+    """Compute reverb and delay send levels from vocal signal analysis.
+
+    Each send is derived from a genre-reference base, then adjusted by
+    four objective biases:
+
+    - **crest_bias**: high-crest vocals already sound "big" — dial back
+      reverb so it doesn't wash out the dynamics.
+    - **density_bias**: muddy vocals get less reverb to avoid piling
+      low-mid energy onto the mud.
+    - **presence_bias**: a dull vocal (high presence deficit) should
+      stay forward — reverb would push it back.
+    - **sibilance_bias** (plate only): plate reverbs resonate at
+      5–8 kHz, so bright sibilant vocals get less plate send.
+
+    Returns a dict mapping bus keys to send levels in dB.
+    ``None`` means the bus is disabled for this genre (no need to
+    create it).
+    """
+    _DEFAULT_REVERB = _GENRE_REVERB_SEND_BASE["pop"]
+    _DEFAULT_DELAY = _GENRE_DELAY_SEND_BASE["pop"]
+
+    base_reverb = _GENRE_REVERB_SEND_BASE.get(genre, _DEFAULT_REVERB)
+    base_delay = _GENRE_DELAY_SEND_BASE.get(genre, _DEFAULT_DELAY)
+
+    # ── Bias computations ──────────────────────────────────────
+    crest_bias = -(crest_factor_db - _CREST_REFERENCE) * 0.5
+    density_bias = mud_ratio_db * 0.3
+    presence_bias = -(presence_deficit_db - _PRESENCE_DEFICIT_THRESHOLD) * 0.3
+    section_bias = _SECTION_BOOST.get(section, 0.0)
+
+    sibilance_bias = 0.0
+    if sibilance_peak_db is not None:
+        sibilance_bias = -max(0.0, sibilance_peak_db - _SIBILANCE_REFERENCE_PEAK) * 0.1
+
+    # ── Assemble sends ─────────────────────────────────────────
+    sends: dict[str, float | None] = {}
+
+    for bus_type, base_db in base_reverb.items():
+        bias = crest_bias + density_bias + presence_bias + section_bias
+        if bus_type == "plate":
+            bias += sibilance_bias
+        sends[f"reverb_{bus_type}"] = round(
+            max(_SEND_LEVEL_MIN, min(_SEND_LEVEL_MAX, base_db + bias)), 1,
+        )
+
+    for bus_type, base_db in base_delay.items():
+        if base_db <= _SEND_DISABLED_THRESHOLD:
+            sends[f"delay_{bus_type}"] = None
+        else:
+            bias = crest_bias + presence_bias + section_bias
+            sends[f"delay_{bus_type}"] = round(
+                max(_SEND_LEVEL_MIN, min(_SEND_LEVEL_MAX, base_db + bias)), 1,
+            )
+
+    return sends
+
+
 _CLA76_ATTACK_KNOB_MIN: float = 1.0
 _CLA76_ATTACK_KNOB_MAX: float = 6.5
 
@@ -1501,6 +1616,7 @@ class MixingEngine:
                     "presence_deficit": report.presence_deficit_db,
                     "air_level_db": report.air_level_db,
                     "sibilance_peak_hz": report.sibilance_peak_hz,
+                    "mud_ratio": report.mud_ratio_db,
                 }
                 log.info(
                     "Spectrum analysis: tilt=%.1f dB/oct, mud=%.1f dB, "
@@ -2237,6 +2353,27 @@ class MixingEngine:
         # ── Build reverb wet cache for preview mode ──
         reverb_wet_path = self._cache_reverb_wet(tmp)
 
+        # ── Compute spatial send levels ────────────────────────
+        # Uses signal analysis already collected during
+        # prepare_stems (crest factor) and _build_audio_chain
+        # (spectrum data) to derive genre-aware reverb/delay
+        # send levels.  The sends are not created here — only
+        # computed and returned for downstream use.
+        vocal_stem = self._stems_cache[0] if self._stems_cache else {}
+        crest_db = (
+            vocal_stem.get("raw_peak_db", -3.0)
+            - vocal_stem.get("raw_rms_db", -18.0)
+        )
+        spectrum = getattr(self, "_last_spectrum", {}) or {}
+        spatial_sends = _compute_spatial_sends(
+            genre=genre,
+            crest_factor_db=crest_db,
+            presence_deficit_db=spectrum.get("presence_deficit", 2.0),
+            mud_ratio_db=spectrum.get("mud_ratio", -3.0),
+            sibilance_peak_db=spectrum.get("sibilance_peak_hz"),
+            section="verse",
+        )
+
         return {
             **balance_info,
             "vocal_lufs": vocal_lufs,
@@ -2246,6 +2383,7 @@ class MixingEngine:
             "peak_atten_db": atten_db,
             "reverb_wet_cache": reverb_wet_path,
             "stems": stems,
+            "spatial_sends": spatial_sends,
         }
 
     def apply_bus_compressor(

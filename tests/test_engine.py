@@ -1819,3 +1819,169 @@ class TestCrestGRAllGenres:
         assert folk_ratio < electronic_ratio
         assert ballad_ratio < electronic_ratio
 
+
+# ════════════════════════════════════════════════════════════════
+# 空间效果器发送量计算测试
+# ════════════════════════════════════════════════════════════════
+
+_ALL_GENRES_SPATIAL = [
+    "folk", "ballad", "pop", "rock", "electronic", "chinese_folk_bel_canto",
+]
+
+
+@pytest.mark.unit
+class TestSpatialSendComputation:
+    """验证 _compute_spatial_sends 在所有流派下输出合理值。"""
+
+    # ── 表完整性 ──────────────────────────────────────────
+
+    def test_all_genres_in_reverb_table(self):
+        """6 个流派在 _GENRE_REVERB_SEND_BASE 中都有条目。"""
+        from hermes_core.engine import _GENRE_REVERB_SEND_BASE
+        for g in _ALL_GENRES_SPATIAL:
+            assert g in _GENRE_REVERB_SEND_BASE, f"流派 {g} 缺失于 _GENRE_REVERB_SEND_BASE"
+            entry = _GENRE_REVERB_SEND_BASE[g]
+            for bus in ("plate", "hall", "room"):
+                assert bus in entry, f"流派 {g} 缺少 {bus} 混响"
+
+    def test_all_genres_in_delay_table(self):
+        """6 个流派在 _GENRE_DELAY_SEND_BASE 中都有条目。"""
+        from hermes_core.engine import _GENRE_DELAY_SEND_BASE
+        for g in _ALL_GENRES_SPATIAL:
+            assert g in _GENRE_DELAY_SEND_BASE, f"流派 {g} 缺失于 _GENRE_DELAY_SEND_BASE"
+            entry = _GENRE_DELAY_SEND_BASE[g]
+            for bus in ("slap", "rhythm"):
+                assert bus in entry, f"流派 {g} 缺少 {bus} 延迟"
+
+    # ── 延迟开关 ──────────────────────────────────────────
+
+    def test_folk_delays_disabled(self):
+        """民谣流派不使用延迟。"""
+        from hermes_core.engine import _compute_spatial_sends
+        sends = _compute_spatial_sends("folk", 12.0, 2.0, -3.0)
+        assert sends["delay_slap"] is None
+        assert sends["delay_rhythm"] is None
+
+    def test_pop_delays_enabled(self):
+        """流行流派使用所有延迟。"""
+        from hermes_core.engine import _compute_spatial_sends
+        sends = _compute_spatial_sends("pop", 12.0, 2.0, -3.0)
+        assert sends["delay_slap"] is not None
+        assert sends["delay_rhythm"] is not None
+
+    # ── 修正项验证 ────────────────────────────────────────
+
+    def test_high_crest_reduces_send(self):
+        """高波峰因子 → 更低发送量（人声动态已"大"）。"""
+        from hermes_core.engine import _compute_spatial_sends
+        sends_low = _compute_spatial_sends("pop", 8.0, 2.0, -3.0)
+        sends_high = _compute_spatial_sends("pop", 18.0, 2.0, -3.0)
+        assert sends_high["reverb_plate"] < sends_low["reverb_plate"]
+
+    def test_muddy_vocal_reduces_send(self):
+        """浑浊人声 → 更低发送量（避免叠加低频）。"""
+        from hermes_core.engine import _compute_spatial_sends
+        sends_clean = _compute_spatial_sends("pop", 12.0, 2.0, -5.0)
+        sends_muddy = _compute_spatial_sends("pop", 12.0, 2.0, 5.0)
+        assert sends_muddy["reverb_hall"] > sends_clean["reverb_hall"]
+
+    def test_presence_deficit_reduces_send(self):
+        """存在感缺失 → 更低发送量（混响会推远人声）。"""
+        from hermes_core.engine import _compute_spatial_sends
+        sends_normal = _compute_spatial_sends("pop", 12.0, 2.0, -3.0)
+        sends_dull = _compute_spatial_sends("pop", 12.0, 8.0, -3.0)
+        assert sends_dull["reverb_room"] < sends_normal["reverb_room"]
+
+    def test_sibilance_affects_plate_only(self):
+        """齿音修正仅影响 Plate，不影响 Hall/Room/Delay。"""
+        from hermes_core.engine import _compute_spatial_sends
+        sends_no_sib = _compute_spatial_sends("pop", 12.0, 2.0, -3.0, sibilance_peak_db=None)
+        sends_sib = _compute_spatial_sends("pop", 12.0, 2.0, -3.0, sibilance_peak_db=-20.0)
+        # Plate 应降低
+        assert sends_sib["reverb_plate"] < sends_no_sib["reverb_plate"]
+        # Hall / Room / Delay 不应变
+        assert sends_sib["reverb_hall"] == sends_no_sib["reverb_hall"]
+        assert sends_sib["reverb_room"] == sends_no_sib["reverb_room"]
+        assert sends_sib["delay_slap"] == sends_no_sib["delay_slap"]
+
+    def test_section_chorus_higher_than_verse(self):
+        """副歌发送量高于主歌。"""
+        from hermes_core.engine import _compute_spatial_sends
+        sends_verse = _compute_spatial_sends("pop", 12.0, 2.0, -3.0, section="verse")
+        sends_chorus = _compute_spatial_sends("pop", 12.0, 2.0, -3.0, section="chorus")
+        assert sends_chorus["reverb_plate"] > sends_verse["reverb_plate"]
+        assert sends_chorus["delay_rhythm"] > sends_verse["delay_rhythm"]
+
+    # ── 范围限制 ──────────────────────────────────────────
+
+    def test_output_clamped_to_valid_range(self):
+        """所有发送量应在 [-24, -6] dB 范围内。"""
+        from hermes_core.engine import _compute_spatial_sends
+        # 极端场景：强压缩人声（低波峰）、干净频谱、副歌
+        sends = _compute_spatial_sends(
+            "electronic", crest_factor_db=6.0,
+            presence_deficit_db=0.0, mud_ratio_db=-8.0,
+            section="bridge",
+        )
+        for key, val in sends.items():
+            if val is not None:
+                assert -24.0 <= val <= -6.0, (
+                    f"{key}={val} 超出 [-24, -6] 范围"
+                )
+
+    def test_all_genres_produce_valid_range(self):
+        """所有流派在标准条件下输出都在有效范围。"""
+        from hermes_core.engine import _compute_spatial_sends
+        for g in _ALL_GENRES_SPATIAL:
+            sends = _compute_spatial_sends(g, 12.0, 2.0, -3.0)
+            for key, val in sends.items():
+                if val is not None:
+                    assert -24.0 <= val <= -6.0, (
+                        f"流派 {g}: {key}={val} 超出 [-24, -6]"
+                    )
+
+    # ── 回退 ──────────────────────────────────────────────
+
+    def test_unknown_genre_falls_back_to_pop(self):
+        """未知流派回退到 pop 默认值。"""
+        from hermes_core.engine import _compute_spatial_sends
+        sends_unknown = _compute_spatial_sends("jazz", 12.0, 2.0, -3.0)
+        sends_pop = _compute_spatial_sends("pop", 12.0, 2.0, -3.0)
+        for key in sends_pop:
+            assert sends_unknown[key] == sends_pop[key], (
+                f"未知流派 {key}={sends_unknown[key]} ≠ pop {key}={sends_pop[key]}"
+            )
+
+    # ── 端到端 ────────────────────────────────────────────
+
+    def test_compute_end_to_end_pop_typical(self):
+        """典型流行人声端到端计算验证。"""
+        from hermes_core.engine import _compute_spatial_sends
+        sends = _compute_spatial_sends(
+            "pop", crest_factor_db=14.0, presence_deficit_db=3.0,
+            mud_ratio_db=-3.0, sibilance_peak_db=-28.0, section="verse",
+        )
+        # 主歌基准 + 中度修正 = 比基准低 2-3 dB
+        assert sends["reverb_plate"] == pytest.approx(-14.6, abs=0.3)
+        assert sends["reverb_hall"] == pytest.approx(-16.2, abs=0.3)
+        assert sends["reverb_room"] == pytest.approx(-18.2, abs=0.3)
+        assert sends["delay_slap"] == pytest.approx(-15.3, abs=0.3)
+        assert sends["delay_rhythm"] == pytest.approx(-17.3, abs=0.3)
+
+    def test_ballad_wetter_than_folk(self):
+        """抒情流派发送量比民谣更湿润。"""
+        from hermes_core.engine import _compute_spatial_sends
+        sends_folk = _compute_spatial_sends(
+            "folk", crest_factor_db=14.0, presence_deficit_db=2.0,
+            mud_ratio_db=-3.0, section="verse",
+        )
+        sends_ballad = _compute_spatial_sends(
+            "ballad", crest_factor_db=14.0, presence_deficit_db=2.0,
+            mud_ratio_db=-3.0, section="verse",
+        )
+        # Ballad 所有混响发送量应高于 folk（相同条件下）
+        for bus in ("reverb_plate", "reverb_hall", "reverb_room"):
+            assert sends_ballad[bus] > sends_folk[bus], (
+                f"Ballad {bus}={sends_ballad[bus]} 应 > Folk {bus}={sends_folk[bus]}"
+            )
+
