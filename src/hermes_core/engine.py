@@ -1482,6 +1482,8 @@ class MixingEngine:
                 log.info("SendNode attached: %s observes %s",
                          self._reverb_send_node.name, last_vocal.name)
 
+        self._mark_stage("apply_profile")
+
     def _build_audio_chain(
         self, track_index: int, fx_list: list,
         stem_data: dict, stem_idx: int,
@@ -1967,6 +1969,13 @@ class MixingEngine:
             return tmp_path
         return target_path
 
+    # ── 管线阶段追踪 ────────────────────────────────────────
+
+    def _mark_stage(self, stage: str) -> None:
+        """标记管线阶段为已完成（如果 meta 存在）。"""
+        if self._meta is not None:
+            self._meta.mark_stage(stage)
+
     # ── 元数据同步 ───────────────────────────────────────────
 
     def _sync_meta(self) -> None:
@@ -2163,6 +2172,7 @@ class MixingEngine:
         result = self._undo_block("Prepare Stems", _do_prepare)
         self._stems_gain_staged = True
         self._stems_cache = result.get("stems", [])
+        self._mark_stage("prepare_stems")
         return result
 
     def _prepare_stems_impl(
@@ -2535,6 +2545,7 @@ class MixingEngine:
             section="verse",
         )
 
+        self._mark_stage("post_fx_balance")
         return {
             **balance_info,
             "vocal_lufs": vocal_lufs,
@@ -2623,6 +2634,7 @@ class MixingEngine:
             target_gr_db,
         )
 
+        self._mark_stage("apply_bus_compressor")
         return {
             "peak_db": peak_db,
             "thresh_db": physical["Thresh"],
@@ -2833,6 +2845,7 @@ class MixingEngine:
                 bus_name, aux_idx, "Pro-Q 3", loaded_name or "?", level_db, genre,
             )
 
+        self._mark_stage("build_spatial_chain")
         return result
 
     def _apply_eq_rms_match(
@@ -3011,6 +3024,7 @@ class MixingEngine:
         result = self._undo_block("Finalize Master", _do_finalize)
         if result.get("passed"):
             self._master_finalized = True
+        self._mark_stage("finalize_master")
         return result
 
     def _finalize_master_impl(

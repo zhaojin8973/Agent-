@@ -368,6 +368,146 @@ def cmd_adjust(args) -> int:
 # ── parser ───────────────────────────────────────────────────────
 
 
+# ── project 子命令 ─────────────────────────────────────────────
+
+def _build_project_parser(subparsers):
+    p = subparsers.add_parser("project", help="工程管理")
+    sp = p.add_subparsers(dest="project_action")
+
+    # project list
+    lp = sp.add_parser("list", help="列出所有工程")
+    lp.add_argument("--genre", default=None, help="按流派筛选")
+    lp.add_argument("--stage", default=None, help="按管线阶段筛选")
+    lp.add_argument("--category", default=None, help="按分类筛选")
+
+    # project info
+    ip = sp.add_parser("info", help="显示工程详情")
+    ip.add_argument("name", help="工程名称（支持模糊匹配）")
+
+    # project create
+    cp = sp.add_parser("create", help="创建新工程")
+    cp.add_argument("name", help="工程名称")
+    cp.add_argument("--category", default="", help="分类目录")
+    cp.add_argument("--producer", default="", help="制作人")
+    cp.add_argument("--genre", default="pop", help="流派")
+
+    # project scan
+    sp.add_parser("scan", help="重新扫描工程索引")
+
+
+def cmd_project(args):
+    from hermes_core.config import HermesConfig
+    from hermes_core.project_meta import ProjectIndex, ProjectMeta
+    from hermes_core.engine import MixingEngine
+
+    cfg = HermesConfig.load()
+    root = cfg.project_root_expanded
+
+    if args.project_action == "list":
+        idx = ProjectIndex.load(root)
+        if not idx.projects:
+            print("没有找到工程。用 hermes project scan 扫描一下？")
+            return 0
+        items = idx.filter_by(genre=args.genre, stage=args.stage,
+                              category=args.category)
+        if not items:
+            items = idx.list_all()
+        print(f"{'工程名':<20} {'流派':<8} {'阶段':<12} {'分类':<16} {'修改时间':<12}")
+        print("-" * 68)
+        for rel_path, entry in items:
+            name = entry.get("name", "")[:18]
+            genre = entry.get("genre", "")[:6]
+            stage = entry.get("stage", "")[:10]
+            cat = entry.get("category", "")[:14]
+            mod = entry.get("last_modified", "")[:10]
+            print(f"{name:<20} {genre:<8} {stage:<12} {cat:<16} {mod:<12}")
+        print(f"\n共 {len(items)} 个工程")
+
+    elif args.project_action == "info":
+        idx = ProjectIndex.load(root)
+        found = idx.find(args.name)
+        if not found:
+            print(f"找不到工程 '{args.name}'")
+            return 1
+        for rel_path, entry in found:
+            meta = ProjectMeta.load(os.path.join(root, rel_path))
+            if meta:
+                print(meta.summary())
+                print(f"\n路径: {os.path.join(root, rel_path)}")
+            else:
+                print(f"{entry['name']}: 元数据文件缺失")
+            print()
+
+    elif args.project_action == "create":
+        eng = MixingEngine()
+        if not eng._bridge.connect():
+            print("REAPER 未运行，无法创建工程")
+            return 1
+        eng.allow_track_deletion()
+        info = eng.create_project(
+            args.name, category=args.category,
+            producer=args.producer, genre=args.genre,
+        )
+        print(f"工程已创建: {info['name']}")
+        print(f"路径: {info['meta_dir']}")
+        if info.get("conflict_renamed"):
+            print(f"注意: 同名工程已存在，已重命名为 {info['path']}")
+
+    elif args.project_action == "scan":
+        idx = ProjectIndex()
+        n = idx.scan(root)
+        print(f"扫描完成: 找到 {n} 个工程")
+
+    else:
+        print("用法: hermes project {list|info|create|scan}")
+        return 1
+    return 0
+
+
+# ── config 子命令 ─────────────────────────────────────────────
+
+def _build_config_parser(subparsers):
+    p = subparsers.add_parser("config", help="全局配置管理")
+    sp = p.add_subparsers(dest="config_action")
+
+    sp.add_parser("show", help="显示当前配置")
+
+    sp_cfg = sp.add_parser("set", help="设置配置项")
+    sp_cfg.add_argument("key", help="配置键名")
+    sp_cfg.add_argument("value", help="配置值")
+
+
+def cmd_config(args):
+    from hermes_core.config import HermesConfig
+
+    if args.config_action == "show":
+        cfg = HermesConfig.load()
+        print(cfg.show())
+    elif args.config_action == "set":
+        cfg = HermesConfig.load()
+        try:
+            # 尝试类型转换
+            if args.value.lower() in ("true", "false"):
+                val = args.value.lower() == "true"
+            elif args.value.isdigit():
+                val = int(args.value)
+            else:
+                val = args.value
+            cfg.set(args.key, val)
+            print(f"已设置 {args.key} = {val}")
+        except KeyError as e:
+            print(f"错误: {e}")
+            print(f"可用配置项: project_root, default_sample_rate, "
+                  f"default_genre, auto_save_prompt")
+            return 1
+    else:
+        print("用法: hermes config {show|set}")
+        return 1
+    return 0
+
+
+# ── parser 构建 ───────────────────────────────────────────────
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="hermes",
@@ -379,6 +519,8 @@ def _build_parser() -> argparse.ArgumentParser:
     _build_batch_parser(subparsers)
     _build_calibrate_parser(subparsers)
     _build_adjust_parser(subparsers)
+    _build_project_parser(subparsers)
+    _build_config_parser(subparsers)
     return parser
 
 
@@ -396,6 +538,10 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(cmd_calibrate(args))
     elif args.command == "adjust":
         sys.exit(cmd_adjust(args))
+    elif args.command == "project":
+        sys.exit(cmd_project(args))
+    elif args.command == "config":
+        sys.exit(cmd_config(args))
     else:
         parser.print_help()
         sys.exit(1)
