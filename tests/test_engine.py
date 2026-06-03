@@ -1985,3 +1985,25 @@ class TestSpatialSendComputation:
                 f"Ballad {bus}={sends_ballad[bus]} 应 > Folk {bus}={sends_folk[bus]}"
             )
 
+    def test_chinese_folk_bel_canto_wettest(self):
+        """中国民歌/民族美声：透亮水灵 + 大气绵长，混响偏大。"""
+        from hermes_core.engine import _compute_spatial_sends
+        sends = _compute_spatial_sends(
+            "chinese_folk_bel_canto", crest_factor_db=14.0,
+            presence_deficit_db=2.0, mud_ratio_db=-3.0, section="verse",
+        )
+        # Plate + Hall 与 electronic 同级（最湿梯队）
+        assert sends["reverb_plate"] >= -12.0, (
+            f"民美 plate={sends['reverb_plate']} 应偏湿润"
+        )
+        assert sends["reverb_hall"] >= -12.0, (
+            f"民美 hall={sends['reverb_hall']} 应偏湿润"
+        )
+        # Room 退后避浑
+        assert sends["reverb_room"] <= sends["reverb_plate"], (
+            "Room 不应超过 Plate，防止浑浊"
+        )
+        # 延迟已启用
+        assert sends["delay_slap"] is not None
+        assert sends["delay_rhythm"] is not None
+

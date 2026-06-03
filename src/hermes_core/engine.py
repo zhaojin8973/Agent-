@@ -207,15 +207,17 @@ _GENRE_CLA76_ATTACK_K: dict[str, float] = {
 
 # Reverb send level base per genre (dB, post-fader send).
 # Values are confirmed mid-range from professional mixing practice.
-# Sparse genres: lower sends (natural, intimate).
-# Dense genres: higher sends (bigger space, more competitive).
+# Western folk: intimate, dry.  Chinese folk bel canto: bright,
+# grand, long — wetter than Western genres but not muddy.
 _GENRE_REVERB_SEND_BASE: dict[str, dict[str, float]] = {
+    # 民谣 (Western folk): 自然、亲近、干声为主
     "folk":                    {"plate": -18.0, "hall": -20.0, "room": -14.0},
     "ballad":                  {"plate": -14.0, "hall": -16.0, "room": -12.0},
     "pop":                     {"plate": -12.0, "hall": -14.0, "room": -16.0},
     "rock":                    {"plate": -16.0, "hall": -14.0, "room": -14.0},
     "electronic":              {"plate": -10.0, "hall": -10.0, "room": -18.0},
-    "chinese_folk_bel_canto":  {"plate": -14.0, "hall": -14.0, "room": -12.0},
+    # 中国民歌/民族美声：透亮水灵 + 大气绵长，混响偏大但不浑
+    "chinese_folk_bel_canto":  {"plate": -10.0, "hall": -10.0, "room": -14.0},
 }
 
 # Delay send level base per genre (dB).  -99.0 = disabled for this genre.
@@ -225,7 +227,7 @@ _GENRE_DELAY_SEND_BASE: dict[str, dict[str, float]] = {
     "pop":                     {"slap": -14.0, "rhythm": -16.0},
     "rock":                    {"slap": -12.0, "rhythm": -18.0},
     "electronic":              {"slap": -10.0, "rhythm": -12.0},
-    "chinese_folk_bel_canto":  {"slap": -18.0, "rhythm": -20.0},
+    "chinese_folk_bel_canto":  {"slap": -14.0, "rhythm": -16.0},
 }
 
 # Send level range (dB).  Outside these bounds is impractical.
