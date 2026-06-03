@@ -90,13 +90,16 @@ _NEEDS_DIAGNOSIS_PATTERNS = [
 # Windows that are NEVER dialogs — dismiss actions are skipped entirely.
 # These are progress indicators, tool windows, or informational popups
 # that should not be touched.
+_SAVE_DIALOG_PATTERNS = [
+    "Save project",
+    "Saving project",
+]
+
 _NEVER_DISMISS_PATTERNS = [
     "Rendering to file",
     "Render to File",
     "Building peaks",
     "Building Peaks",
-    "Saving project",
-    "Save project",
     "FX: Track",
     "FX: Master",
 ]
@@ -196,6 +199,7 @@ class DialogKiller:
         self._enabled = True
         self._safe_patterns: list[str] = list(_KNOWN_SAFE_PATTERNS)
         self._diagnosis_patterns: list[str] = list(_NEEDS_DIAGNOSIS_PATTERNS)
+        self._save_patterns: list[str] = list(_SAVE_DIALOG_PATTERNS)
         self._never_dismiss_patterns: list[str] = list(_NEVER_DISMISS_PATTERNS)
 
     # ── Lifecycle ──────────────────────────────────────────
@@ -243,6 +247,7 @@ class DialogKiller:
 
     def set_rules(self, safe_patterns: list[str] | None = None,
                   diagnosis_patterns: list[str] | None = None,
+                  save_patterns: list[str] | None = None,
                   never_dismiss_patterns: list[str] | None = None) -> None:
         """Override the built-in dialog classification patterns.
 
@@ -256,6 +261,8 @@ class DialogKiller:
             self._safe_patterns = list(safe_patterns)
         if diagnosis_patterns is not None:
             self._diagnosis_patterns = list(diagnosis_patterns)
+        if save_patterns is not None:
+            self._save_patterns = list(save_patterns)
         if never_dismiss_patterns is not None:
             self._never_dismiss_patterns = list(never_dismiss_patterns)
 
@@ -297,10 +304,11 @@ class DialogKiller:
         return windows
 
     def _classify(self, title: str) -> str:
-        """Return 'never' | 'safe' | 'diagnosis' | 'unknown' based on title text.
+        """Return 'never' | 'safe' | 'save' | 'diagnosis' | 'unknown'.
 
         'never' — progress windows / floating tools that must NOT be dismissed.
-        'safe' — known error dialogs, auto-dismiss.
+        'save'  — save prompts: dismiss by clicking No / Don't Save.
+        'safe' — known error dialogs, auto-dismiss with OK.
         'diagnosis' — known issues worth logging, auto-dismiss.
         'unknown' — unrecognized, dismissed aggressively in headless mode.
         """
@@ -308,6 +316,9 @@ class DialogKiller:
         for pat in self._never_dismiss_patterns:
             if pat.lower() in title_lower:
                 return "never"
+        for pat in self._save_patterns:
+            if pat.lower() in title_lower:
+                return "save"
         for pat in self._safe_patterns:
             if pat.lower() in title_lower:
                 return "safe"
@@ -321,8 +332,15 @@ class DialogKiller:
 
         Headless policy: for unknown dialogs, aggressively try OK/Close/Yes
         in that order — better to dismiss with the wrong button than to hang.
+        Save prompts are a special case: click No / Don't Save so we never
+        lose the user's real work, but allow automated cleanup.
         """
-        if classification in ("safe", "unknown"):
+        if classification == "save":
+            for preferred in ("否", "No", "Don't Save", "Discard"):
+                for b in buttons:
+                    if preferred.lower() in b.lower():
+                        return b
+        elif classification in ("safe", "unknown"):
             for preferred in ("OK", "Close", "Continue", "Yes"):
                 for b in buttons:
                     if preferred.lower() in b.lower():
