@@ -1266,6 +1266,7 @@ class MixingEngine:
         self._project_path: str | None = None
         self._meta: ProjectMeta | None = None  # 工程元数据
         self._meta_dir: str | None = None      # 工程文件夹路径
+        self._dirty: bool = False              # 自上次保存以来是否有修改
         self._snapshot_project_path: str | None = None  # from GetProjectPath at init
         self._snapshot_project_name: str | None = None  # from GetProjectName at init
         # Idempotency guards — prevent double-execution of destructive ops.
@@ -1360,6 +1361,7 @@ class MixingEngine:
         self._reverb_send_node = None
         self._bpm = None
         self._last_spectrum: dict = {}
+        self._dirty = False
 
     def preflight_plugins(self, fx_names: list[str]) -> list[str]:
         """Check which of *fx_names* are available in REAPER.  Returns the
@@ -1973,8 +1975,14 @@ class MixingEngine:
 
     def _mark_stage(self, stage: str) -> None:
         """标记管线阶段为已完成（如果 meta 存在）。"""
+        self._dirty = True
         if self._meta is not None:
             self._meta.mark_stage(stage)
+
+    @property
+    def is_dirty(self) -> bool:
+        """自上次 ``save_project()`` 以来是否有未保存的修改。"""
+        return self._dirty
 
     # ── 元数据同步 ───────────────────────────────────────────
 
@@ -2031,7 +2039,36 @@ class MixingEngine:
                 self._meta.save(self._meta_dir)
             except Exception as exc:
                 log.debug("Failed to save meta: %s", exc)
+        self._dirty = False
         return {"path": actual, "saved_at": datetime.now().isoformat()}
+
+    def save_project_as(self, new_name: str) -> dict:
+        """另存为一个新的工程名称（在同一目录下）。
+
+        不修改当前 ``_project_path`` — 相当于导出一个副本。
+        """
+        if not self._project_path:
+            raise RuntimeError(
+                "No project path — call create_project(name, output_dir) first"
+            )
+        self._sync_meta()
+        proj_dir = os.path.dirname(self._project_path)
+        new_path = os.path.join(proj_dir, f"{new_name}.rpp")
+        # 如果目标已存在，追加时间戳
+        if os.path.exists(new_path):
+            ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
+            new_path = os.path.join(proj_dir, f"{new_name}_{ts}.rpp")
+        actual = self._safe_save(new_path)
+        # 同步元数据
+        if self._meta and self._meta_dir:
+            self._meta.name = new_name
+            try:
+                self._meta.save(self._meta_dir)
+            except Exception as exc:
+                log.debug("Failed to save meta: %s", exc)
+        self._dirty = False
+        return {"path": actual, "original_path": self._project_path,
+                "saved_at": datetime.now().isoformat()}
 
     def save_checkpoint(self, label: str = "") -> dict:
         """Save a timestamped copy without touching the main project file.
