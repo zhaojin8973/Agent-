@@ -2007,3 +2007,69 @@ class TestSpatialSendComputation:
         assert sends["delay_slap"] is not None
         assert sends["delay_rhythm"] is not None
 
+
+
+# ════════════════════════════════════════════════════════════════
+# 空间效果器链创建测试
+# ════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestBuildSpatialChainLogic:
+    """验证 build_spatial_chain 的核心逻辑。
+
+    由于 build_spatial_chain 需要完整的 REAPER bridge mock
+    （TrackManager → FxManager → SendManager 多层调用链），
+    这里通过测试数据结构和方法签名来验证正确性。
+    实际 REAPER 集成行为由 test_mixing_workflow.py 覆盖。
+    """
+
+    def test_spatial_plugin_mapping_complete(self):
+        """每种总线类型都有对应的插件和名称。"""
+        from hermes_core.engine import _SPATIAL_PLUGIN, _SPATIAL_BUS_NAMES
+        expected = {"plate", "hall", "room", "delay_slap", "delay_rhythm"}
+        assert set(_SPATIAL_PLUGIN.keys()) == expected
+        assert set(_SPATIAL_BUS_NAMES.keys()) == expected
+
+    def test_disabled_buses_skip_logic(self):
+        """None 发送量的总线被跳过。"""
+        from hermes_core.engine import _compute_spatial_sends
+        sends = _compute_spatial_sends("folk", 12.0, 2.0, -3.0)
+        # 民谣：延迟为 None
+        assert sends["delay_slap"] is None
+        assert sends["delay_rhythm"] is None
+        # 混响仍然存在
+        assert sends["reverb_plate"] is not None
+
+    def test_send_levels_from_computation(self):
+        """_compute_spatial_sends 的输出可直接作为 build_spatial_chain 输入。"""
+        from hermes_core.engine import _compute_spatial_sends
+        sends = _compute_spatial_sends("pop", 14.0, 3.0, -3.0, -28.0)
+        # 所有非 None 值应在 [-24, -6] 范围，格式为 {bus_key: level_db}
+        for key, val in sends.items():
+            assert key.startswith("reverb_") or key.startswith("delay_"), (
+                f"key={key} 格式不正确"
+            )
+            if val is not None:
+                assert -24.0 <= val <= -6.0, f"{key}={val} 超出范围"
+
+    def test_return_eq_table_coverage(self):
+        """_GENRE_RETURN_EQ 覆盖所有流派和总线类型。"""
+        from hermes_core.engine import _GENRE_RETURN_EQ
+        for g in ["folk", "ballad", "pop", "rock", "electronic",
+                   "chinese_folk_bel_canto"]:
+            for bus in ("plate", "hall", "room", "delay"):
+                assert bus in _GENRE_RETURN_EQ.get(g, {}), (
+                    f"{g}/{bus} 缺失于 _GENRE_RETURN_EQ"
+                )
+
+    def test_build_spatial_chain_method_exists(self):
+        """build_spatial_chain 方法签名正确。"""
+        from hermes_core.engine import MixingEngine
+        import inspect
+        sig = inspect.signature(MixingEngine.build_spatial_chain)
+        params = list(sig.parameters.keys())
+        assert "vocal_track" in params
+        assert "spatial_sends" in params
+        assert "genre" in params
+        assert sig.return_annotation == dict

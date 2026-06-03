@@ -319,6 +319,76 @@ def _compute_spatial_sends(
     return sends
 
 
+# ── 返回轨 EQ 参数（按流派 × 总线） ──────────────────────────
+
+# HPF removes low-end mud from reverb/delay returns.
+# LPF tames sibilance / harshness in the tail.
+# Delay returns are filtered more aggressively (narrower band).
+_GENRE_RETURN_EQ: dict[str, dict[str, dict[str, float]]] = {
+    "folk": {
+        "plate": {"hpf": 200, "lpf": 10000},
+        "hall":  {"hpf": 400, "lpf": 8000},
+        "room":  {"hpf": 150, "lpf": 12000},
+        "delay": {"hpf": 500, "lpf": 5000},
+    },
+    "ballad": {
+        "plate": {"hpf": 180, "lpf": 10000},
+        "hall":  {"hpf": 350, "lpf": 8000},
+        "room":  {"hpf": 120, "lpf": 12000},
+        "delay": {"hpf": 400, "lpf": 6000},
+    },
+    "pop": {
+        "plate": {"hpf": 200, "lpf": 10000},
+        "hall":  {"hpf": 400, "lpf": 8000},
+        "room":  {"hpf": 180, "lpf": 12000},
+        "delay": {"hpf": 500, "lpf": 6000},
+    },
+    "rock": {
+        "plate": {"hpf": 250, "lpf": 9000},
+        "hall":  {"hpf": 450, "lpf": 7000},
+        "room":  {"hpf": 200, "lpf": 11000},
+        "delay": {"hpf": 600, "lpf": 5000},
+    },
+    "electronic": {
+        "plate": {"hpf": 300, "lpf": 8000},
+        "hall":  {"hpf": 500, "lpf": 6000},
+        "room":  {"hpf": 250, "lpf": 10000},
+        "delay": {"hpf": 600, "lpf": 4000},
+    },
+    "chinese_folk_bel_canto": {
+        "plate": {"hpf": 180, "lpf": 10000},
+        "hall":  {"hpf": 350, "lpf": 8000},
+        "room":  {"hpf": 150, "lpf": 12000},
+        "delay": {"hpf": 400, "lpf": 6000},
+    },
+}
+
+# ── 空间插件映射 ──────────────────────────────────────────────
+
+# Bus type → REAPER plugin name (substring-matched by TrackFX_AddByName).
+# Each bus maps to the user's preferred plugin for that role.
+_SPATIAL_PLUGIN: dict[str, str] = {
+    "plate":        "SuperPlate",       # Soundtoys（首选板混响）
+    "hall":         "LX480",            # Relab（Lexicon 480L 大厅）
+    "room":         "ValhallaRoom",     # Valhalla（近场房间）
+    "delay_slap":   "EchoBoy",          # Soundtoys（Slapback 延迟）
+    "delay_rhythm": "EchoBoy",          # Soundtoys（节奏延迟）
+}
+
+# 返回轨名称（中文，REAPER 中可读）
+_SPATIAL_BUS_NAMES: dict[str, str] = {
+    "plate":        "Plate Verb",
+    "hall":         "Hall Verb",
+    "room":         "Room Verb",
+    "delay_slap":   "Slap Delay",
+    "delay_rhythm": "Rhythm Delay",
+}
+
+# Reverb bus types (for EQ routing).
+_REVERB_BUS_TYPES = frozenset({"plate", "hall", "room"})
+_DELAY_BUS_TYPES = frozenset({"delay_slap", "delay_rhythm"})
+
+
 _CLA76_ATTACK_KNOB_MIN: float = 1.0
 _CLA76_ATTACK_KNOB_MAX: float = 6.5
 
@@ -2553,6 +2623,117 @@ class MixingEngine:
             "Abbey Road EQ intent: HPF@600Hz + LPF@10kHz on aux %d slot %d",
             aux_track, eq_fx_idx,
         )
+
+    # ── 空间效果器链 ──────────────────────────────────────────
+
+    def _apply_return_eq(
+        self, aux_track: int, eq_fx_idx: int, bus: str, genre: str,
+    ) -> None:
+        """Configure Pro-Q 3 as a return-track safety filter.
+
+        Band 1: HPF — removes low-end mud from reverb/delay.
+        Band 2: LPF — tames sibilance and harshness in the tail.
+
+        Frequencies are genre- and bus-aware via :data:`_GENRE_RETURN_EQ`.
+        """
+        eq_defaults = _GENRE_RETURN_EQ.get(genre, _GENRE_RETURN_EQ["pop"])
+        # Delay buses share the "delay" EQ entry; reverb buses use their
+        # specific type ("plate" / "hall" / "room").
+        eq_key = "delay" if bus in _DELAY_BUS_TYPES else bus
+        eq_cfg = eq_defaults.get(eq_key, {"hpf": 300, "lpf": 8000})
+
+        hpf_hz = eq_cfg["hpf"]
+        lpf_hz = eq_cfg["lpf"]
+
+        # Build a minimal EqIntent: just HPF + LPF, no gain bands.
+        eq_intent = EqIntent(
+            bands=[
+                EqBandIntent(
+                    band_type="hp", freq_hz=hpf_hz, gain_db=0.0,
+                    q=1.0, reason=f"Return {bus} HPF @ {hpf_hz:.0f} Hz",
+                ),
+                EqBandIntent(
+                    band_type="lp", freq_hz=lpf_hz, gain_db=0.0,
+                    q=1.0, reason=f"Return {bus} LPF @ {lpf_hz:.0f} Hz",
+                ),
+            ],
+            spectral_tilt="neutral",
+            mud_detected=False,
+        )
+        normalized = _apply_proq3_eq(eq_intent)
+        for pname, pval in normalized.items():
+            self._fx.set_param(aux_track, eq_fx_idx, pname, pval)
+
+        log.debug(
+            "Return EQ: %s bus on aux %d — HPF=%.0f Hz, LPF=%.0f Hz (genre=%s)",
+            bus, aux_track, hpf_hz, lpf_hz, genre,
+        )
+
+    def build_spatial_chain(
+        self, vocal_track: int, spatial_sends: dict, genre: str = "pop",
+    ) -> dict:
+        """Create reverb and delay return tracks with sends from the vocal.
+
+        Uses the send levels computed by :func:`_compute_spatial_sends`
+        (via ``post_fx_balance``).  Buses whose send level is ``None``
+        are skipped — no track or plugin is created for them.
+
+        Each return track gets:
+        1. FabFilter Pro-Q 3 as a safety HPF+LPF filter
+        2. A genre-appropriate reverb or delay plugin
+        3. A post-fader send from the vocal track
+
+        Returns a dict mapping bus keys to their track/send/fx indices.
+        """
+        result: dict[str, dict] = {}
+
+        # Order matters: create reverbs first, then delays.
+        bus_order = ["plate", "hall", "room", "delay_slap", "delay_rhythm"]
+
+        for bus in bus_order:
+            send_key = f"delay_{bus}" if bus in _DELAY_BUS_TYPES else f"reverb_{bus}"
+            level_db = spatial_sends.get(send_key)
+
+            # None = disabled for this genre — skip entirely.
+            if level_db is None:
+                continue
+
+            bus_name = _SPATIAL_BUS_NAMES.get(bus, f"{bus} Return")
+            plugin_name = _SPATIAL_PLUGIN.get(bus)
+            if not plugin_name:
+                log.warning("build_spatial_chain: no plugin mapped for bus=%s", bus)
+                continue
+
+            # 1. Create return track
+            aux_idx = self._tracks.create(name=bus_name)
+
+            # 2. Pro-Q 3 safety EQ (HPF + LPF)
+            eq_idx = self._fx.add(aux_idx, "FabFilter Pro-Q 3")
+            if eq_idx >= 0:
+                self._apply_return_eq(aux_idx, eq_idx, bus, genre)
+
+            # 3. Spatial plugin (reverb or delay)
+            fx_idx = self._fx.add(aux_idx, plugin_name)
+
+            # 4. Create send from vocal track
+            send_info = self._send.create(
+                src=vocal_track, dest=aux_idx, level_db=level_db,
+            )
+
+            result[send_key] = {
+                "aux_index": aux_idx,
+                "eq_index": eq_idx,
+                "fx_index": fx_idx,
+                "send": send_info,
+                "send_level_db": level_db,
+            }
+
+            log.info(
+                "Spatial chain: %s → aux %d [%s + %s], send=%.1f dB (genre=%s)",
+                bus_name, aux_idx, "Pro-Q 3", plugin_name, level_db, genre,
+            )
+
+        return result
 
     def _apply_eq_rms_match(
         self, track_index: int, fx_index: int,
