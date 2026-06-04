@@ -33,6 +33,18 @@ nav:
   - API 参考:
     - 引擎: api/engine.md
     - Agent Protocol: api/agent_protocol.md
+    - Bridge: api/bridge.md
+    - Track: api/track.md
+    - Bus: api/bus.md
+    - FX: api/fx.md
+    - Send: api/send.md
+    - Render: api/render.md
+    - Signal: api/signal.md
+    - Spectrum: api/spectrum.md
+    - DAG: api/dag.md
+    - Profiles: api/profiles.md
+    - Audit: api/audit.md
+    - Exceptions: api/exceptions.md
     - 安全层: api/security.md
   - 混音指南:
     - 流派 Profile: guides/profiles.md

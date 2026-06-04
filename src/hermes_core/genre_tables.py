@@ -9,6 +9,17 @@ from __future__ import annotations
 
 import math
 
+from hermes_core.plugin_registry import (
+    SPATIAL_PLUGIN_MAP,
+    SPATIAL_BUS_NAMES,
+    _REVERB_BUS_TYPES,
+    _DELAY_BUS_TYPES,
+)
+
+# 向后兼容别名 — 外部模块（engine.py 等）通过 genre_tables 引用这些常量
+_SPATIAL_PLUGIN = SPATIAL_PLUGIN_MAP
+_SPATIAL_BUS_NAMES = SPATIAL_BUS_NAMES
+
 # ════════════════════════════════════════════════════════════════
 # 人声/伴奏平衡
 # ════════════════════════════════════════════════════════════════
@@ -383,33 +394,6 @@ _SPATIAL_PARAM_FALLBACK_MAP: dict[str, dict[str, str]] = {
         "RhythmNote":  "DelayL_Ms",
     },
 }
-
-# ════════════════════════════════════════════════════════════════
-# 空间插件映射
-# ════════════════════════════════════════════════════════════════
-
-# Bus type → REAPER plugin name (substring-matched by TrackFX_AddByName).
-# Each bus maps to the user's preferred plugin for that role.
-_SPATIAL_PLUGIN: dict[str, list[str]] = {
-    "plate":   ["Little Plate", "UAD EMT 140", "ValhallaPlate"],  # Soundtoys → UA → Valhalla
-    "hall":    ["LX480", "ValhallaVintageVerb"],         # Relab → Valhalla
-    "room":    ["ValhallaRoom", "FabFilter Pro-R"],      # Valhalla → FabFilter
-    "slap":    ["EchoBoy", "ValhallaDelay"],             # Soundtoys → Valhalla
-    "rhythm":  ["EchoBoy", "ValhallaDelay"],             # Soundtoys → Valhalla
-}
-
-# 返回轨名称（中文，REAPER 中可读）
-_SPATIAL_BUS_NAMES: dict[str, str] = {
-    "plate":   "Plate Verb",
-    "hall":    "Hall Verb",
-    "room":    "Room Verb",
-    "slap":    "Slap Delay",
-    "rhythm":  "Rhythm Delay",
-}
-
-# Reverb bus types (for EQ routing).
-_REVERB_BUS_TYPES = frozenset({"plate", "hall", "room"})
-_DELAY_BUS_TYPES = frozenset({"slap", "rhythm"})
 
 # ════════════════════════════════════════════════════════════════
 # CLA-76 参数

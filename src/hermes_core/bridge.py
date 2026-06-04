@@ -12,6 +12,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Optional
 
+from hermes_core.dialog_handler import MacOSDialogHandler
+
 # reapy is imported lazily to avoid importing it before REAPER is running.
 _reapy = None
 
@@ -114,111 +116,6 @@ _NEVER_DISMISS_PATTERNS = [
     "FX: Master",
 ]
 
-# ── AppleScript fragments ─────────────────────────────────────
-
-_AS_INSPECT = """
-tell application "System Events"
-    tell process "REAPER"
-        set output to ""
-        -- 检查独立窗口
-        repeat with w in windows
-            set winName to name of w
-            if (winName does not contain "REAPER v") and (winName is not "") then
-                if (winName does not start with "FX:") and ¬
-                   (winName does not start with "Routing") and ¬
-                   (winName does not contain "Track Manager") and ¬
-                   (winName does not contain "Media Explorer") and ¬
-                   (winName does not contain "Performance Meter") and ¬
-                   (winName does not contain "Virtual MIDI") and ¬
-                   (winName does not contain "Region/Marker") and ¬
-                   (winName does not contain "Undo History") and ¬
-                   (winName does not contain "Screenset") and ¬
-                   (winName does not contain "Action List") and ¬
-                   (winName does not contain "Preferences") and ¬
-                   (winName does not contain "Project Settings") then
-                    set buttonList to ""
-                    try
-                        repeat with b in buttons of w
-                            set btnName to name of b
-                            if btnName is not "" then
-                                set buttonList to buttonList & btnName & "|"
-                            end if
-                        end repeat
-                    end try
-                    set output to output & winName & ":::" & buttonList & ";;;"
-                end if
-            end if
-            -- 检查该窗口上的 Sheet（模态面板）
-            try
-                repeat with s in sheets of w
-                    set sheetName to name of s
-                    if sheetName is not "" then
-                        set buttonList to ""
-                        try
-                            repeat with b in buttons of s
-                                set btnName to name of b
-                                if btnName is not "" then
-                                    set buttonList to buttonList & btnName & "|"
-                                end if
-                            end repeat
-                        end try
-                        set output to output & sheetName & ":::" & buttonList & ";;;"
-                    end if
-                end repeat
-            end try
-        end repeat
-        return output
-    end tell
-end tell
-"""
-
-_AS_CLICK_BUTTON = """
-tell application "System Events"
-    tell process "REAPER"
-        -- 先搜独立窗口
-        repeat with w in windows
-            set winTitle to name of w
-            if (winTitle contains "{title_fragment}") then
-                repeat with b in buttons of w
-                    if (name of b contains "{button_match}") then
-                        click b
-                        return "clicked:" & name of b
-                    end if
-                end repeat
-            end if
-            -- 再搜该窗口的 Sheet
-            try
-                repeat with s in sheets of w
-                    set sheetTitle to name of s
-                    if (sheetTitle contains "{title_fragment}") then
-                        repeat with b in buttons of s
-                            if (name of b contains "{button_match}") then
-                                click b
-                                return "clicked:" & name of b
-                            end if
-                        end repeat
-                    end if
-                end repeat
-            end try
-        end repeat
-    end tell
-end tell
-"""
-
-_AS_DISMISS = """
-tell application "System Events"
-    tell process "REAPER"
-        repeat with w in windows
-            set winName to name of w
-            if (winName does not contain "REAPER v") and (winName is not "") then
-                keystroke (ASCII character 27)
-            end if
-        end repeat
-    end tell
-end tell
-"""
-
-
 class DialogKiller:
     """Background thread that auto-dismisses REAPER modal dialogs on macOS.
 
@@ -244,6 +141,7 @@ class DialogKiller:
         self._diagnosis_patterns: list[str] = list(_NEEDS_DIAGNOSIS_PATTERNS)
         self._save_patterns: list[str] = list(_SAVE_DIALOG_PATTERNS)
         self._never_dismiss_patterns: list[str] = list(_NEVER_DISMISS_PATTERNS)
+        self._dialog_handler: Optional[MacOSDialogHandler] = None
 
     # ── Lifecycle ──────────────────────────────────────────
 
@@ -326,34 +224,15 @@ class DialogKiller:
             if self._enabled:
                 self._dismiss_dialogs()
 
-    def _run_osascript(self, source: str, timeout: float = 2.0) -> str:
-        """Run an AppleScript and return its stdout, or '' on failure."""
-        try:
-            proc = subprocess.run(
-                ["osascript", "-e", source],
-                capture_output=True,
-                timeout=timeout,
-            )
-            return proc.stdout.decode("utf-8", errors="replace").strip()
-        except Exception as e:
-            log.debug("osascript failed: %s", e)
-            return ""
+    def _get_handler(self) -> MacOSDialogHandler:
+        """Lazy-init the shared MacOSDialogHandler instance."""
+        if self._dialog_handler is None:
+            self._dialog_handler = MacOSDialogHandler()
+        return self._dialog_handler
 
     def _inspect_windows(self) -> list[tuple[str, list[str]]]:
-        """Return [(window_title, [button_names]), ...] for non-REAPER windows."""
-        raw = self._run_osascript(_AS_INSPECT)
-        if not raw:
-            return []
-        windows: list[tuple[str, list[str]]] = []
-        for segment in raw.split(";;;"):
-            segment = segment.strip()
-            if not segment:
-                continue
-            parts = segment.split(":::", 1)
-            title = parts[0].strip()
-            buttons = [b.strip() for b in parts[1].split("|") if b.strip()] if len(parts) > 1 else []
-            windows.append((title, buttons))
-        return windows
+        """委托给 MacOSDialogHandler 扫描 REAPER 弹窗。"""
+        return self._get_handler().inspect_windows()
 
     def _classify(self, title: str) -> str:
         """Return 'never' | 'safe' | 'save' | 'diagnosis' | 'unknown'.
@@ -404,33 +283,14 @@ class DialogKiller:
                         return b
         return ""
 
-    @staticmethod
-    def _escape_applescript_string(s: str) -> str:
-        """Escape a string for safe embedding in an AppleScript string literal.
-
-        Escapes backslash, double-quote, and strips control characters that
-        could be used for AppleScript injection (line continuation ¬, etc.).
-        """
-        s = s.replace("\\", "\\\\")
-        s = s.replace('"', '\\"')
-        s = s.replace("\n", "").replace("\r", "").replace("\t", " ")
-        return s
-
     def _click_button(self, title_fragment: str, button_match: str) -> str:
-        """Click a specific button in a window matching title_fragment.
+        """委托给 MacOSDialogHandler 点击匹配窗口的按钮。
 
         Returns the clicked button name or empty string.
         """
-        safe_title = self._escape_applescript_string(title_fragment)
-        safe_button = self._escape_applescript_string(button_match)
-        script = _AS_CLICK_BUTTON.replace(
-            "{title_fragment}", safe_title
-        ).replace(
-            "{button_match}", safe_button
-        )
-        result = self._run_osascript(script)
-        if result.startswith("clicked:"):
-            return result.split(":", 1)[1]
+        ok = self._get_handler().click_button(title_fragment, button_match)
+        if ok:
+            return button_match
         return ""
 
     def _dismiss_dialogs(self) -> None:
@@ -464,9 +324,9 @@ class DialogKiller:
                 clicked = self._click_button(title, btn)
                 action = f"clicked_{btn.lower()}" if clicked else "sent_escape"
                 if not clicked:
-                    self._run_osascript(_AS_DISMISS)
+                    self._get_handler().send_escape()
             else:
-                self._run_osascript(_AS_DISMISS)
+                self._get_handler().send_escape()
                 action = "sent_escape"
 
             event = DialogEvent(

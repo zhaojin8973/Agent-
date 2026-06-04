@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch, PropertyMock
 import pytest
 
 from hermes_core.bridge import DialogEvent, DialogKiller, ReaperBridge, _extract_reaper_string
+from hermes_core.dialog_handler import MacOSDialogHandler
 
 
 # ══════════════════════════════════════════════════════════════
@@ -317,52 +318,45 @@ class TestDialogKillerEvents:
         assert killer.get_recent_events() == []
 
     def test_dialog_killer_inspect_windows_no_output(self):
-        """When AppleScript returns empty, inspect returns empty list."""
+        """委托 MacOSDialogHandler — 无弹窗时返回空列表。"""
         killer = DialogKiller(interval=10.0)
         with patch.object(
-            killer, "_run_osascript", return_value=""
+            MacOSDialogHandler, "inspect_windows", return_value=[]
         ):
             windows = killer._inspect_windows()
             assert windows == []
 
     def test_dialog_killer_inspect_windows_parses_output(self):
-        """Correctly parses AppleScript output into (title, buttons) tuples."""
+        """正确返回 (标题, 按钮列表) 元组。"""
         killer = DialogKiller(interval=10.0)
-        fake_output = "Nothing to render:::OK|Close|;;;Plugin missing:::OK|;;;"
-        with patch.object(
-            killer, "_run_osascript", return_value=fake_output
-        ):
+        with patch.object(MacOSDialogHandler, "inspect_windows", return_value=[
+            ("Nothing to render", ["OK", "Close"]),
+            ("Plugin missing", ["OK"]),
+        ]):
             windows = killer._inspect_windows()
             assert len(windows) == 2
             assert windows[0] == ("Nothing to render", ["OK", "Close"])
             assert windows[1] == ("Plugin missing", ["OK"])
 
     def test_inspect_skips_main_reaper_window(self):
-        """Main REAPER window (title contains 'REAPER v') is never reported.
-
-        The AppleScript already filters these, so inspect_windows only
-        sees non-main dialogs.
-        """
+        """主 REAPER 窗口不会被报告（AppleScript 已过滤）。"""
         killer = DialogKiller(interval=10.0)
-        # Simulate AS output where only non-main windows remain
-        fake_output = "Error Dialog:::OK|;;;"
-        with patch.object(
-            killer, "_run_osascript", return_value=fake_output
-        ):
+        with patch.object(MacOSDialogHandler, "inspect_windows", return_value=[
+            ("Error Dialog", ["OK"]),
+        ]):
             windows = killer._inspect_windows()
             assert len(windows) == 1
             assert "REAPER v" not in windows[0][0]
 
     def test_dismiss_safe_dialog_records_event(self):
-        """Dismissing a safe dialog records an event and increments count."""
+        """关闭安全弹窗时记录事件并增加计数。"""
         killer = DialogKiller(interval=10.0)
-        fake_output = "Nothing to render:::OK|Close|;;;"
-        with patch.object(
-            killer, "_run_osascript", side_effect=[
-                fake_output,  # _inspect_windows
-                "",           # _click_button (failed)
-                "",           # _AS_DISMISS fallback
-            ]
+        with (
+            patch.object(MacOSDialogHandler, "inspect_windows", return_value=[
+                ("Nothing to render", ["OK", "Close"]),
+            ]),
+            patch.object(MacOSDialogHandler, "click_button", return_value=False),
+            patch.object(MacOSDialogHandler, "send_escape", return_value=True),
         ):
             killer._dismiss_dialogs()
             events = killer.get_recent_events()
@@ -372,54 +366,51 @@ class TestDialogKillerEvents:
             assert killer.killed_count == 1
 
     def test_dismiss_unknown_dialog_aggressively(self):
-        """Headless mode: unknown dialogs ARE dismissed aggressively (NOT skipped)."""
+        """Headless 模式：未知弹窗被激进关闭（不跳过）。"""
         killer = DialogKiller(interval=10.0)
-        # side_effect: [inspect_output, click_result]
-        with patch.object(
-            killer, "_run_osascript",
-            side_effect=[
-                "Bizarre Unknown Popup:::Yes|No|;;;",  # _inspect_windows
-                "clicked:Yes",                          # _click_button
-            ]
+        with (
+            patch.object(MacOSDialogHandler, "inspect_windows", return_value=[
+                ("Bizarre Unknown Popup", ["Yes", "No"]),
+            ]),
+            patch.object(MacOSDialogHandler, "click_button", return_value=True),
         ):
             killer._dismiss_dialogs()
             events = killer.get_recent_events()
             assert len(events) == 1
-            # Headless: never "skipped_unknown" — always dismissed
             assert events[0].action_taken == "clicked_yes"
             assert killer.killed_count == 1
 
     def test_killed_count_increments_for_all_dialogs(self):
-        """Headless mode: killed_count increments for ALL dismissed dialogs
-        (safe, diagnosis, AND unknown)."""
+        """Headless 模式：所有弹窗 dismiss 都增加 killed_count。"""
         killer = DialogKiller(interval=10.0)
 
-        # Unknown dialog — now increments (headless aggressive dismiss)
-        with patch.object(
-            killer, "_run_osascript",
-            return_value="Unknown Title:::OK|;;;"
+        # 未知弹窗 — 激进关闭
+        with (
+            patch.object(MacOSDialogHandler, "inspect_windows", return_value=[
+                ("Unknown Title", ["OK"]),
+            ]),
+            patch.object(MacOSDialogHandler, "click_button", return_value=True),
         ):
             killer._dismiss_dialogs()
             assert killer.killed_count == 1
 
-        # Safe dialog with click — SHOULD increment
-        with patch.object(
-            killer, "_run_osascript", side_effect=[
-                "Nothing to render:::OK|;;;",  # _inspect_windows
-                "clicked:OK",                  # _click_button
-            ]
+        # 安全弹窗 — 也应增加
+        with (
+            patch.object(MacOSDialogHandler, "inspect_windows", return_value=[
+                ("Nothing to render", ["OK"]),
+            ]),
+            patch.object(MacOSDialogHandler, "click_button", return_value=True),
         ):
             killer._dismiss_dialogs()
             assert killer.killed_count == 2
 
     def test_event_buffer_does_not_grow_unbounded(self):
-        """Events list is capped at max_events."""
+        """事件列表受 max_events 限制。"""
         killer = DialogKiller(interval=10.0, max_events=3)
         for i in range(5):
-            output = f"Error {i}:::OK|;;;"
-            with patch.object(
-                killer, "_run_osascript", return_value=output
-            ):
+            with patch.object(MacOSDialogHandler, "inspect_windows", return_value=[
+                (f"Error {i}", ["OK"]),
+            ]):
                 killer._dismiss_dialogs()
         assert len(killer._events) <= 3
 

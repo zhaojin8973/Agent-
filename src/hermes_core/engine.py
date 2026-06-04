@@ -11,9 +11,10 @@ import tempfile
 import time
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Callable
 
-from hermes_core.bridge import ReaperBridge
+from hermes_core.bridge import ReaperBridge, _extract_reaper_string
 from hermes_core.track import TrackManager, TrackInfo
 from hermes_core.bus import BusManager
 from hermes_core.fx import FxManager
@@ -34,7 +35,7 @@ from hermes_core.loudness_optimizer import (
     EqBandIntent,
 )
 from hermes_core.normalize import normalize_params, compute_bus_compressor_params, PLUGIN_REGISTRY
-from hermes_core.audio_utils import note_to_ms
+from hermes_core.audio_utils import note_to_ms, read_pcm
 from hermes_core.profiles import (
     _resolve_fx_type,
     _get_compressor_preset,
@@ -797,7 +798,6 @@ class MixingEngine:
 
         # Build a synthetic EqIntent so the same translators
         # (_apply_proq3_eq / _apply_ssleq_eq) handle normalisation.
-        from hermes_core.loudness_optimizer import EqIntent, EqBandIntent
         band_intents = []
         for b in bands:
             band_intents.append(EqBandIntent(
@@ -925,7 +925,6 @@ class MixingEngine:
                         "applied": False}
 
         # 5. 构建 EqIntent 并应用
-        from hermes_core.loudness_optimizer import EqIntent, EqBandIntent
         band_intents = []
         for b in eq_bands[:8]:  # 最多 8 个频段
             band_intents.append(EqBandIntent(
@@ -1625,7 +1624,7 @@ class MixingEngine:
         self._bpm = bpm
 
         def _do_prepare():
-            return self._prepare_stems_impl(
+            return self._gain_staging.prepare(
                 stem_paths, genre=genre, vocal_indices=vocal_indices,
                 backing_indices=backing_indices,
             )
@@ -1637,162 +1636,6 @@ class MixingEngine:
         self._auto_save()
         self._mark_stage("prepare_stems")
         return result
-
-    def _prepare_stems_impl(
-        self,
-        stem_paths: list[str],
-        *,
-        genre: str = "pop",
-        vocal_indices: list[int] | None = None,
-        backing_indices: list[int] | None = None,
-    ) -> dict:
-        # 1. Import stems
-        imported = self.import_stems(stem_paths)
-
-        # 2. Classify roles
-        if vocal_indices is None:
-            vocal_indices = [0]
-        if backing_indices is None:
-            backing_indices = [i for i in range(len(stem_paths))
-                               if i not in vocal_indices]
-
-        # 3. Measure each imported stem and apply clip gain
-        stems_out = []
-        for i, imp in enumerate(imported):
-            if not imp["success"]:
-                stems_out.append({
-                    "file_path": stem_paths[i],
-                    "role": GainStagingEngine.classify_role(i, vocal_indices, backing_indices),
-                    "track_index": imp["track_index"],
-                    "track_name": imp["name"],
-                    "raw_rms_db": None,
-                    "raw_lufs": None,
-                    "raw_peak_db": None,
-                    "clip_gain_db": 0.0,
-                    "adjusted_lufs": None,
-                    "fader_gain_db": 0.0,
-                    "success": False,
-                })
-                continue
-
-            try:
-                ana = SignalAnalyzer.analyze(stem_paths[i])
-                raw_rms_db = ana.rms_db
-                raw_lufs = ana.integrated_lufs
-                raw_peak_db = ana.peak_db
-            except (OSError, ValueError, RuntimeError):
-                raw_rms_db = None
-                raw_lufs = None
-                raw_peak_db = None
-
-            # Stage 1: clip gain to reference level
-            clip_gain_db = 0.0
-            if raw_rms_db is not None:
-                clip_gain_db = _CLIP_GAIN_REF_DB - raw_rms_db
-                # Peak guard — clip gain must not push any sample above 0 dBFS
-                if raw_peak_db is not None and clip_gain_db > 0:
-                    headroom = -raw_peak_db
-                    if clip_gain_db > headroom:
-                        log.debug(
-                            "Clip gain %.1f dB capped to %.1f dB — "
-                            "peak %.1f dBFS leaves no headroom",
-                            clip_gain_db, headroom, raw_peak_db,
-                        )
-                        clip_gain_db = headroom
-                self.apply_gain(imp["track_index"], clip_gain_db,
-                                target="clip_gain")
-
-            adjusted_lufs = (
-                raw_lufs + clip_gain_db if raw_lufs is not None else None
-            )
-
-            stems_out.append({
-                "file_path": stem_paths[i],
-                "role": GainStagingEngine.classify_role(i, vocal_indices, backing_indices),
-                "track_index": imp["track_index"],
-                "track_name": imp["name"],
-                "raw_rms_db": raw_rms_db,
-                "raw_lufs": raw_lufs,
-                "raw_peak_db": raw_peak_db,
-                "clip_gain_db": round(clip_gain_db, 1),
-                "adjusted_lufs": (
-                    round(adjusted_lufs, 1) if adjusted_lufs is not None
-                    else None
-                ),
-                "fader_gain_db": 0.0,
-                "success": imp["success"],
-            })
-
-        # 4. Fader balancing and peak ceiling are deferred to
-        #    post_fx_balance() — after FX chains have been applied.
-
-        return {
-            "stems": stems_out,
-            "genre": genre,
-            "vocal_indices": vocal_indices,
-            "backing_indices": backing_indices,
-        }
-
-    # ── Post-FX fader balancing ──────────────────────────
-
-    def _balance_faders(
-        self,
-        stems: list[dict],
-        *,
-        vocal_indices: list[int] | None = None,
-        backing_indices: list[int] | None = None,
-        genre: str = "pop",
-    ) -> dict:
-        """Set fader gains so backing sits *ratio* LU below vocal.
-
-        Vocal fader stays at 0 (reference).  Backing is attenuated to
-        achieve the genre-appropriate vocal/backing ratio.
-        """
-        if vocal_indices is None:
-            vocal_indices = [0]
-        if backing_indices is None:
-            backing_indices = [i for i in range(len(stems))
-                               if i not in vocal_indices]
-
-        ratio = _GENRE_VOCAL_TO_BACKING.get(genre, 3)
-
-        vocal_lufs_vals = [
-            s["adjusted_lufs"] for i, s in enumerate(stems)
-            if i in vocal_indices and s.get("adjusted_lufs") is not None
-        ]
-        backing_lufs_vals = [
-            s["adjusted_lufs"] for i, s in enumerate(stems)
-            if i in backing_indices and s.get("adjusted_lufs") is not None
-        ]
-        vocal_lufs = (
-            sum(vocal_lufs_vals) / len(vocal_lufs_vals)
-            if vocal_lufs_vals else -20.0
-        )
-        backing_lufs = (
-            sum(backing_lufs_vals) / len(backing_lufs_vals)
-            if backing_lufs_vals else -20.0
-        )
-
-        backing_target = vocal_lufs - ratio
-
-        for i, s in enumerate(stems):
-            if not s.get("success") or s.get("adjusted_lufs") is None:
-                continue
-            if i in vocal_indices:
-                fader_gain_db = 0.0  # reference — don't move
-            elif i in backing_indices:
-                fader_gain_db = backing_target - s["adjusted_lufs"]
-            else:
-                continue
-            s["fader_gain_db"] = round(fader_gain_db, 1)
-            self.apply_gain(s["track_index"], fader_gain_db)
-
-        return {
-            "ratio_lu": ratio,
-            "vocal_lufs": round(vocal_lufs, 1),
-            "backing_lufs": round(backing_lufs, 1),
-            "backing_target_lufs": round(backing_target, 1),
-        }
 
     def _solo_render(
         self, indices: list[int], output_dir: str, label: str = ""
@@ -1918,7 +1761,7 @@ class MixingEngine:
                 s["adjusted_lufs"] = backing_lufs
 
         # ── Step 1: ratio-based fader balance ──
-        balance_info = self._balance_faders(
+        balance_info = self._gain_staging._balance_faders(
             stems,
             vocal_indices=vocal_indices,
             backing_indices=backing_indices,
@@ -2010,6 +1853,53 @@ class MixingEngine:
             "reverb_wet_cache": reverb_wet_path,
             "stems": stems,
             "spatial_sends": spatial_sends,
+        }
+
+    def apply_backing_processing(
+        self,
+        backing_track_idx: int | None = None,
+        vocal_track_idx: int = 0,
+        genre: str = "pop",
+    ) -> dict:
+        """可选的伴奏后处理 — 总线压缩 + 频率互让。
+
+        在 ``apply_profile`` 之后调用，为伴奏轨添加 glue compression，
+        并在人声和伴奏之间协调 3kHz 频率区间。
+
+        Parameters
+        ----------
+        backing_track_idx : int | None
+            伴奏轨索引。为 None 时取第一个非人声轨道。
+        vocal_track_idx : int
+            人声轨索引，默认 0。
+        genre : str
+            流派名，用于选择压缩预设。
+
+        Returns
+        -------
+        dict
+            ``{"glue_compression": {...}, "frequency_pocket": {...}}``
+        """
+        from hermes_core.backing import BackingProcessor
+
+        if backing_track_idx is None:
+            # 取第一个非人声轨道
+            backing_track_idx = 1
+
+        processor = BackingProcessor(self._bridge, self._fx)
+
+        glue_result = processor.apply_glue_compression(
+            track_idx=backing_track_idx, genre=genre,
+        )
+
+        pocket_result = processor.apply_frequency_pocket(
+            vocal_idx=vocal_track_idx,
+            backing_idx=backing_track_idx,
+        )
+
+        return {
+            "glue_compression": glue_result,
+            "frequency_pocket": pocket_result,
         }
 
     def apply_bus_compressor(
@@ -2516,7 +2406,6 @@ class MixingEngine:
 
         Returns a dict mapping bus keys to their track/send/fx indices.
         """
-        from hermes_core.bridge import _extract_reaper_string
 
         result: dict[str, dict] = {}
 
@@ -2656,7 +2545,6 @@ class MixingEngine:
 
         3 条延迟 + 3 条混响，延迟输出送入混响产生光泽尾音。
         """
-        from hermes_core.bridge import _extract_reaper_string
         api = self._bridge.api
         result: dict = {"delays": {}, "reverbs": {}, "cross_sends": []}
 
@@ -2691,7 +2579,6 @@ class MixingEngine:
                                "gain_db": 0.0, "q": 0.71, "reason": "CLA HPF 200Hz"}],
                     "spectral_tilt": "neutral", "mud_detected": False,
                 }
-                from hermes_core.eq_engine import _apply_proq3_eq  # noqa: F811
                 try:
                     normed = _apply_proq3_eq(hpf_intent)
                     for pn, pv in normed.items():
@@ -2740,7 +2627,6 @@ class MixingEngine:
             # Pro-Q 3 HPF 250Hz
             eq_idx = self._fx.add(aux, "FabFilter Pro-Q 3")
             if eq_idx >= 0:
-                from hermes_core.eq_engine import _apply_proq3_eq
                 try:
                     hpf_intent = {
                         "bands": [{"band_type": "hp", "freq_hz": 250,
@@ -2819,7 +2705,6 @@ class MixingEngine:
             eq_idx = self._fx.add(aux, "FabFilter Pro-Q 3")
             hpf_hz = 180 if "plate_1" in ps["key"] or "plate_3" in ps["key"] else 250
             if eq_idx >= 0:
-                from hermes_core.eq_engine import _apply_proq3_eq
                 try:
                     hpf_intent = {
                         "bands": [{"band_type": "hp", "freq_hz": hpf_hz,
@@ -2955,7 +2840,6 @@ class MixingEngine:
         l_aux = self._tracks.create(name="DT L Delay")
         l_eq = self._fx.add(l_aux, "FabFilter Pro-Q 3")
         if l_eq >= 0:
-            from hermes_core.eq_engine import _apply_proq3_eq
             try:
                 intent = {
                     "bands": [{"band_type": "hp", "freq_hz": 400,
@@ -2985,7 +2869,6 @@ class MixingEngine:
         r_aux = self._tracks.create(name="DT R Delay")
         r_eq = self._fx.add(r_aux, "FabFilter Pro-Q 3")
         if r_eq >= 0:
-            from hermes_core.eq_engine import _apply_proq3_eq
             try:
                 intent = {
                     "bands": [{"band_type": "hp", "freq_hz": 400,
@@ -3014,7 +2897,6 @@ class MixingEngine:
         g_aux = self._tracks.create(name="DT Glue Verb")
         g_eq = self._fx.add(g_aux, "FabFilter Pro-Q 3")
         if g_eq >= 0:
-            from hermes_core.eq_engine import _apply_proq3_eq
             try:
                 intent = {
                     "bands": [{"band_type": "hp", "freq_hz": 400,
@@ -3234,114 +3116,6 @@ class MixingEngine:
         self._mark_stage("finalize_master")
         return result
 
-    def _finalize_master_impl(
-        self,
-        target_lufs: float = _DEFAULT_TARGET_LUFS,
-        *,
-        limiter_fx: str = "FabFilter Pro-L 2 (FabFilter)",
-        ceiling_db: float = -0.5,
-        tolerance: float = 0.3,
-        tmp_dir: str | None = None,
-        on_progress: Callable[[str, float], None] | None = None,
-    ) -> dict:
-        def _progress(stage: str, pct: float):
-            if on_progress:
-                on_progress(stage, pct)
-
-
-        _progress("setup", 0.0)
-        tmp = tmp_dir or tempfile.mkdtemp(prefix="hermes_master_")
-        probe_dir = os.path.join(tmp, "probe")
-        final_dir = os.path.join(tmp, "final")
-
-        # 1. Add limiter
-        fx_idx = self._fx.add_master(limiter_fx)
-        if fx_idx < 0:
-            return _master_error(
-                target_lufs, ceiling_db,
-                f"Failed to add {limiter_fx} to master",
-            )
-
-        # Pro-L 2 param formulas (verified 2026-05-28 via REAPER calibration):
-        #   Gain: 0..+30 dB → normalized = gain_db / 30
-        #   Output Level: -30..0 dB → normalized = (ceiling_db + 30) / 30
-        ceiling_norm = max(0.0, min(1.0, (ceiling_db + _PRO_L2_RANGE_DB) / _PRO_L2_RANGE_DB))
-        if not self._fx.set_param(-1, fx_idx, "Output Level", ceiling_norm):
-            return _master_error(
-                target_lufs, ceiling_db,
-                "Pro-L 2 Output Level param not found — may need calibration",
-            )
-        if not self._fx.set_param(-1, fx_idx, "Gain", 0.0):
-            return _master_error(
-                target_lufs, ceiling_db,
-                "Pro-L 2 Gain param not found — may need calibration",
-            )
-
-        # 2. Probe render
-        _progress("probe_render", 0.15)
-        probe_result = self.render_mix(probe_dir, verify=True, _internal=True)
-        probe_sc = probe_result.get("signal_check", {})
-        pre_peak = probe_sc.get("peak_db", 0.0)
-        if probe_result.get("output_path") is None:
-            return _master_error(
-                target_lufs, ceiling_db, "Probe render failed",
-            )
-
-        # 3. Hard-clip model + binary search → optimal Gain
-        _progress("search", 0.35)
-        probe_path = probe_result.get("output_path")
-        cal = load_calibration()
-        search = find_optimal_gain(
-            probe_path,
-            target_lufs=target_lufs,
-            ceiling_dbtp=ceiling_db,
-            tolerance=tolerance,
-            calibration_offset=cal,
-        )
-        if not search.converged and search.probe_lufs <= -70:
-            return _master_error(
-                target_lufs, ceiling_db, "Probe is near-silent",
-            )
-
-        gain_db = search.gain_db
-
-        # 4. Apply gain and render final.
-        _progress("final_render", 0.65)
-        gain_norm = max(0.0, min(1.0, gain_db / _PRO_L2_RANGE_DB))
-        if not self._fx.set_param(-1, fx_idx, "Gain", gain_norm):
-            return _master_error(
-                target_lufs, ceiling_db,
-                "Pro-L 2 Gain param not found during final render",
-            )
-        final_result = self.render_mix(final_dir, verify=True, _internal=True)
-        output_path = final_result.get("output_path")
-
-        # 5. Verify
-        _progress("verify", 0.90)
-        achieved_lufs = None
-        passed = output_path is not None
-        if output_path:
-            verify = verify_output(output_path, target_lufs=target_lufs)
-            achieved_lufs = verify.actual_lufs
-            passed = verify.passed
-
-        log.info(
-            "Master report:\n%s",
-            generate_report(search, verify if output_path else None),
-        )
-
-        return {
-            "target_lufs": target_lufs,
-            "achieved_lufs": achieved_lufs,
-            "probe_lufs": search.probe_lufs,
-            "gain_db": gain_db,
-            "ceiling_db": ceiling_db,
-            "passed": passed,
-            "converged": search.converged,
-            "pre_limiter_peak_db": pre_peak,
-            "output_path": output_path,
-        }
-
     # ── Wet reverb caching ────────────────────────────────
 
     def _cache_reverb_wet(self, cache_dir: str) -> str | None:
@@ -3489,7 +3263,7 @@ class MixingEngine:
         )
 
         # ── 4. Apply gain + hard-clip to produce preview WAV ──
-        pcm, sr = SignalAnalyzer._read_pcm(dry_path)
+        pcm, sr = read_pcm(dry_path)
         limited = _hard_clip(pcm, search.gain_db, ceiling_db)
 
         import soundfile as sf

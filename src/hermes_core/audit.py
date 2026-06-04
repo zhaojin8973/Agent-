@@ -144,6 +144,14 @@ class AuditLogger:
         with self._lock:
             self._entries.append(entry)
         log.debug("审计记录: %s — %s", operation, result_summary)
+
+        # 自动持久化 — 每次操作后同步写入磁盘，防止崩溃丢失
+        # 在锁外调用 save_to_file()（它有自己的锁），避免死锁
+        if self._project_dir is not None:
+            try:
+                self.save_to_file()
+            except Exception as exc:
+                log.debug("审计自动保存失败（非致命）: %s", exc)
         return entry
 
     def get_entries(self) -> list[AuditEntry]:

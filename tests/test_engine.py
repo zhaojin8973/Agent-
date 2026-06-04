@@ -842,7 +842,7 @@ class TestCompressorTranslators:
 
 
 # ════════════════════════════════════════════════════════════
-# _balance_faders
+# _balance_faders（已迁移至 GainStagingEngine）
 # ════════════════════════════════════════════════════════════
 
 
@@ -857,9 +857,11 @@ class TestBalanceFaders:
             {"track_index": 1, "role": "backing", "success": True,
              "adjusted_lufs": None},
         ]
-        eng.apply_gain = MagicMock()
-        eng._balance_faders(stems, vocal_indices=[0], backing_indices=[1])
-        assert eng.apply_gain.call_count == 0
+        eng._gain_staging.apply_gain = MagicMock()
+        eng._gain_staging._balance_faders(
+            stems, vocal_indices=[0], backing_indices=[1],
+        )
+        assert eng._gain_staging.apply_gain.call_count == 0
 
     def test_balance_with_valid_lufs(self):
         """Valid LUFS → fader gains computed and applied."""
@@ -870,10 +872,12 @@ class TestBalanceFaders:
             {"track_index": 1, "role": "backing", "success": True,
              "adjusted_lufs": -20.0},
         ]
-        eng.apply_gain = MagicMock()
-        eng._balance_faders(stems, vocal_indices=[0], backing_indices=[1],
-                            genre="pop")
-        assert eng.apply_gain.call_count >= 1
+        eng._gain_staging.apply_gain = MagicMock()
+        eng._gain_staging._balance_faders(
+            stems, vocal_indices=[0], backing_indices=[1],
+            genre="pop",
+        )
+        assert eng._gain_staging.apply_gain.call_count >= 1
 
 
 # ════════════════════════════════════════════════════════════

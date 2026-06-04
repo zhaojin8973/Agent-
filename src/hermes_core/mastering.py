@@ -82,9 +82,11 @@ def _friendly_hint(error: str) -> str:
     for key, hint in hints.items():
         if key.lower() in error.lower():
             return hint
-    return "Check the log for details. Common issues: missing plugins, "
-    "unwritable output directory, insufficient disk space, or REAPER "
-    "modal dialogs blocking automation."
+    return (
+        "Check the log for details. Common issues: missing plugins, "
+        "unwritable output directory, insufficient disk space, or REAPER "
+        "modal dialogs blocking automation."
+    )
 
 
 # ════════════════════════════════════════════════════════════════

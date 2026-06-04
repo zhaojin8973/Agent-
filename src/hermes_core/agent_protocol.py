@@ -411,7 +411,7 @@ class HermesAgentAPI:
         底层的混音引擎实例，可用于更细粒度的控制。
     """
 
-    def __init__(self, engine=None):
+    def __init__(self, engine=None, preview_renderer=None):
         """初始化 Agent API。
 
         Parameters
@@ -419,8 +419,12 @@ class HermesAgentAPI:
         engine : MixingEngine | None
             MixingEngine 实例。如果为 None，延迟创建
             （需在调用 create_and_mix 前设置）。
+        preview_renderer : PreviewRenderer | None
+            可选的 REAPER 原生预览渲染器。提供时优先使用
+            （回退到 pydub）。
         """
         self._engine = engine
+        self._preview_renderer = preview_renderer
         self._project_name: str | None = None
         self._ops_log: list[dict] = []
 
@@ -1017,14 +1021,18 @@ class HermesAgentAPI:
         except Exception as exc:
             log.debug("进度回调异常: %s", exc)
 
-    @staticmethod
     def _generate_preview(
+        self,
         render_path: str | None,
         output_dir: str,
     ) -> str | None:
         """从全质量 WAV 生成 MP3 预览。
 
-        注意：依赖 pydub/ffmpeg 外部工具，失败时静默跳过。
+        优先级链：
+        1. PreviewRenderer（REAPER 原生 MP3 渲染）
+        2. pydub（ffmpeg 回退）
+
+        失败时静默跳过。
         """
         if not render_path or not os.path.exists(render_path):
             return None
@@ -1034,12 +1042,29 @@ class HermesAgentAPI:
             f"{os.path.splitext(os.path.basename(render_path))[0]}_preview.mp3",
         )
 
-        # 尝试使用 pydub
+        # 优先级 1: PreviewRenderer（REAPER 原生）
+        if self._preview_renderer is not None:
+            try:
+                result = self._preview_renderer.render_preview(
+                    output_dir=output_dir or os.path.dirname(render_path),
+                    duration_sec=15.0,
+                )
+                if result.success and result.preview_path:
+                    log.info(
+                        "MP3 预览已生成 (PreviewRenderer): %s",
+                        result.preview_path,
+                    )
+                    return result.preview_path
+                log.debug("PreviewRenderer 失败: %s", result.error)
+            except Exception as exc:
+                log.debug("PreviewRenderer 异常: %s", exc)
+
+        # 优先级 2: pydub（ffmpeg 回退）
         try:
             from pydub import AudioSegment
             audio = AudioSegment.from_wav(render_path)
             audio.export(preview_path, format="mp3", bitrate="128k")
-            log.info("MP3 预览已生成: %s", preview_path)
+            log.info("MP3 预览已生成 (pydub): %s", preview_path)
             return preview_path
         except ImportError:
             log.debug("pydub 未安装，跳过 MP3 预览生成")

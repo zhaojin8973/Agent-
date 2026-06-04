@@ -167,6 +167,8 @@ class MixingProfile:
     backing_chain: list[FXPreset] = field(default_factory=list)
     bus_reverb: Optional[FXPreset] = None
     reverb_level_db: float = -8.0
+    bus_delay: Optional[FXPreset] = None
+    delay_level_db: float = -12.0
     master_limiter: FXPreset = field(
         default_factory=lambda: FXPreset(name="VST: FabFilter Pro-L 2 (FabFilter)")
     )
@@ -177,6 +179,49 @@ class MixingProfile:
         "pop":                    [6, 9],
         "chinese_folk_bel_canto": [9, 12],
     })
+
+    @classmethod
+    def for_genre(cls, genre: str) -> "MixingProfile":
+        """根据流派名加载对应的 Profile YAML。
+
+        YAML 文件位于 ``profiles/vocal_{genre}.yaml``。
+        未找到对应文件时返回默认 Profile。
+
+        Parameters
+        ----------
+        genre : str
+            流派名称，如 ``"pop"``, ``"rock"``, ``"jazz"`` 等。
+
+        Returns
+        -------
+        MixingProfile
+        """
+        import os
+        _GENRE_YAML_MAP: dict[str, str] = {
+            "pop": "vocal_pop",
+            "rock": "vocal_rock",
+            "folk": "vocal_folk",
+            "ballad": "vocal_ballad",
+            "electronic": "vocal_electronic",
+            "hiphop": "vocal_hiphop",
+            "rnb": "vocal_rnb",
+            "jazz": "vocal_jazz",
+            "chinese_folk_bel_canto": "vocal_chinese_bel_canto",
+            "chinese_bel_canto": "vocal_chinese_bel_canto",
+        }
+
+        profile_name = _GENRE_YAML_MAP.get(genre, "vocal_pop")
+        # 从 src/hermes_core/profiles.py 上溯三级到项目根目录
+        _project_root = os.path.dirname(
+            os.path.dirname(os.path.dirname(__file__))
+        )
+        profile_dir = os.path.join(_project_root, "profiles")
+        yaml_path = os.path.join(profile_dir, f"{profile_name}.yaml")
+
+        try:
+            return cls.from_yaml(yaml_path)
+        except (FileNotFoundError, OSError):
+            return cls()  # 返回默认 Profile
 
     @classmethod
     def from_yaml(cls, path: str) -> "MixingProfile":
@@ -228,6 +273,7 @@ class MixingProfile:
         vocal = [cls._parse_fx(f) for f in d.get("vocal_chain", [])]
         backing = [cls._parse_fx(f) for f in d.get("backing_chain", [])]
         reverb = cls._parse_fx(d.get("bus_reverb"))
+        delay = cls._parse_fx(d.get("bus_delay"))
         limiter = cls._parse_fx(d.get("master_limiter")) or FXPreset(
             name="VST: FabFilter Pro-L 2 (FabFilter)"
         )
@@ -249,6 +295,8 @@ class MixingProfile:
             backing_chain=[f for f in backing if f is not None],
             bus_reverb=reverb,
             reverb_level_db=float(d.get("reverb_level_db", -8.0)),
+            bus_delay=delay,
+            delay_level_db=float(d.get("delay_level_db", -12.0)),
             master_limiter=limiter,
             genre_table=genre_table,
         )
@@ -260,6 +308,8 @@ class MixingProfile:
             names.append(fx.name)
         if self.bus_reverb:
             names.append(self.bus_reverb.name)
+        if self.bus_delay:
+            names.append(self.bus_delay.name)
         names.append(self.master_limiter.name)
         return list(dict.fromkeys(names))  # preserve order, dedupe
 

@@ -29,6 +29,13 @@ bus_reverb:
     Mix: 0.22
 reverb_level_db: -16.0
 
+# ── delay bus ──（rock 用 slap delay 增加空间感）
+bus_delay:
+  name: "EchoBoy (Soundtoys)"
+  params:
+    Mix: 0.18
+delay_level_db: -14.0
+
 # ── master limiter ──
 master_limiter:
   name: "FabFilter Pro-L 2 (FabFilter)"

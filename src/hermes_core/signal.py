@@ -222,20 +222,6 @@ class SignalAnalyzer:
         return SignalAnalyzer._block_power_to_lufs(integrated_power)
 
     @staticmethod
-    def _biquad_hp(x: np.ndarray, fc: float, sample_rate: int) -> np.ndarray:
-        """First-order high-pass via bilinear transform of H(s)=s/(s+wc).
-
-        使用 ``scipy.signal.lfilter`` 进行向量化滤波。
-        """
-        if len(x) < 2:
-            return x.copy()
-        w = 2.0 * math.pi * fc / sample_rate
-        k = w / 2.0
-        b = np.array([1.0 / (1.0 + k), -1.0 / (1.0 + k)], dtype=np.float64)
-        a = np.array([1.0, (k - 1.0) / (1.0 + k)], dtype=np.float64)
-        return scipy.signal.lfilter(b, a, x).astype(np.float64)
-
-    @staticmethod
     def _design_rlb_filter(sample_rate: int) -> tuple[np.ndarray, np.ndarray]:
         """设计 ITU-R BS.1770-4 二阶 RLB 高通滤波器。
 

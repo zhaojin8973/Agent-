@@ -18,6 +18,7 @@ from typing import Optional
 import numpy as np
 import pyloudnorm as pyln
 
+from hermes_core.audio_utils import read_pcm
 from hermes_core.signal import SignalAnalyzer
 
 log = logging.getLogger(__name__)
@@ -136,7 +137,7 @@ def find_optimal_gain(
     is monotonic, so binary search finds the root in ~log₂(range) steps.
     """
     # ── read probe WAV ──
-    pcm, sr = SignalAnalyzer._read_pcm(probe_path)
+    pcm, sr = read_pcm(probe_path)
     if pcm.size == 0:
         return LoudnessResult(0.0, -120.0, -120.0, 0, False, 0.0)
 
@@ -200,7 +201,7 @@ def verify_output(
     damping: float = 0.8,
 ) -> VerifyResult:
     """Check whether the final render hit the LUFS target."""
-    pcm, sr = SignalAnalyzer._read_pcm(final_path)
+    pcm, sr = read_pcm(final_path)
     meter = pyln.Meter(sr)
     actual_lufs = meter.integrated_loudness(pcm)
 
@@ -231,12 +232,12 @@ def run_calibration(
     Run once after changing limiter style/settings.  The offset is saved
     to disk and loaded automatically by ``load_calibration()``.
     """
-    pcm, sr = SignalAnalyzer._read_pcm(probe_path)
+    pcm, sr = read_pcm(probe_path)
     meter = pyln.Meter(sr)
 
     sim_lufs = meter.integrated_loudness(_hard_clip(pcm, applied_gain, ceiling_dbtp))
 
-    final_pcm, _ = SignalAnalyzer._read_pcm(final_path)
+    final_pcm, _ = read_pcm(final_path)
     actual_lufs = meter.integrated_loudness(final_pcm)
 
     offset_lufs = actual_lufs - sim_lufs

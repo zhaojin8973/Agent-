@@ -14,6 +14,7 @@ tolerance_lufs: 0.3
 # ── vocal processing chain ──
 vocal_chain:
   - name: "FabFilter Pro-Q 3 (FabFilter)"
+  - name: "FabFilter Pro-DS (FabFilter)"
   - name: "Waves RVox (Waves)"
 
 # ── backing (instrumental) processing chain ──
@@ -25,6 +26,13 @@ bus_reverb:
   params:
     Mix: 0.25
 reverb_level_db: -8.0
+
+# ── delay bus ──（pop 用节奏延迟增加律动空间）
+bus_delay:
+  name: "EchoBoy (Soundtoys)"
+  params:
+    Mix: 0.15
+delay_level_db: -16.0
 
 # ── master limiter ──
 master_limiter:
