@@ -544,9 +544,207 @@ PLUGIN_REGISTRY: dict[str, dict] = {
             "Decay": {"range": (0.05, 70.0), "curve": "linear"},
         },
     },
+    "VST3: ValhallaVintageVerb (Valhalla DSP, LLC)": {
+        "type": "reverb",
+        "params": {
+            "Mix":            {"range": (0.0, 1.0), "curve": "linear"},
+            "PreDelay":       {"range": (0.0, 1.0), "curve": "linear"},
+            "Decay":          {"range": (0.0, 1.0), "curve": "linear"},
+            "Size":           {"range": (0.0, 1.0), "curve": "linear"},
+            "Attack":         {"range": (0.0, 1.0), "curve": "linear"},
+            "BassMult":       {"range": (0.0, 1.0), "curve": "linear"},
+            "BassXover":      {"range": (0.0, 1.0), "curve": "linear"},
+            "HighShelf":      {"range": (0.0, 1.0), "curve": "linear"},
+            "HighFreq":       {"range": (0.0, 1.0), "curve": "linear"},
+            "EarlyDiffusion": {"range": (0.0, 1.0), "curve": "linear"},
+            "LateDiffusion":  {"range": (0.0, 1.0), "curve": "linear"},
+            "ModRate":        {"range": (0.0, 1.0), "curve": "linear"},
+            "ModDepth":       {"range": (0.0, 1.0), "curve": "linear"},
+            "HighCut":        {"range": (0.0, 1.0), "curve": "linear"},
+            "LowCut":         {"range": (0.0, 1.0), "curve": "linear"},
+            "ColorMode":      {"range": (0.0, 1.0), "curve": "linear"},
+            "ReverbMode":     {"range": (0.0, 1.0), "curve": "linear"},
+        },
+    },
     "ReaVerbate (Cockos)": {
         "type": "reverb",
         "params": {},
+    },
+
+    # ── Spatial: Reverbs ────────────────────────────────
+    "VST: Little Plate (Soundtoys)": {
+        "type": "reverb",
+        "params": {
+            "Mix":        {"range": (0.0, 1.0), "curve": "linear"},
+            "Decay":      {"range": (0.0, 1.0), "curve": "linear"},
+            "Low Cut":    {"range": (0.0, 1.0), "curve": "linear"},
+            "Mod Enable": {"range": (0.0, 1.0), "curve": "linear"},
+        },
+    },
+    "VST: ValhallaPlate (Valhalla DSP, LLC)": {
+        "type": "reverb",
+        "params": {
+            "Mix":        {"range": (0.0, 1.0), "curve": "linear"},
+            "PreDelay":   {"range": (0.0, 1.0), "curve": "linear"},
+            "Decay":      {"range": (0.0, 1.0), "curve": "linear"},
+            "Size":       {"range": (0.0, 1.0), "curve": "linear"},
+            "Width":      {"range": (0.0, 1.0), "curve": "linear"},
+            "ModRate":    {"range": (0.0, 1.0), "curve": "linear"},
+            "ModDepth":   {"range": (0.0, 1.0), "curve": "linear"},
+            "LowEQFreq":  {"range": (0.0, 1.0), "curve": "linear"},
+            "LowEQGain":  {"range": (0.0, 1.0), "curve": "linear"},
+            "HighEQFreq": {"range": (0.0, 1.0), "curve": "linear"},
+            "HighEQGain": {"range": (0.0, 1.0), "curve": "linear"},
+            "Type":       {"range": (0.0, 1.0), "curve": "linear"},
+        },
+    },
+    "VST: ValhallaRoom (Valhalla DSP, LLC)": {
+        "type": "reverb",
+        "params": {
+            "mix":            {"range": (0.0, 1.0), "curve": "linear"},
+            "predelay":       {"range": (0.0, 1.0), "curve": "linear"},
+            "decay":          {"range": (0.0, 1.0), "curve": "linear"},
+            "HiCut":          {"range": (0.0, 1.0), "curve": "linear"},
+            "LoCut":          {"range": (0.0, 1.0), "curve": "linear"},
+            "earlyLateMix":   {"range": (0.0, 1.0), "curve": "linear"},
+            "lateSize":       {"range": (0.0, 1.0), "curve": "linear"},
+            "earlySize":      {"range": (0.0, 1.0), "curve": "linear"},
+            "diffusion":      {"range": (0.0, 1.0), "curve": "linear"},
+            "RTBassMultiply": {"range": (0.0, 1.0), "curve": "linear"},
+            "RTHighMultiply": {"range": (0.0, 1.0), "curve": "linear"},
+        },
+    },
+    "VST: LX480 v4 (Relab Development)": {
+        "type": "reverb",
+        "params": {
+            # E1 引擎关键参数
+            "E1: Reverb Time Mid (RTM)":        {"range": (0.0, 1.0), "curve": "linear"},
+            "E1: Pre Delay (PDL)":              {"range": (0.0, 1.0), "curve": "linear"},
+            "E1: Size (SIZ)":                   {"range": (0.0, 1.0), "curve": "linear"},
+            "E1: High Frequency Cutoff (HFC)":  {"range": (0.0, 1.0), "curve": "linear"},
+            "E1: Low Frequency Cutoff (LFC)":   {"range": (0.0, 1.0), "curve": "linear"},
+            "E1: Mix (MIX)":                    {"range": (0.0, 1.0), "curve": "linear"},
+            "E1: Bass Multiply (BAS)":          {"range": (0.0, 1.0), "curve": "linear"},
+            "E1: Diffusion (DIF)":              {"range": (0.0, 1.0), "curve": "linear"},
+            "E1: Width (WID)":                  {"range": (0.0, 1.0), "curve": "linear"},
+            "E1: Reverb Mode (MOD)":            {"range": (0.0, 1.0), "curve": "linear"},
+        },
+    },
+    "VST: FabFilter Pro-R 2 (FabFilter)": {
+        "type": "reverb",
+        "params": {
+            "Space":        {"range": (0.0, 1.0), "curve": "linear"},
+            "Decay Rate":   {"range": (0.0, 1.0), "curve": "linear"},
+            "Distance":     {"range": (0.0, 1.0), "curve": "linear"},
+            "Brightness":   {"range": (0.0, 1.0), "curve": "linear"},
+            "Style":        {"range": (0.0, 1.0), "curve": "linear"},
+            "Character":    {"range": (0.0, 1.0), "curve": "linear"},
+            "Thickness":    {"range": (0.0, 1.0), "curve": "linear"},
+            "Stereo Width": {"range": (0.0, 1.0), "curve": "linear"},
+            "Ducking":      {"range": (0.0, 1.0), "curve": "linear"},
+            "Mix":          {"range": (0.0, 1.0), "curve": "linear"},
+            "Predelay":     {"range": (0.0, 1.0), "curve": "linear"},
+        },
+    },
+    "VST3: REV6000 (Relab Development)": {
+        "type": "reverb",
+        "params": {
+            "Dry Level":     {"range": (0.0, 1.0), "curve": "linear"},
+            "Early Level":   {"range": (0.0, 1.0), "curve": "linear"},
+            "Reverb Level":  {"range": (0.0, 1.0), "curve": "linear"},
+            "Decay":         {"range": (0.0, 1.0), "curve": "linear"},
+            "Pre Delay":     {"range": (0.0, 1.0), "curve": "linear"},
+            "Reverb Size":   {"range": (0.0, 1.0), "curve": "linear"},
+            "Lo Cut":        {"range": (0.0, 1.0), "curve": "linear"},
+            "Hi Cut":        {"range": (0.0, 1.0), "curve": "linear"},
+            "Modulation Rate":  {"range": (0.0, 1.0), "curve": "linear"},
+            "Modulation Depth": {"range": (0.0, 1.0), "curve": "linear"},
+            "Reverb Type":   {"range": (0.0, 1.0), "curve": "linear"},
+        },
+    },
+    "VST3: Supernova (Nuro Audio)": {
+        "type": "reverb",
+        "params": {
+            "Global Mix":        {"range": (0.0, 1.0), "curve": "linear"},
+            "Reverb Decay Time": {"range": (0.0, 1.0), "curve": "linear"},
+            "Reverb Depth":      {"range": (0.0, 1.0), "curve": "linear"},
+            "Reverb Pre-Delay":  {"range": (0.0, 1.0), "curve": "linear"},
+            "Reverb Low Color":  {"range": (0.0, 1.0), "curve": "linear"},
+            "Reverb Hi Color":   {"range": (0.0, 1.0), "curve": "linear"},
+            "Delay Rate":        {"range": (0.0, 1.0), "curve": "linear"},
+            "Delay Feedback":    {"range": (0.0, 1.0), "curve": "linear"},
+            "Duck Amount":       {"range": (0.0, 1.0), "curve": "linear"},
+        },
+    },
+    "VST3: UAD EMT 140 (Universal Audio)": {
+        "type": "reverb",
+        "params": {
+            "Plate":   {"range": (0.0, 1.0), "curve": "linear"},   # 板类型 (A/B/C)
+            "DampA":   {"range": (0.0, 1.0), "curve": "linear"},   # 阻尼 A
+            "DampB":   {"range": (0.0, 1.0), "curve": "linear"},   # 阻尼 B
+            "DampC":   {"range": (0.0, 1.0), "curve": "linear"},   # 阻尼 C
+            "EQ":      {"range": (0.0, 1.0), "curve": "linear"},   # EQ 开关
+            "LFreq":   {"range": (0.0, 1.0), "curve": "linear"},   # 低频频率
+            "LGain":   {"range": (0.0, 1.0), "curve": "linear"},   # 低频增益
+            "HFreq":   {"range": (0.0, 1.0), "curve": "linear"},   # 高频频率
+            "HGain":   {"range": (0.0, 1.0), "curve": "linear"},   # 高频增益
+            "PreDly":  {"range": (0.0, 1.0), "curve": "linear"},   # 预延迟
+            "ModRate": {"range": (0.0, 1.0), "curve": "linear"},   # 调制速率
+            "ModDepth":{"range": (0.0, 1.0), "curve": "linear"},   # 调制深度
+            "Width":   {"range": (0.0, 1.0), "curve": "linear"},   # 立体声宽度
+            "Mix":     {"range": (0.0, 1.0), "curve": "linear"},   # 干湿比
+            "LowCut":  {"range": (0.0, 1.0), "curve": "linear"},   # 低切
+        },
+    },
+
+    # ── Spatial: Delays ────────────────────────────────
+    "VST3: EchoBoy (Soundtoys)": {
+        "type": "delay",
+        "params": {
+            "InputGain":      {"range": (0.0, 1.0), "curve": "linear"},
+            "OutputGain":     {"range": (0.0, 1.0), "curve": "linear"},
+            "Mix":            {"range": (0.0, 1.0), "curve": "linear"},
+            "Mode":           {"range": (0.0, 1.0), "curve": "linear"},
+            "Echo1Mode":      {"range": (0.0, 1.0), "curve": "linear"},
+            "Echo1Note":      {"range": (0.0, 1.0), "curve": "linear"},
+            "Echo1Time":      {"range": (0.0, 1.0), "curve": "linear"},
+            "Echo2Mode":      {"range": (0.0, 1.0), "curve": "linear"},
+            "Echo2Note":      {"range": (0.0, 1.0), "curve": "linear"},
+            "Echo2Time":      {"range": (0.0, 1.0), "curve": "linear"},
+            "Feedback":       {"range": (0.0, 1.0), "curve": "linear"},
+            "PrimeNumbers":   {"range": (0.0, 1.0), "curve": "linear"},
+            "Groove":         {"range": (0.0, 1.0), "curve": "linear"},
+            "Feel":           {"range": (0.0, 1.0), "curve": "linear"},
+            "Saturation":     {"range": (0.0, 1.0), "curve": "linear"},
+            "LowCut":         {"range": (0.0, 1.0), "curve": "linear"},
+            "HighCut":        {"range": (0.0, 1.0), "curve": "linear"},
+            "RhythmMode":     {"range": (0.0, 1.0), "curve": "linear"},
+            "RhythmNote":     {"range": (0.0, 1.0), "curve": "linear"},
+            "RhythmTime":     {"range": (0.0, 1.0), "curve": "linear"},
+            "RhythmRepeats":  {"range": (0.0, 1.0), "curve": "linear"},
+            "RhythmDecay":    {"range": (0.0, 1.0), "curve": "linear"},
+            "Style":          {"range": (0.0, 1.0), "curve": "linear"},
+            "Tempo":          {"range": (0.0, 1.0), "curve": "linear"},
+        },
+    },
+    "VST3: ValhallaDelay (Valhalla DSP, LLC)": {
+        "type": "delay",
+        "params": {
+            "Mix":          {"range": (0.0, 1.0), "curve": "linear"},
+            "DelayStyle":   {"range": (0.0, 1.0), "curve": "linear"},
+            "DelayL_Ms":    {"range": (0.0, 1.0), "curve": "linear"},
+            "Feedback":     {"range": (0.0, 1.0), "curve": "linear"},
+            "Width":        {"range": (0.0, 1.0), "curve": "linear"},
+            "DriveIn":      {"range": (0.0, 1.0), "curve": "linear"},
+            "Age":          {"range": (0.0, 1.0), "curve": "linear"},
+            "Diffusion":    {"range": (0.0, 1.0), "curve": "linear"},
+            "LowCut":       {"range": (0.0, 1.0), "curve": "linear"},
+            "HighCut":      {"range": (0.0, 1.0), "curve": "linear"},
+            "ModRate":      {"range": (0.0, 1.0), "curve": "linear"},
+            "ModDepth":     {"range": (0.0, 1.0), "curve": "linear"},
+            "Ducking":      {"range": (0.0, 1.0), "curve": "linear"},
+            "Era":          {"range": (0.0, 1.0), "curve": "linear"},
+        },
     },
 }
 

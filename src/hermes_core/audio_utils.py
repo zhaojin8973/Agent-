@@ -116,3 +116,68 @@ def to_mono(pcm: np.ndarray) -> np.ndarray:
     if pcm.shape[1] == 1:
         return pcm[:, 0].astype(np.float64)
     return np.mean(pcm, axis=1)
+
+
+# ════════════════════════════════════════════════════════════════
+# 音符值 ↔ 毫秒转换
+# ════════════════════════════════════════════════════════════════
+
+
+def note_to_ms(note: str, bpm: float = 120.0) -> float:
+    """将音乐音符值转换为毫秒。
+
+    Parameters
+    ----------
+    note : str
+        音符值，如 ``"1/4"``、``"1/8D"``（附点）、``"1/4T"``（三连音）。
+        也接受纯数字字符串（如 ``"100.0"``），直接作为毫秒值返回。
+    bpm : float
+        每分钟拍数，默认 120。
+
+    Returns
+    -------
+    float
+        对应的毫秒值。
+
+    Raises
+    ------
+    ValueError
+        音符值格式无法识别。
+
+    Examples
+    --------
+    >>> note_to_ms("1/4", 120)
+    500.0
+    >>> note_to_ms("1/8D", 120)  # 附点八分音符
+    375.0
+    >>> note_to_ms("100.0")
+    100.0
+    """
+    stripped = note.strip()
+    # 纯毫秒值
+    try:
+        return float(stripped)
+    except ValueError:
+        pass
+
+    quarter_ms = 60000.0 / max(bpm, 1.0)
+    mapping = {
+        "1/1":   4.0,
+        "1/2":   2.0,
+        "1/4":   1.0,
+        "1/8":   0.5,
+        "1/16":  0.25,
+        "1/32":  0.125,
+        "1/8D":  0.5 * 1.5,       # 附点八分
+        "1/4D":  1.0 * 1.5,       # 附点四分
+        "1/16D": 0.25 * 1.5,      # 附点十六分
+        "1/4T":  1.0 * 2.0 / 3.0, # 四分三连音
+        "1/8T":  0.5 * 2.0 / 3.0, # 八分三连音
+        "1/2T":  2.0 * 2.0 / 3.0, # 二分三连音
+    }
+    multiplier = mapping.get(stripped)
+    if multiplier is None:
+        raise ValueError(
+            f"未知音符值 '{note}'。支持: {sorted(mapping.keys())} 或纯毫秒值"
+        )
+    return quarter_ms * multiplier
