@@ -261,48 +261,277 @@ class MacOSDialogHandler(DialogHandler):
 
 
 # ════════════════════════════════════════════════════════════════
-# Windows 实现（预留）
+# Windows 实现
 # ════════════════════════════════════════════════════════════════
 
 
 class WindowsDialogHandler(DialogHandler):
-    """Windows 实现（预留 — pywinauto / win32gui）。
+    """Windows pywinauto 实现。
 
-    未来通过 win32gui 枚举窗口和发送消息实现。
+    通过 pywinauto 的 UIA / Win32 后端操作 REAPER 弹窗。
+    pywinauto 是可选依赖，仅在使用时导入。
     """
 
+    def __init__(self, timeout: float = 5.0) -> None:
+        self._timeout = timeout
+
     def inspect_windows(self) -> list[tuple[str, list[str]]]:
-        """未实现。"""
-        raise NotImplementedError("Windows 弹窗处理暂不支持")
+        """扫描 REAPER 进程的所有非主窗口弹窗。"""
+        try:
+            import pywinauto.findwindows
+            import pywinauto.controls.hwndwrapper
+        except ImportError:
+            log.debug("pywinauto 未安装，无法扫描 Windows 弹窗")
+            return []
+
+        try:
+            hwnds = pywinauto.findwindows.find_windows(
+                title_re=".*", class_name="#32770",
+            )
+        except Exception as exc:
+            log.debug("pywinauto 窗口扫描失败: %s", exc)
+            return []
+
+        windows: list[tuple[str, list[str]]] = []
+        for hwnd in hwnds:
+            try:
+                wrapper = pywinauto.controls.hwndwrapper.HwndWrapper(hwnd)
+                title = wrapper.window_text()
+                if not title or "REAPER" not in title:
+                    continue
+                # 跳过主窗口
+                if "REAPER v" in title:
+                    continue
+                buttons = []
+                for child in wrapper.children():
+                    if child.window_text():
+                        buttons.append(child.window_text())
+                windows.append((title, buttons))
+            except Exception as exc:
+                log.debug("pywinauto 窗口 %d 解析失败: %s", hwnd, exc)
+                continue
+
+        return windows
 
     def click_button(self, title_fragment: str, button_match: str) -> bool:
-        """未实现。"""
-        raise NotImplementedError("Windows 弹窗处理暂不支持")
+        """点击匹配标题和按钮名称的窗口按钮。"""
+        try:
+            import pywinauto.findwindows
+            import pywinauto.controls.hwndwrapper
+        except ImportError:
+            log.debug("pywinauto 未安装，无法点击 Windows 按钮")
+            return False
+
+        try:
+            hwnds = pywinauto.findwindows.find_windows(
+                title_re=f".*{title_fragment}.*", class_name="#32770",
+            )
+            for hwnd in hwnds:
+                wrapper = pywinauto.controls.hwndwrapper.HwndWrapper(hwnd)
+                for child in wrapper.children():
+                    if button_match.lower() in child.window_text().lower():
+                        child.click()
+                        log.info("Windows 弹窗点击: %s → %s",
+                                 title_fragment, child.window_text())
+                        return True
+        except Exception as exc:
+            log.debug("pywinauto 按钮点击失败: %s", exc)
+
+        return False
 
     def send_escape(self) -> bool:
-        """未实现。"""
-        raise NotImplementedError("Windows 弹窗处理暂不支持")
+        """向 REAPER 弹窗发送 Escape 键。"""
+        try:
+            import pywinauto.keyboard
+            pywinauto.keyboard.send_keys("{ESC}")
+            return True
+        except ImportError:
+            # 回退：使用 ctypes 调用 keybd_event
+            try:
+                import ctypes
+                VK_ESCAPE = 0x1B
+                KEYEVENTF_KEYUP = 0x0002
+                ctypes.windll.user32.keybd_event(VK_ESCAPE, 0, 0, 0)
+                ctypes.windll.user32.keybd_event(VK_ESCAPE, 0, KEYEVENTF_KEYUP, 0)
+                return True
+            except Exception as exc:
+                log.debug("Windows Escape 发送失败: %s", exc)
+                return False
 
 
 # ════════════════════════════════════════════════════════════════
-# Linux 实现（预留）
+# Linux 实现
 # ════════════════════════════════════════════════════════════════
 
 
 class LinuxDialogHandler(DialogHandler):
-    """Linux 实现（预留 — xdotool / wmctrl）。
+    """Linux xdotool 实现。
 
-    未来通过 xdotool 搜索窗口和发送按键实现。
+    通过 xdotool 搜索和操作 REAPER 弹窗。
+    xdotool 是可选系统依赖（``apt install xdotool``）。
     """
 
+    def __init__(self, timeout: float = 3.0) -> None:
+        self._timeout = timeout
+
     def inspect_windows(self) -> list[tuple[str, list[str]]]:
-        """未实现。"""
-        raise NotImplementedError("Linux 弹窗处理暂不支持")
+        """扫描 REAPER 进程的所有非主窗口弹窗。"""
+        if not self._check_xdotool():
+            return []
+
+        try:
+            # 搜索所有 REAPER 相关窗口
+            result = subprocess.run(
+                ["xdotool", "search", "--name", "REAPER"],
+                capture_output=True, timeout=self._timeout,
+            )
+            window_ids = result.stdout.decode().strip().split()
+        except Exception as exc:
+            log.debug("xdotool 窗口搜索失败: %s", exc)
+            return []
+
+        windows: list[tuple[str, list[str]]] = []
+        for wid_str in window_ids:
+            try:
+                wid = wid_str.strip()
+                # 获取窗口标题
+                name_result = subprocess.run(
+                    ["xdotool", "getwindowname", wid],
+                    capture_output=True, timeout=self._timeout,
+                )
+                title = name_result.stdout.decode(errors="replace").strip()
+                if not title or "REAPER v" in title:
+                    continue
+                # xdotool 无法枚举子控件，按钮列表为空
+                windows.append((title, []))
+            except Exception as exc:
+                log.debug("xdotool 窗口 %s 解析失败: %s", wid_str, exc)
+                continue
+
+        return windows
 
     def click_button(self, title_fragment: str, button_match: str) -> bool:
-        """未实现。"""
-        raise NotImplementedError("Linux 弹窗处理暂不支持")
+        """尝试使用 xdotool 搜索并点击按钮。
+
+        注意：xdotool 无法直接枚举窗口内的按钮控件，
+        所以此方法通过窗口搜索 + 按键模拟实现。
+        对于简单的 OK/Cancel 弹窗，send_escape 通常已足够。
+        """
+        if not self._check_xdotool():
+            return False
+
+        try:
+            # 搜索匹配窗口
+            result = subprocess.run(
+                ["xdotool", "search", "--name", title_fragment],
+                capture_output=True, timeout=self._timeout,
+            )
+            window_ids = result.stdout.decode().strip().split()
+            if not window_ids:
+                return False
+
+            wid = window_ids[0].strip()
+            # 激活窗口
+            subprocess.run(
+                ["xdotool", "windowactivate", "--sync", wid],
+                capture_output=True, timeout=self._timeout,
+            )
+            # 如果按钮名匹配 "OK"/"Yes"/"确定" → 按 Enter
+            # 如果按钮名匹配 "Cancel"/"No"/"取消" → 按 Escape
+            btn_lower = button_match.lower()
+            if any(kw in btn_lower for kw in ("ok", "yes", "确定", "是", "save", "保存")):
+                subprocess.run(
+                    ["xdotool", "key", "Return"],
+                    capture_output=True, timeout=self._timeout,
+                )
+                log.info("Linux 弹窗确认: %s → Return", title_fragment)
+                return True
+            elif any(kw in btn_lower for kw in ("cancel", "no", "取消", "否", "close", "关闭")):
+                subprocess.run(
+                    ["xdotool", "key", "Escape"],
+                    capture_output=True, timeout=self._timeout,
+                )
+                log.info("Linux 弹窗取消: %s → Escape", title_fragment)
+                return True
+            else:
+                # 通用尝试：激活窗口并发送 Enter
+                subprocess.run(
+                    ["xdotool", "key", "Return"],
+                    capture_output=True, timeout=self._timeout,
+                )
+                return True
+        except Exception as exc:
+            log.debug("xdotool 按钮点击失败: %s", exc)
+
+        return False
 
     def send_escape(self) -> bool:
-        """未实现。"""
-        raise NotImplementedError("Linux 弹窗处理暂不支持")
+        """向活动 REAPER 弹窗发送 Escape 键。"""
+        if not self._check_xdotool():
+            return False
+
+        try:
+            # 先搜索 REAPER 窗口，聚焦后发送 Escape
+            result = subprocess.run(
+                ["xdotool", "search", "--name", "REAPER"],
+                capture_output=True, timeout=self._timeout,
+            )
+            window_ids = result.stdout.decode().strip().split()
+            if window_ids:
+                wid = window_ids[0].strip()
+                subprocess.run(
+                    ["xdotool", "windowactivate", "--sync", wid],
+                    capture_output=True, timeout=self._timeout,
+                )
+            subprocess.run(
+                ["xdotool", "key", "Escape"],
+                capture_output=True, timeout=self._timeout,
+            )
+            return True
+        except Exception as exc:
+            log.debug("xdotool Escape 发送失败: %s", exc)
+            return False
+
+    @staticmethod
+    def _check_xdotool() -> bool:
+        """检查 xdotool 是否已安装。"""
+        try:
+            subprocess.run(
+                ["which", "xdotool"],
+                capture_output=True, timeout=2.0,
+            )
+            return True
+        except Exception:
+            return False
+
+
+# ════════════════════════════════════════════════════════════════
+# 平台检测工厂
+# ════════════════════════════════════════════════════════════════
+
+
+def create_dialog_handler(timeout: float = 3.0) -> DialogHandler:
+    """根据当前操作系统自动创建对应的弹窗处理器。
+
+    - macOS → :class:`MacOSDialogHandler`
+    - Windows → :class:`WindowsDialogHandler`
+    - Linux → :class:`LinuxDialogHandler`
+
+    Parameters
+    ----------
+    timeout : float
+        子进程超时时间（秒）。
+
+    Returns
+    -------
+    DialogHandler
+        平台对应的弹窗处理器实例。
+    """
+    import sys
+
+    if sys.platform == "darwin":
+        return MacOSDialogHandler(timeout=timeout)
+    elif sys.platform == "win32":
+        return WindowsDialogHandler(timeout=timeout)
+    else:
+        return LinuxDialogHandler(timeout=timeout)

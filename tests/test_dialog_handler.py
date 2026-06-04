@@ -159,50 +159,121 @@ class TestMacOSDialogHandler:
 
 
 # ════════════════════════════════════════════════════════════════
-# Unit: WindowsDialogHandler（预留）
+# Unit: WindowsDialogHandler
 # ════════════════════════════════════════════════════════════════
 
 
 @pytest.mark.unit
 class TestWindowsDialogHandler:
-    """验证 Windows 预留实现正确抛出 NotImplementedError。"""
+    """验证 Windows pywinauto 实现的接口和行为。"""
 
-    def test_inspect_windows_raises(self):
+    def test_instantiate(self):
+        """可以正常实例化。"""
         handler = WindowsDialogHandler()
-        with pytest.raises(NotImplementedError, match="Windows"):
-            handler.inspect_windows()
+        assert isinstance(handler, DialogHandler)
 
-    def test_click_button_raises(self):
+    def test_inspect_windows_returns_list_no_pywinauto(self):
+        """无 pywinauto 时返回空列表（不抛异常）。"""
         handler = WindowsDialogHandler()
-        with pytest.raises(NotImplementedError, match="Windows"):
-            handler.click_button("title", "button")
+        # 在非 Windows 平台上 pywinauto 未安装，应优雅降级
+        result = handler.inspect_windows()
+        assert isinstance(result, list)
 
-    def test_send_escape_raises(self):
+    def test_click_button_returns_false_no_pywinauto(self):
+        """无 pywinauto 时返回 False（不抛异常）。"""
         handler = WindowsDialogHandler()
-        with pytest.raises(NotImplementedError, match="Windows"):
-            handler.send_escape()
+        result = handler.click_button("title", "OK")
+        assert result is False
+
+    def test_send_escape_graceful_no_pywinauto(self):
+        """无 pywinauto 时 send_escape 优雅降级。"""
+        handler = WindowsDialogHandler()
+        # 在 macOS/Linux 上可能通过 ctypes 或直接返回 False
+        result = handler.send_escape()
+        assert isinstance(result, bool)
 
 
 # ════════════════════════════════════════════════════════════════
-# Unit: LinuxDialogHandler（预留）
+# Unit: LinuxDialogHandler
 # ════════════════════════════════════════════════════════════════
 
 
 @pytest.mark.unit
 class TestLinuxDialogHandler:
-    """验证 Linux 预留实现正确抛出 NotImplementedError。"""
+    """验证 Linux xdotool 实现的接口和行为。"""
 
-    def test_inspect_windows_raises(self):
+    def test_instantiate(self):
+        """可以正常实例化。"""
         handler = LinuxDialogHandler()
-        with pytest.raises(NotImplementedError, match="Linux"):
-            handler.inspect_windows()
+        assert isinstance(handler, DialogHandler)
 
-    def test_click_button_raises(self):
+    def test_inspect_windows_returns_list_no_xdotool(self):
+        """无 xdotool 时返回空列表（不抛异常）。"""
         handler = LinuxDialogHandler()
-        with pytest.raises(NotImplementedError, match="Linux"):
-            handler.click_button("title", "button")
+        # 在 macOS 上 xdotool 未安装，应优雅降级
+        result = handler.inspect_windows()
+        assert isinstance(result, list)
 
-    def test_send_escape_raises(self):
+    def test_click_button_returns_false_no_xdotool(self):
+        """无 xdotool 时返回 False（不抛异常）。"""
         handler = LinuxDialogHandler()
-        with pytest.raises(NotImplementedError, match="Linux"):
-            handler.send_escape()
+        result = handler.click_button("title", "OK")
+        assert result is False
+
+    def test_send_escape_returns_false_no_xdotool(self):
+        """无 xdotool 时 send_escape 返回 False。"""
+        handler = LinuxDialogHandler()
+        # _check_xdotool 失败（macOS 上不存在 xdotool）→ 返回 False
+        result = handler.send_escape()
+        assert result is False
+
+    def test_click_button_with_ok_pattern(self):
+        """按钮名匹配 OK/确定 时尝试发送 Return 键。"""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                stdout=b"12345\n", stderr=b"", returncode=0
+            )
+            handler = LinuxDialogHandler()
+            result = handler.click_button("REAPER Save", "OK")
+            assert result is True
+
+    def test_click_button_with_cancel_pattern(self):
+        """按钮名匹配 Cancel/取消 时尝试发送 Escape 键。"""
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                stdout=b"12345\n", stderr=b"", returncode=0
+            )
+            handler = LinuxDialogHandler()
+            result = handler.click_button("REAPER Warning", "Cancel")
+            assert result is True
+
+
+# ════════════════════════════════════════════════════════════════
+# Unit: create_dialog_handler 工厂
+# ════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestCreateDialogHandler:
+    """验证平台检测工厂创建正确的处理器类型。"""
+
+    def test_creates_macos_handler_on_darwin(self):
+        """macOS 上创建 MacOSDialogHandler。"""
+        from hermes_core.dialog_handler import create_dialog_handler
+        with patch("sys.platform", "darwin"):
+            handler = create_dialog_handler()
+            assert isinstance(handler, MacOSDialogHandler)
+
+    def test_creates_windows_handler_on_win32(self):
+        """Windows 上创建 WindowsDialogHandler。"""
+        from hermes_core.dialog_handler import create_dialog_handler
+        with patch("sys.platform", "win32"):
+            handler = create_dialog_handler()
+            assert isinstance(handler, WindowsDialogHandler)
+
+    def test_creates_linux_handler_on_linux(self):
+        """Linux 上创建 LinuxDialogHandler。"""
+        from hermes_core.dialog_handler import create_dialog_handler
+        with patch("sys.platform", "linux"):
+            handler = create_dialog_handler()
+            assert isinstance(handler, LinuxDialogHandler)

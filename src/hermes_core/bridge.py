@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Optional
 
-from hermes_core.dialog_handler import MacOSDialogHandler
+from hermes_core.dialog_handler import DialogHandler, create_dialog_handler
 
 # reapy is imported lazily to avoid importing it before REAPER is running.
 _reapy = None
@@ -141,7 +141,7 @@ class DialogKiller:
         self._diagnosis_patterns: list[str] = list(_NEEDS_DIAGNOSIS_PATTERNS)
         self._save_patterns: list[str] = list(_SAVE_DIALOG_PATTERNS)
         self._never_dismiss_patterns: list[str] = list(_NEVER_DISMISS_PATTERNS)
-        self._dialog_handler: Optional[MacOSDialogHandler] = None
+        self._dialog_handler: Optional[DialogHandler] = None
 
     # ── Lifecycle ──────────────────────────────────────────
 
@@ -224,10 +224,10 @@ class DialogKiller:
             if self._enabled:
                 self._dismiss_dialogs()
 
-    def _get_handler(self) -> MacOSDialogHandler:
-        """Lazy-init the shared MacOSDialogHandler instance."""
+    def _get_handler(self) -> DialogHandler:
+        """根据当前平台懒初始化弹窗处理器。"""
         if self._dialog_handler is None:
-            self._dialog_handler = MacOSDialogHandler()
+            self._dialog_handler = create_dialog_handler()
         return self._dialog_handler
 
     def _inspect_windows(self) -> list[tuple[str, list[str]]]:

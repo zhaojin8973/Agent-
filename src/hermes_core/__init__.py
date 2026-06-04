@@ -76,7 +76,11 @@ from hermes_core.plugin_registry import (
 )
 
 # ── 弹窗处理（跨平台抽象）─────────────────────────────────────
-from hermes_core.dialog_handler import DialogHandler, MacOSDialogHandler
+from hermes_core.dialog_handler import (
+    DialogHandler, MacOSDialogHandler,
+    WindowsDialogHandler, LinuxDialogHandler,
+    create_dialog_handler,
+)
 
 __all__ = [
     # Bridge
@@ -179,4 +183,7 @@ __all__ = [
     # Dialog Handler
     "DialogHandler",
     "MacOSDialogHandler",
+    "WindowsDialogHandler",
+    "LinuxDialogHandler",
+    "create_dialog_handler",
 ]
