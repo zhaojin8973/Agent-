@@ -133,24 +133,6 @@ class SignalAnalyzer:
             sample_rate=sample_rate,
         )
 
-    @staticmethod
-    def _read_pcm(file_path: str) -> tuple[np.ndarray, int]:
-        """Read WAV via soundfile, return ``(n_samples, n_channels)`` float64 array.
-
-        Mono files are reshaped to 2-D for consistent downstream processing.
-        """
-        data, sr = sf.read(file_path, dtype="float64")
-        if data.ndim == 1:
-            data = data.reshape(-1, 1)
-        return data, sr
-
-    @staticmethod
-    def _to_mono(pcm: np.ndarray) -> np.ndarray:
-        """Downmix multi-channel to mono via standard (L+R) / nch."""
-        if pcm.ndim == 1:
-            return pcm
-        return np.mean(pcm, axis=1)
-
     # ── Loudness time series (ITU-R BS.1770-4 K-weighting) ───
 
     @staticmethod

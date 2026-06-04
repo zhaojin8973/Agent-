@@ -7,7 +7,8 @@
 
 import pytest
 
-from hermes_core.engine import (
+from hermes_core.engine import MixingEngine
+from hermes_core.genre_tables import (
     _GENRE_SPATIAL_PARAMS,
     _SPATIAL_PARAM_FALLBACK_MAP,
     _GENRE_REVERB_SEND_BASE,
@@ -20,7 +21,6 @@ from hermes_core.engine import (
     _SEND_LEVEL_MIN,
     _SEND_LEVEL_MAX,
     _SEND_DISABLED_THRESHOLD,
-    MixingEngine,
 )
 from hermes_core.spatial_engine import _compute_spatial_sends
 from hermes_core.audio_utils import note_to_ms

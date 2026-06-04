@@ -48,26 +48,11 @@ from hermes_core.config import HermesConfig
 
 # ── 从提取的子模块重新导出（向后兼容）──────────────────────────
 from hermes_core.genre_tables import (
-    _GENRE_VOCAL_TO_BACKING,
-    _PEAK_CEILING_DB,
-    _GENRE_TARGET_LUFS,
-    _CLIP_GAIN_REF_DB,
+    # 引擎直接使用
     _DEFAULT_TARGET_LUFS,
     _PRO_L2_RANGE_DB,
-    _GENRE_CREST_GR_RATIO,
     _GENRE_RVOX_MULTIPLIER,
     _GENRE_PRODS_RANGE,
-    _GENRE_CLA76_ATTACK_BASE,
-    _GENRE_CLA76_ATTACK_K,
-    _GENRE_REVERB_SEND_BASE,
-    _GENRE_DELAY_SEND_BASE,
-    _SEND_LEVEL_MIN,
-    _SEND_LEVEL_MAX,
-    _SEND_DISABLED_THRESHOLD,
-    _CREST_REFERENCE,
-    _PRESENCE_DEFICIT_THRESHOLD,
-    _SIBILANCE_REFERENCE_PEAK,
-    _SECTION_BOOST,
     _GENRE_RETURN_EQ,
     _GENRE_SPATIAL_PARAMS,
     _SPATIAL_PARAM_FALLBACK_MAP,
@@ -81,6 +66,23 @@ from hermes_core.genre_tables import (
     _CLA76_ATTACK_MS_TABLE,
     _CLA76_RELEASE_MS_TABLE,
     _GENRE_EQ_TWEAKS,
+    # 向后兼容重新导出（测试中广泛引用）
+    _GENRE_VOCAL_TO_BACKING,
+    _PEAK_CEILING_DB,
+    _GENRE_TARGET_LUFS,
+    _CLIP_GAIN_REF_DB,
+    _GENRE_CREST_GR_RATIO,
+    _GENRE_CLA76_ATTACK_BASE,
+    _GENRE_CLA76_ATTACK_K,
+    _GENRE_REVERB_SEND_BASE,
+    _GENRE_DELAY_SEND_BASE,
+    _SEND_LEVEL_MIN,
+    _SEND_LEVEL_MAX,
+    _SEND_DISABLED_THRESHOLD,
+    _CREST_REFERENCE,
+    _PRESENCE_DEFICIT_THRESHOLD,
+    _SIBILANCE_REFERENCE_PEAK,
+    _SECTION_BOOST,
     _MIN_EQ_Q,
     _PROQ3_SHAPE,
     _PROQ3_FREQ_LOG_BASE,
@@ -114,7 +116,7 @@ from hermes_core.eq_engine import (
     _ssleq_q_norm,
     _apply_ssleq_eq,
 )
-from hermes_core.mastering import MasteringEngine, _get_genre_target_lufs, _master_error, _friendly_hint
+from hermes_core.mastering import MasteringEngine, _get_genre_target_lufs, _master_error, _friendly_hint  # noqa: F401（向后兼容重新导出）
 from hermes_core.gain_staging import GainStagingEngine
 from hermes_core.spatial_engine import _compute_spatial_sends
 

@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from hermes_core.audio_utils import read_pcm, to_mono
 from hermes_core.spectrum import (
     SpectrumAnalyzer,
     SpectrumReport,
@@ -532,7 +533,7 @@ class TestReadPcmClassMethod:
         sig = _sine(1000, 1.0)
         p = str(tmp_path / "mono.wav")
         sf.write(p, sig, _SR)
-        data, sr = SpectrumAnalyzer._read_pcm(p)
+        data, sr = read_pcm(p)
         assert data.ndim == 2
         assert data.shape[1] == 1
         assert sr == _SR
@@ -544,7 +545,7 @@ class TestReadPcmClassMethod:
         stereo = np.column_stack([sig, sig * 0.5])
         p = str(tmp_path / "stereo.wav")
         sf.write(p, stereo, _SR)
-        data, sr = SpectrumAnalyzer._read_pcm(p)
+        data, sr = read_pcm(p)
         assert data.ndim == 2
         assert data.shape[1] == 2
         assert sr == _SR
@@ -557,14 +558,14 @@ class TestToMonoClassMethod:
     def test_mono_input_1d(self):
         """1-D input returns float64 copy."""
         sig = np.array([0.1, 0.2, 0.3], dtype=np.float32)
-        result = SpectrumAnalyzer._to_mono(sig)
+        result = to_mono(sig)
         assert result.dtype == np.float64
         assert len(result) == 3
 
     def test_mono_input_2d_single_channel(self):
         """2-D single channel extracts first column."""
         sig = np.array([[0.1], [0.2], [0.3]], dtype=np.float32)
-        result = SpectrumAnalyzer._to_mono(sig)
+        result = to_mono(sig)
         assert result.ndim == 1
         assert result.dtype == np.float64
         assert len(result) == 3
@@ -572,7 +573,7 @@ class TestToMonoClassMethod:
     def test_stereo_input_averaged(self):
         """Multi-channel averaged across channels."""
         sig = np.array([[0.1, 0.3], [0.2, 0.4], [0.3, 0.5]], dtype=np.float32)
-        result = SpectrumAnalyzer._to_mono(sig)
+        result = to_mono(sig)
         assert result.ndim == 1
         assert len(result) == 3
         assert result[0] == pytest.approx(0.2)  # mean(0.1, 0.3)

@@ -175,23 +175,6 @@ class SpectrumAnalyzer:
 
     # ── I/O helpers ───────────────────────────────────────────
 
-    @staticmethod
-    def _read_pcm(file_path: str) -> tuple[np.ndarray, int]:
-        """Read WAV via soundfile, return ``(n_samples, n_channels)`` float64."""
-        data, sr = sf.read(file_path, dtype="float64")
-        if data.ndim == 1:
-            data = data.reshape(-1, 1)
-        return data, sr
-
-    @staticmethod
-    def _to_mono(pcm: np.ndarray) -> np.ndarray:
-        """Downmix to mono via channel mean.  Returns 1-D float64."""
-        if pcm.ndim == 1:
-            return pcm.astype(np.float64)
-        if pcm.shape[1] == 1:
-            return pcm[:, 0].astype(np.float64)
-        return np.mean(pcm, axis=1)
-
     # ── STFT + P90 ────────────────────────────────────────────
 
     @staticmethod
