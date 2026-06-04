@@ -4,7 +4,6 @@ a single entry point for Hermes acceptance scenarios.
 """
 
 import logging
-import math
 import os
 import shutil
 import tempfile
@@ -137,6 +136,9 @@ from hermes_core.chain_renderer import (
     execute_chain as _execute_chain_impl,
     _init_translators,
 )
+from hermes_core.fx_builder import (
+    FXBuildContext, build_fx_params, _init_comp_translators,
+)
 
 log = logging.getLogger(__name__)
 
@@ -218,8 +220,9 @@ class MixingEngine:
         )
         self._spatial_result: dict = {}
 
-        # ── 惰性初始化 chain_renderer 翻译器 ──────────────────
+        # ── 惰性初始化子模块翻译器 ────────────────────────────
         _init_translators()
+        _init_comp_translators()
 
     # ── Context manager ──────────────────────────────────
 
@@ -445,13 +448,14 @@ class MixingEngine:
     ) -> list[AudioNode]:
         """Build a linked :class:`AudioNode` chain and apply FX to REAPER.
 
-        Returns the list of nodes (linked via ``add_downstream``).
+        参数推导委托到 :mod:`hermes_core.fx_builder` 中的策略函数。
+        REAPER 交互（FX 添加、set_param）统一在此处理。
         """
         nodes: list[AudioNode] = []
         prev: AudioNode | None = None
         sd = stem_data.get(stem_idx, {})
-        rms = sd.get("raw_rms_db")
-        peak = sd.get("raw_peak_db")
+        spectrum = getattr(self, "_last_spectrum", {}) or {}
+        eq_params = getattr(self, "_last_eq_params", {}) or {}
 
         for i, fx in enumerate(fx_list):
             idx = self._fx.add(track_index, fx.name)
@@ -462,12 +466,13 @@ class MixingEngine:
                 fx_type=fx_type,
                 params={},
             )
-            node.is_dirty = False  # initially clean — just applied
+            node.is_dirty = False
 
             if prev:
                 prev.add_downstream(node)
             nodes.append(node)
 
+            # ── EQ 特殊处理：调用 _apply_eq_baseline ──
             if fx_type == "eq":
                 file_path = sd.get("file_path", "")
                 eq_position = fx.eq_position if hasattr(fx, "eq_position") else "solo"
@@ -476,181 +481,39 @@ class MixingEngine:
                     genre=genre, stem_file_path=file_path,
                     position=eq_position, fx_name=fx.name,
                 )
-                # Update node params with derived EQ bands for traceability
                 if hasattr(self, "_last_eq_params"):
                     node.params = dict(self._last_eq_params)
-            elif fx_type in _TRANSLATORS and rms is not None and peak is not None:
-                intent = _derive_compressor_intent(rms, peak, genre=genre)
+                log.info("Added %s to track %d [%s]", fx.name, track_index, node.name)
+                prev = node
+                continue
 
-                # BPM-aware timing: override genre preset when BPM is known.
-                # Skip RVox — it has no attack/release params (single-fader).
-                preset = _get_compressor_preset(role, genre)
-                if bpm is not None and bpm > 0 and "cla-76" not in fx.name.lower() and fx_type != "rvox":
-                    bpm_timing = get_bpm_timing(bpm)
-                    if bpm_timing is not None:
-                        preset = dict(preset, **bpm_timing)
-                        log.info(
-                            "BPM-aware timing: %.0f BPM → attack=%.0fms release=%.0fms",
-                            bpm, bpm_timing["attack_ms"], bpm_timing["release_ms"],
-                        )
+            # ── 策略推导 ──
+            ctx = FXBuildContext(
+                fx_name=fx.name,
+                fx_type=fx_type,
+                role=role,
+                genre=genre,
+                bpm=bpm,
+                raw_rms_db=sd.get("raw_rms_db"),
+                raw_peak_db=sd.get("raw_peak_db"),
+                stem_file_path=sd.get("file_path", ""),
+                presence_deficit=spectrum.get("presence_deficit", 0.0),
+                last_eq_params=dict(eq_params),
+                eq_position=fx.eq_position if hasattr(fx, "eq_position") else "solo",
+            )
+            physical = build_fx_params(ctx)
 
-                # CLA-76: crest-driven attack + BPM-driven release
-                if "cla-76" in fx.name.lower():
-                    attack_knob = _compute_cla76_attack_knob(
-                        intent.crest_factor_db, genre,
-                    )
-                    release_knob = None
-                    if bpm is not None and bpm > 0:
-                        release_ms = 60000.0 / bpm
-                        release_knob = _ms_to_cla76_release(release_ms)
-                        log.info(
-                            "BPM-aware timing: %.0f BPM → release=%.0fms (knob %.2f)",
-                            bpm, release_ms, release_knob,
-                        )
-                    physical = _apply_cla76_params(
-                        intent, attack_knob, release_knob,
-                    )
-                    log.info(
-                        "CLA-76 attack: crest=%.1f → knob=%.2f (genre=%s)",
-                        intent.crest_factor_db, attack_knob, genre,
-                    )
-                elif fx_type == "rvox":
-                    rvox_mult = _GENRE_RVOX_MULTIPLIER.get(genre, 1.0)
-                    physical = _apply_rvox_params(intent, preset, rvox_mult)
-                else:
-                    physical = _TRANSLATORS[fx_type](intent, preset)
-
-                # No BPM → leave timing at plugin defaults (don't touch).
-                # CLA-76 exception: attack is always set (crest-driven).
-                if bpm is None:
-                    if "cla-76" in fx.name.lower():
-                        physical.pop("Release", None)
-                    else:
-                        for timing_key in ("Attack", "Release"):
-                            physical.pop(timing_key, None)
-
+            if physical is not None:
                 node.params = dict(physical)
-                normalized = normalize_params(fx.name, physical)
-                for pname, pval in normalized.items():
-                    self._fx.set_param(track_index, idx, pname, pval)
-                log.info(
-                    "Auto-compressor: %s → %s (crest=%.1f dB, gr=%.1f dB)",
-                    fx.name, intent.amount, intent.crest_factor_db,
-                    intent.gr_target_db,
-                )
-            elif fx_type == "deesser":
-                # Pro-DS: threshold from presence deficit.  Fixed detection
-                # band HPF=4.6kHz / LPF=12kHz covers sibilance range.
-                # Single Vocal mode distinguishes sibilance from harmonics
-                # internally — no peak-tracking needed.
-                spectrum = getattr(self, "_last_spectrum", {}) or {}
-                presence_def = spectrum.get("presence_deficit", 0.0)
-
-                # Threshold: aggressive so Range actually engages as safety net.
-                threshold_db = -32.0 + presence_def * 0.1
-                threshold_db = max(-60.0, min(0.0, threshold_db))
-
-                # Range: genre-aware max gain reduction (dB).
-                range_db = _GENRE_PRODS_RANGE.get(genre, 8.5)
-
-                # Fixed detection band (log: freq ≈ 2000 × 10^n Hz).
-                hpf_norm = math.log10(5500.0 / 2000.0)
-                lpf_norm = math.log10(12000.0 / 2000.0)
-
-                physical = {
-                    "Mode":              0.0,      # Single Vocal
-                    "Band Processing":   0.0,      # Wide Band (natural)
-                    "Threshold":         round(threshold_db, 1),
-                    "Range":             range_db,
-                    "Lookahead":         10.0,     # ms (manual: ~10 ms optimal)
-                    "Lookahead Enabled": 1.0,
-                    "High-Pass Frequency": round(hpf_norm, 3),
-                    "Low-Pass Frequency":  round(lpf_norm, 3),
-                    "Input Level":       0.0,
-                    "Output Level":      0.0,
-                    "Wet":               1.0,
-                }
-                node.params = dict(physical)
-                normalized = normalize_params(fx.name, physical)
-                for pname, pval in normalized.items():
-                    self._fx.set_param(track_index, idx, pname, pval)
-                log.info(
-                    "Auto-deesser: band=5.5k–12kHz, presence_def=%.1f → "
-                    "threshold=%.1f dB, range=%.1f dB (genre=%s)",
-                    presence_def, threshold_db, range_db, genre,
-                )
-            elif fx_type == "saturation":
-                # 饱和增强：Crest Factor 推导 Drive 量。
-                # 高波峰 → 保留瞬态，少饱和；低波峰 → 增加谐波密度。
-                # 优先使用 Decapitator，不可用则跳过（fallback 为 None）。
-                crest_db = 12.0
-                if rms is not None and peak is not None:
-                    crest_db = peak - rms
-                drive = round(max(0.1, 1.0 - (crest_db - 8.0) * 0.05), 2)
-                drive = max(0.1, min(1.0, drive))
-
                 try:
-                    physical = {"Drive": drive, "Mix": 0.5}
                     normalized = normalize_params(fx.name, physical)
                     for pname, pval in normalized.items():
                         self._fx.set_param(track_index, idx, pname, pval)
-                    node.params = dict(physical)
-                    log.info(
-                        "Auto-saturation: crest=%.1fdB → drive=%.2f (plugin=%s)",
-                        crest_db, drive, fx.name,
-                    )
                 except Exception as exc:
-                    log.debug("Saturation plugin unavailable (%s), skipping", exc)
-
-            elif fx_type == "dynamic_eq":
-                # 动态 EQ：对共振频率设置动态衰减。
-                # 使用 Pro-Q 3 动态模式（Dynamics Enabled = 1.0）处理
-                # _derive_eq_intent 检测到的共振频点。
-                dyn_stem_path = sd.get("file_path", "")
-                if dyn_stem_path and os.path.exists(dyn_stem_path):
-                    try:
-                        report = SpectrumAnalyzer.analyze(dyn_stem_path)
-                        eq_intent = _derive_eq_intent(
-                            report, role=role, genre=genre, position="solo",
-                        )
-                        # 为共振频段启用动态模式
-                        normalized = _apply_proq3_eq(eq_intent)
-                        # 启用动态 EQ 特性：在共振频段开启 Dynamics Enabled
-                        for band_num in range(1, 9):
-                            band_key = f"Band {band_num} Used"
-                            if band_key in normalized and normalized.get(band_key, 0.0) > 0.0:
-                                normalized[f"Band {band_num} Dynamics Enabled"] = 1.0
-                                normalized[f"Band {band_num} Dynamic Range"] = 0.6
-                                normalized[f"Band {band_num} Threshold"] = 0.5
-                        for pname, pval in normalized.items():
-                            self._fx.set_param(track_index, idx, pname, pval)
-                        node.params = dict(normalized)
-                        log.info(
-                            "Auto-dynamic-EQ: %d resonance bands with dynamic mode (plugin=%s)",
-                            sum(1 for b in eq_intent.bands if b.gain_db < 0), fx.name,
-                        )
-                    except Exception as exc:
-                        log.debug("Dynamic EQ spectrum analysis failed (%s), skipping", exc)
-                else:
-                    log.debug("Dynamic EQ: no stem file available, skipping")
-
-            elif fx_type == "doubler":
-                # Doubler/MicroShift：增加人声宽度和空间感。
-                # 如果可用则设置默认参数，否则跳过。
-                try:
-                    physical = {"Mix": 0.3, "Detune": 0.15, "Delay": 0.05}
-                    normalized = normalize_params(fx.name, physical)
-                    for pname, pval in normalized.items():
-                        self._fx.set_param(track_index, idx, pname, pval)
-                    node.params = dict(physical)
-                    log.info(
-                        "Auto-doubler: Mix=%.2f Detune=%.2f (plugin=%s)",
-                        0.3, 0.15, fx.name,
-                    )
-                except Exception as exc:
-                    log.debug("Doubler plugin unavailable (%s), skipping", exc)
-
+                    log.debug("%s param application failed (%s), skipping",
+                              fx.name, exc)
             else:
+                # 通用回退：直接使用 fx.params
                 for pname, pval in fx.params.items():
                     self._fx.set_param(track_index, idx, pname, pval)
 
