@@ -22,7 +22,7 @@ from hermes_core.render import RenderManager
 from hermes_core.signal import SignalAnalyzer
 from hermes_core.exceptions import ConnectionError as HermesConnectionError
 from hermes_core.project_meta import (
-    ProjectMeta, ProjectIndex, make_project_path,
+    ProjectMeta, ProjectIndex, make_project_path, create_project_dirs,
 )
 from hermes_core.loudness_optimizer import (
     find_optimal_gain,
@@ -33,7 +33,10 @@ from hermes_core.loudness_optimizer import (
     EqIntent,
     EqBandIntent,
 )
-from hermes_core.normalize import normalize_params, compute_bus_compressor_params
+from hermes_core.normalize import (
+    normalize_params, compute_bus_compressor_params, PLUGIN_REGISTRY,
+)
+from hermes_core.audio_utils import note_to_ms
 from hermes_core.profiles import (
     _resolve_fx_type,
     _get_compressor_preset,
@@ -366,12 +369,175 @@ _GENRE_RETURN_EQ: dict[str, dict[str, dict[str, float]]] = {
     },
 }
 
+# ── 流派空间插件参数表 ──────────────────────────────────────────
+# 每个 bus 使用其首选插件的参数名和归一化值 (0.0–1.0)。
+# 如果回退插件被加载，通过 _SPATIAL_PARAM_FALLBACK_MAP 做名称转换。
+# 设计值来源: docs/spatial-effects-design.md §1。
+# 验证: 用 REAPER 运行 tools/discover_spatial_params.py 确认参数名。
+
+_GENRE_SPATIAL_PARAMS: dict[str, dict[str, dict[str, float]]] = {
+    # ── 民谣 (Western folk) ──
+    "folk": {
+        # plate → Little Plate: Decay 1.8s, Pre-Delay N/A (无此参数), HPF 200Hz
+        "plate": {"Decay": 0.28, "Low Cut": 0.15, "Mix": 1.0},
+        # hall → LX480: Decay 1.5s, Pre-Delay 60ms
+        "hall":  {
+            "E1: Reverb Time Mid (RTM)": 0.25,
+            "E1: Pre Delay (PDL)": 0.30,
+            "E1: Mix (MIX)": 1.0,
+        },
+        # room → ValhallaRoom: Decay 0.8s, Pre-Delay 10ms
+        "room":  {"decay": 0.18, "predelay": 0.05, "mix": 1.0},
+    },
+
+    # ── 情歌 (Ballad) ──
+    "ballad": {
+        "plate": {"Decay": 0.35, "Low Cut": 0.12, "Mix": 1.0},
+        "hall":  {
+            "E1: Reverb Time Mid (RTM)": 0.35,
+            "E1: Pre Delay (PDL)": 0.40,
+            "E1: Mix (MIX)": 1.0,
+        },
+        "room":  {"decay": 0.22, "predelay": 0.10, "mix": 1.0},
+        # slap → EchoBoy: 100ms, Feedback 10%
+        "slap":  {
+            "Echo1Time": 0.05, "Feedback": 0.10, "Mix": 1.0,
+            "Saturation": 0.15,
+        },
+    },
+
+    # ── 流行 (Pop) ──
+    "pop": {
+        # plate → Little Plate: Decay 2.0s, Pre-Delay N/A (回退到ValhallaPlate设PreDelay)
+        "plate": {"Decay": 0.32, "Low Cut": 0.12, "Mix": 1.0, "Mod Enable": 0.0},
+        # hall → LX480: Decay 2.2s, Pre-Delay 40ms
+        "hall":  {
+            "E1: Reverb Time Mid (RTM)": 0.32,
+            "E1: Pre Delay (PDL)": 0.25,
+            "E1: Mix (MIX)": 1.0,
+            "E1: Size (SIZ)": 0.45,
+        },
+        # room → ValhallaRoom: Decay 0.6s, Pre-Delay 10ms
+        "room":  {"decay": 0.14, "predelay": 0.05, "mix": 1.0, "lateSize": 0.35},
+        # slap → EchoBoy: 100ms, Feedback 10%
+        "slap":  {
+            "Echo1Time": 0.05, "Feedback": 0.10, "Mix": 1.0,
+            "Saturation": 0.15, "LowCut": 0.15,
+        },
+        # rhythm → EchoBoy: 1/4 Note, Feedback 20%（音符值在 _apply_spatial_params 中处理）
+        "rhythm": {
+            "RhythmNote": 0.30, "Feedback": 0.20, "Mix": 1.0,
+            "Saturation": 0.12, "LowCut": 0.15,
+        },
+    },
+
+    # ── 摇滚 (Rock) ──
+    "rock": {
+        "plate": {"Decay": 0.25, "Low Cut": 0.15, "Mix": 1.0, "Mod Enable": 0.0},
+        "hall":  {
+            "E1: Reverb Time Mid (RTM)": 0.28,
+            "E1: Pre Delay (PDL)": 0.28,
+            "E1: Mix (MIX)": 1.0,
+            "E1: Size (SIZ)": 0.40,
+        },
+        "room":  {"decay": 0.14, "predelay": 0.05, "mix": 1.0},
+        "slap":  {
+            "Echo1Time": 0.04, "Feedback": 0.15, "Mix": 1.0,
+            "Saturation": 0.20, "LowCut": 0.18,
+        },
+        "rhythm": {
+            "RhythmNote": 0.20, "Feedback": 0.20, "Mix": 1.0,
+            "Saturation": 0.15, "LowCut": 0.18,
+        },
+    },
+
+    # ── 电子 (Electronic) ──
+    "electronic": {
+        "plate": {"Decay": 0.38, "Low Cut": 0.22, "Mix": 1.0},
+        "hall":  {
+            "E1: Reverb Time Mid (RTM)": 0.45,
+            "E1: Pre Delay (PDL)": 0.20,
+            "E1: Mix (MIX)": 1.0,
+        },
+        "room":  {"decay": 0.10, "predelay": 0.03, "mix": 1.0},
+        "slap":  {
+            "Echo1Time": 0.06, "Feedback": 0.25, "Mix": 1.0,
+            "Saturation": 0.10, "LowCut": 0.08,
+        },
+        "rhythm": {
+            "RhythmNote": 0.25, "Feedback": 0.30, "Mix": 1.0,
+        },
+    },
+
+    # ── 中国民歌/民族美声 ──
+    "chinese_folk_bel_canto": {
+        "plate": {"Decay": 0.32, "Low Cut": 0.10, "Mix": 1.0, "Mod Enable": 0.0},
+        "hall":  {
+            "E1: Reverb Time Mid (RTM)": 0.38,
+            "E1: Pre Delay (PDL)": 0.22,
+            "E1: Mix (MIX)": 1.0,
+            "E1: Size (SIZ)": 0.50,
+        },
+        "room":  {"decay": 0.20, "predelay": 0.05, "mix": 1.0},
+        "slap":  {
+            "Echo1Time": 0.05, "Feedback": 0.10, "Mix": 1.0,
+            "Saturation": 0.10, "LowCut": 0.12,
+        },
+        "rhythm": {
+            "RhythmNote": 0.30, "Feedback": 0.20, "Mix": 1.0,
+        },
+    },
+}
+
+# ── 空间插件参数名回退映射 ──────────────────────────────────────
+# 当回退插件被加载时，将首选插件的参数名映射到回退插件的对应参数名。
+# 键: (首选插件注册名, 首选参数名) → 回退参数名
+# 值通过 _resolve_spatial_plugin_key 匹配后查找。
+
+_SPATIAL_PARAM_FALLBACK_MAP: dict[str, dict[str, str]] = {
+    # Little Plate → ValhallaPlate 回退 (plate bus)
+    "ValhallaPlate": {
+        "Decay":      "Decay",
+        "Low Cut":    "LowEQFreq",
+        "Mix":        "Mix",
+        "Mod Enable": "ModDepth",
+    },
+    # LX480 → ValhallaVintageVerb 回退 (hall bus)
+    "ValhallaVintageVerb": {
+        "E1: Reverb Time Mid (RTM)":  "Decay",
+        "E1: Pre Delay (PDL)":        "PreDelay",
+        "E1: Mix (MIX)":              "Mix",
+        "E1: Size (SIZ)":             "Size",
+        "E1: High Frequency Cutoff (HFC)": "HighCut",
+        "E1: Low Frequency Cutoff (LFC)":  "LowCut",
+    },
+    # ValhallaRoom → Pro-R 2 回退 (room bus)
+    "Pro-R": {
+        "decay":    "Decay Rate",
+        "predelay": "Predelay",
+        "mix":      "Mix",
+        "lateSize": "Distance",
+        "HiCut":    "Brightness",
+        "LoCut":    "Brightness",
+    },
+    # EchoBoy → ValhallaDelay 回退 (slap/rhythm bus)
+    "ValhallaDelay": {
+        "Echo1Time":   "DelayL_Ms",
+        "Feedback":    "Feedback",
+        "Mix":         "Mix",
+        "Saturation":  "DriveIn",
+        "LowCut":      "LowCut",
+        "HighCut":     "HighCut",
+        "RhythmNote":  "DelayL_Ms",
+    },
+}
+
 # ── 空间插件映射 ──────────────────────────────────────────────
 
 # Bus type → REAPER plugin name (substring-matched by TrackFX_AddByName).
 # Each bus maps to the user's preferred plugin for that role.
 _SPATIAL_PLUGIN: dict[str, list[str]] = {
-    "plate":   ["Little Plate", "ValhallaPlate"],        # Soundtoys → Valhalla
+    "plate":   ["Little Plate", "UAD EMT 140", "ValhallaPlate"],  # Soundtoys → UA → Valhalla
     "hall":    ["LX480", "ValhallaVintageVerb"],         # Relab → Valhalla
     "room":    ["ValhallaRoom", "FabFilter Pro-R"],      # Valhalla → FabFilter
     "slap":    ["EchoBoy", "ValhallaDelay"],             # Soundtoys → Valhalla
@@ -1853,6 +2019,9 @@ class MixingEngine:
         os.makedirs(output_dir, exist_ok=True)
         safe_path, conflict_renamed = self._safe_project_path(output_dir, name)
 
+        # ── 创建标准子目录 ────────────────────────────────────
+        create_project_dirs(output_dir)
+
         api = self._bridge.api
 
         # Safety: never delete tracks without explicit user consent.
@@ -1911,6 +2080,8 @@ class MixingEngine:
         tmp_dir = tempfile.mkdtemp(prefix="hermes_proj_")
         tmp_path = os.path.join(tmp_dir, os.path.basename(safe_path))
         api.Main_SaveProjectEx(0, tmp_path, 0)
+        # Main_SaveProject 清除 REAPER 内部 dirty flag（避免退出弹窗）
+        api.Main_SaveProject(0, 0)
         try:
             shutil.copy2(tmp_path, safe_path)
             log.info("Project copied %s → %s", tmp_path, safe_path)
@@ -1964,6 +2135,7 @@ class MixingEngine:
         tmp_dir = tempfile.mkdtemp(prefix="hermes_save_")
         tmp_path = os.path.join(tmp_dir, os.path.basename(target_path))
         self._bridge.api.Main_SaveProjectEx(0, tmp_path, 0)
+        self._bridge.api.Main_SaveProject(0, 0)  # 清除 dirty flag
         try:
             shutil.copy2(tmp_path, target_path)
         except OSError:
@@ -1974,10 +2146,14 @@ class MixingEngine:
     # ── 管线阶段追踪 ────────────────────────────────────────
 
     def _mark_stage(self, stage: str) -> None:
-        """标记管线阶段为已完成（如果 meta 存在）。"""
+        """标记管线阶段为已完成（如果 meta 存在）。
+
+        同时自动更新生命周期状态（规范 §二）。
+        """
         self._dirty = True
         if self._meta is not None:
             self._meta.mark_stage(stage)
+            self._meta.update_lifecycle()
 
     @property
     def is_dirty(self) -> bool:
@@ -2112,6 +2288,127 @@ class MixingEngine:
             "sample_rate": int(sr) if sr else 0,
             "track_count": n_tracks,
         }
+
+    # ── 工程关闭 ──────────────────────────────────────────
+
+    def close_project(self, save: bool = True) -> dict:
+        """保存并清理当前工程，不弹窗。
+
+        REAPER API 的 Main_SaveProject 不清除内部 dirty flag，
+        所以不能调用 Close/Quit action（会触发保存弹窗）。
+
+        替代方案：保存到磁盘 → 删除所有轨道 → 重置 Master。
+        效果等同于关闭后打开空白工程。
+
+        返回 ``{saved, project_path}``。
+        """
+        api = self._bridge.api
+        result = {"saved": False,
+                  "project_path": getattr(self, "_project_path", "")}
+
+        if save:
+            self.save_project()
+            result["saved"] = True
+
+        # 删除轨道 + 重置 Master（等效关闭）
+        n = api.CountTracks(0)
+        for i in range(n - 1, -1, -1):
+            tr = api.GetTrack(0, i)
+            if tr:
+                api.DeleteTrack(tr)
+
+        master = api.GetMasterTrack(0)
+        if master:
+            n_fx = api.TrackFX_GetCount(master)
+            for i in range(n_fx - 1, -1, -1):
+                api.TrackFX_Delete(master, i)
+            api.SetMediaTrackInfo_Value(master, "D_VOL", 1.0)
+
+        log.info("Project cleaned: %s", result["project_path"])
+        return result
+
+    def safe_quit(self) -> dict:
+        """保存 → 退出 REAPER。
+
+        1. 保存到磁盘
+        2. 启动 DialogKiller（捕获退出弹窗 Sheet）
+        3. 发送 quit → DialogKiller 自动点 No
+        """
+        self.save_project()
+
+        # 启动 DialogKiller，等它就绪
+        self._bridge._dialog_killer.start()
+        import time
+        time.sleep(1.0)
+
+        # 发送退出命令（会触发 Sheet 弹窗，DialogKiller 处理）
+        import subprocess
+        subprocess.run(
+            ["osascript", "-e", 'tell application "REAPER" to quit'],
+            capture_output=True, timeout=20,
+        )
+
+        self._bridge._dialog_killer.stop()
+        log.info("REAPER quit — %d dialogs handled",
+                 self._bridge._dialog_killer.killed_count if hasattr(
+                     self._bridge._dialog_killer, "killed_count") else 0)
+        return {"saved": True}
+
+    # ── 插件预检查 ──────────────────────────────────────────
+
+    def preflight_plugins(self,
+                          required: list[str] | None = None) -> dict[str, bool]:
+        """验证所需插件是否在 REAPER 中可用。
+
+        在临时轨道上尝试加载每个插件，加载成功后立即删除。
+        规范 §八：预检查数据库，发现缺失即进入 Error State。
+
+        Parameters
+        ----------
+        required : list[str] | None
+            需要检查的插件名列表。为 None 时检查所有空间插件
+            （从 _SPATIAL_PLUGIN 提取）。
+
+        Returns
+        -------
+        dict
+            ``{"plugin_name": True/False, ...}``
+        """
+        if required is None:
+            required = []
+            for candidates in _SPATIAL_PLUGIN.values():
+                for c in candidates:
+                    if c not in required:
+                        required.append(c)
+
+        api = self._bridge.api
+        # 创建临时轨道
+        api.InsertTrackAtIndex(0, True)
+        tmp_track = api.GetTrack(0, 0)
+
+        result: dict[str, bool] = {}
+        for name in required:
+            idx = api.TrackFX_AddByName(tmp_track, name, False, 1)
+            ok = idx >= 0
+            result[name] = ok
+            if ok:
+                api.TrackFX_Delete(tmp_track, idx)
+            else:
+                log.warning("preflight: plugin MISSING — %s", name)
+
+        # 清理临时轨道
+        api.DeleteTrack(tmp_track)
+
+        missing = [k for k, v in result.items() if not v]
+        if missing:
+            log.error(
+                "preflight: %d/%d plugins MISSING: %s",
+                len(missing), len(required), missing,
+            )
+        else:
+            log.info("preflight: all %d plugins OK", len(required))
+
+        return result
 
     def import_stems(self, file_paths: list[str],
                     position: float = 0.0) -> list[dict]:
@@ -2764,6 +3061,100 @@ class MixingEngine:
 
     # ── 空间效果器链 ──────────────────────────────────────────
 
+    def _resolve_spatial_plugin_key(self, fx_name: str) -> str | None:
+        """将 REAPER 返回的插件名匹配到 PLUGIN_REGISTRY 键。
+
+        先用子串匹配查找，失败后用 _SPATIAL_PARAM_FALLBACK_MAP 的键匹配。
+        返回 PLUGIN_REGISTRY 的键名，找不到返回 None。
+        """
+        # 精确匹配
+        if fx_name in PLUGIN_REGISTRY:
+            return fx_name
+        # 子串匹配（如 "VST3: EchoBoy (Soundtoys)" 匹配 PLUGIN_REGISTRY 键）
+        name_lower = fx_name.lower()
+        for key in PLUGIN_REGISTRY:
+            if key.lower() in name_lower or name_lower in key.lower():
+                return key
+        # 回退映射键匹配（如 "ValhallaPlate" 匹配 "ValhallaPlate (Valhalla DSP, LLC)"）
+        for fallback_key in _SPATIAL_PARAM_FALLBACK_MAP:
+            if fallback_key.lower() in name_lower:
+                return fallback_key
+        return None
+
+    def _apply_spatial_params(
+        self, aux_track: int, fx_idx: int, loaded_name: str,
+        bus: str, genre: str, bpm: float | None = None,
+    ) -> None:
+        """对流派空间插件应用预设参数。
+
+        1. 从 _GENRE_SPATIAL_PARAMS[genre][bus] 获取归一化参数
+        2. 将 REAPER 返回的插件名匹配到 PLUGIN_REGISTRY
+        3. 如果是回退插件，通过 _SPATIAL_PARAM_FALLBACK_MAP 转换参数名
+        4. 通过 FxManager.set_param() 应用
+        5. 特殊处理：音符值（如 "1/4"）需要 BPM 转换
+        """
+        genre_params = _GENRE_SPATIAL_PARAMS.get(
+            genre, _GENRE_SPATIAL_PARAMS["pop"],
+        )
+        bus_params = genre_params.get(bus)
+        if not bus_params:
+            return  # 该流派/总线无预设参数
+
+        registry_key = self._resolve_spatial_plugin_key(loaded_name)
+        if registry_key is None:
+            log.debug(
+                "_apply_spatial_params: plugin '%s' not in PLUGIN_REGISTRY "
+                "— skipping param application", loaded_name,
+            )
+            return
+
+        # 判断是否为回退插件（非首选插件）
+        primary_candidates = _SPATIAL_PLUGIN.get(bus, [])
+        is_fallback = (
+            len(primary_candidates) > 0
+            and not any(
+                c.lower() in loaded_name.lower()
+                for c in primary_candidates[:1]
+            )
+        )
+
+        # 如果是回退插件，加载参数名映射
+        fallback_map: dict[str, str] = {}
+        if is_fallback:
+            for fk in _SPATIAL_PARAM_FALLBACK_MAP:
+                if fk.lower() in loaded_name.lower():
+                    fallback_map = _SPATIAL_PARAM_FALLBACK_MAP[fk]
+                    log.info(
+                        "Using fallback param map for %s → %s (%d mappings)",
+                        bus, fk, len(fallback_map),
+                    )
+                    break
+
+        applied = 0
+        skipped = 0
+        for pname, pval in bus_params.items():
+            # 如果是回退插件，先查映射表
+            actual_pname = fallback_map.get(pname, pname) if fallback_map else pname
+
+            # 检查参数是否在 PLUGIN_REGISTRY 的该插件条目中
+            plugin_entry = PLUGIN_REGISTRY.get(registry_key, {})
+            plugin_params = plugin_entry.get("params", {})
+            if actual_pname not in plugin_params:
+                skipped += 1
+                continue
+
+            ok = self._fx.set_param(aux_track, fx_idx, actual_pname, pval)
+            if ok:
+                applied += 1
+            else:
+                skipped += 1
+
+        if applied > 0 or skipped > 0:
+            log.info(
+                "Spatial params (%s/%s/%s): %d applied, %d skipped",
+                genre, bus, loaded_name, applied, skipped,
+            )
+
     def _apply_return_eq(
         self, aux_track: int, eq_fx_idx: int, bus: str, genre: str,
     ) -> None:
@@ -2809,6 +3200,7 @@ class MixingEngine:
 
     def build_spatial_chain(
         self, vocal_track: int, spatial_sends: dict, genre: str = "pop",
+        bpm: float | None = None,
     ) -> dict:
         """Create reverb and delay return tracks with sends from the vocal.
 
@@ -2819,10 +3211,25 @@ class MixingEngine:
         Each return track gets:
         1. FabFilter Pro-Q 3 as a safety HPF+LPF filter
         2. A genre-appropriate reverb or delay plugin
-        3. A post-fader send from the vocal track
+        3. [NEW] Genre-specific spatial parameters applied
+        4. A post-fader send from the vocal track
+
+        Parameters
+        ----------
+        vocal_track : int
+            Index of the vocal track to send from.
+        spatial_sends : dict
+            Send levels computed by :func:`_compute_spatial_sends`.
+        genre : str
+            Genre key for parameter lookup.
+        bpm : float | None
+            Project tempo — used for musical note-to-ms conversion
+            in delay plugins.  Defaults to 120 BPM when None.
 
         Returns a dict mapping bus keys to their track/send/fx indices.
         """
+        from hermes_core.bridge import _extract_reaper_string
+
         result: dict[str, dict] = {}
 
         # Order matters: create reverbs first, then delays.
@@ -2863,6 +3270,20 @@ class MixingEngine:
                     "build_spatial_chain: failed to load any plugin for "
                     "bus=%s (tried %s)", bus, plugin_names,
                 )
+            else:
+                # 3a. Query REAPER for the actual plugin name
+                #     (TrackFX_AddByName may have resolved a short name
+                #      to the full VST3/VST name)
+                track_ptr = self._bridge.api.GetTrack(0, aux_idx)
+                raw_name = self._bridge.api.TrackFX_GetFXName(
+                    track_ptr, fx_idx, "", 256,
+                )
+                actual_name = _extract_reaper_string(raw_name) or loaded_name
+
+                # 3b. Apply genre-specific spatial parameters
+                self._apply_spatial_params(
+                    aux_idx, fx_idx, actual_name, bus, genre, bpm,
+                )
 
             # 4. Create send from vocal track
             send_info = self._send.create(
@@ -2883,6 +3304,453 @@ class MixingEngine:
             )
 
         self._mark_stage("build_spatial_chain")
+        return result
+
+    # ── 大师空间模板 ──────────────────────────────────────────
+
+    def apply_master_template(
+        self, master_name: str, vocal_track: int,
+        genre: str = "pop", bpm: float | None = None,
+    ) -> dict:
+        """调度大师空间模板。
+
+        Parameters
+        ----------
+        master_name : str
+            模板名。大小写不敏感。支持完整名称或缩写:
+            ``"cla"`` / ``"chris lord-alge"``,
+            ``"hewitt"`` / ``"ryan hewitt"``,
+            ``"serban"`` / ``"serban ghenea"``,
+            ``"townsend"`` / ``"devin townsend"``.
+        vocal_track : int
+            人声轨索引。
+        genre : str
+            流派键，用于回退参数。
+        bpm : float | None
+            工程速度，延迟音符值需要。
+
+        Returns
+        -------
+        dict
+            模板结果，格式因模板而异。
+
+        Raises
+        ------
+        ValueError
+            未知模板名。
+        """
+        name_lower = master_name.lower().replace(" ", "_")
+        dispatch = {
+            "cla": self._master_cla,
+            "chris_lord-alge": self._master_cla,
+            "hewitt": self._master_hewitt,
+            "ryan_hewitt": self._master_hewitt,
+            "serban": self._master_serban,
+            "serban_ghenea": self._master_serban,
+            "townsend": self._master_townsend,
+            "devin_townsend": self._master_townsend,
+        }
+        method = dispatch.get(name_lower)
+        if method is None:
+            available = ["cla", "hewitt", "serban", "townsend"]
+            raise ValueError(
+                f"未知大师模板 '{master_name}'。可用: {available}"
+            )
+        log.info("应用大师模板: %s", master_name)
+        result = method(vocal_track, genre, bpm)
+        self._mark_stage("build_spatial_chain")
+        return result
+
+    def _master_cla(
+        self, vocal_track: int, genre: str, bpm: float | None,
+    ) -> dict:
+        """Master A: Chris Lord-Alge — 延迟送入混响。
+
+        3 条延迟 + 3 条混响，延迟输出送入混响产生光泽尾音。
+        """
+        from hermes_core.bridge import _extract_reaper_string
+        api = self._bridge.api
+        result: dict = {"delays": {}, "reverbs": {}, "cross_sends": []}
+
+        # ── 延迟总线 ──────────────────────────────────────
+        delay_specs = [
+            {
+                "key": "slap", "name": "CLA Slap",
+                "time_val": 0.05, "feedback": 0.10,
+                "lowcut": 0.12, "mode": 0.0,  # Echoplex mode=0
+            },
+            {
+                "key": "throw", "name": "CLA Throw",
+                "time_val": 0.08, "feedback": 0.15,
+                "lowcut": 0.12, "mode": 0.0,
+            },
+            {
+                "key": "tape", "name": "CLA Tape",
+                "time_val": 0.04, "feedback": 0.20,
+                "lowcut": 0.12, "highcut": 0.40,  # SpaceEcho LPF ~3kHz
+                "mode": 0.3,
+            },
+        ]
+        delay_tracks: list[int] = []
+        for ds in delay_specs:
+            aux = self._tracks.create(name=ds["name"])
+            delay_tracks.append(aux)
+            # Pro-Q 3 HPF
+            eq_idx = self._fx.add(aux, "FabFilter Pro-Q 3")
+            if eq_idx >= 0:
+                hpf_intent = {
+                    "bands": [{"band_type": "hp", "freq_hz": 200,
+                               "gain_db": 0.0, "q": 0.71, "reason": "CLA HPF 200Hz"}],
+                    "spectral_tilt": "neutral", "mud_detected": False,
+                }
+                from hermes_core.engine import _apply_proq3_eq  # noqa: F811
+                try:
+                    normed = _apply_proq3_eq(hpf_intent)
+                    for pn, pv in normed.items():
+                        self._fx.set_param(aux, eq_idx, pn, pv)
+                except Exception:
+                    pass
+
+            # EchoBoy
+            eb_idx = self._fx.add(aux, "EchoBoy")
+            if eb_idx >= 0:
+                eb_params = {
+                    "Echo1Time": ds["time_val"], "Feedback": ds["feedback"],
+                    "Mix": 1.0, "LowCut": ds.get("lowcut", 0.12),
+                    "Saturation": 0.15,
+                }
+                if "highcut" in ds:
+                    eb_params["HighCut"] = ds["highcut"]
+                for pn, pv in eb_params.items():
+                    self._fx.set_param(aux, eb_idx, pn, pv)
+
+            # 发送
+            send_info = self._send.create(
+                src=vocal_track, dest=aux, level_db=-15.0,
+            )
+            result["delays"][ds["key"]] = {
+                "aux_index": aux, "fx_index": eb_idx, "send": send_info,
+            }
+
+        # ── 混响总线 ──────────────────────────────────────
+        reverb_specs = [
+            {"key": "plate", "name": "CLA Plate", "plugin": "Little Plate",
+             "params": {"Decay": 0.32, "Mix": 1.0, "Low Cut": 0.15}},
+            {"key": "room", "name": "CLA Room", "plugin": "ValhallaRoom",
+             "params": {"decay": 0.18, "mix": 1.0, "predelay": 0.05}},
+            {"key": "hall", "name": "CLA Hall", "plugin": "LX480",
+             "params": {
+                 "E1: Reverb Time Mid (RTM)": 0.32,
+                 "E1: Pre Delay (PDL)": 0.15,
+                 "E1: Mix (MIX)": 1.0,
+             }},
+        ]
+        reverb_tracks: list[int] = []
+        for rs in reverb_specs:
+            aux = self._tracks.create(name=rs["name"])
+            reverb_tracks.append(aux)
+            # Pro-Q 3 HPF 250Hz
+            eq_idx = self._fx.add(aux, "FabFilter Pro-Q 3")
+            if eq_idx >= 0:
+                from hermes_core.engine import _apply_proq3_eq
+                try:
+                    hpf_intent = {
+                        "bands": [{"band_type": "hp", "freq_hz": 250,
+                                   "gain_db": 0.0, "q": 0.71, "reason": "CLA HPF 250Hz"}],
+                        "spectral_tilt": "neutral", "mud_detected": False,
+                    }
+                    normed = _apply_proq3_eq(hpf_intent)
+                    for pn, pv in normed.items():
+                        self._fx.set_param(aux, eq_idx, pn, pv)
+                except Exception:
+                    pass
+
+            # 混响插件
+            rv_idx = self._fx.add(aux, rs["plugin"])
+            if rv_idx >= 0:
+                for pn, pv in rs["params"].items():
+                    self._fx.set_param(aux, rv_idx, pn, pv)
+
+            # 发送
+            send_info = self._send.create(
+                src=vocal_track, dest=aux, level_db=-14.0,
+            )
+            result["reverbs"][rs["key"]] = {
+                "aux_index": aux, "fx_index": rv_idx, "send": send_info,
+            }
+
+        # ── 跨发送: 延迟 → 混响（CLA 秘方）────────────────
+        for dt in delay_tracks:
+            for rvt in reverb_tracks:
+                try:
+                    si = self._send.create(src=dt, dest=rvt, level_db=-8.0)
+                    result["cross_sends"].append({
+                        "src": dt, "dest": rvt, "level_db": -8.0,
+                    })
+                except Exception as exc:
+                    log.debug("CLA cross-send failed: %s", exc)
+
+        log.info(
+            "CLA template: %d delays + %d reverbs + %d cross-sends",
+            len(delay_tracks), len(reverb_tracks), len(result["cross_sends"]),
+        )
+        return result
+
+    def _master_hewitt(
+        self, vocal_track: int, genre: str, bpm: float | None,
+    ) -> dict:
+        """Master B: Ryan Hewitt — 三层 EMT 140 板混响。
+
+        不同 Pre-Delay 创造「立体声→单声道崩塌」效果。
+        优先使用 UAD EMT 140，回退到 ValhallaPlate。
+        """
+        result: dict = {"plates": {}}
+        plate_specs = [
+            {
+                "key": "plate_1_mono", "name": "HP Plate 1 (Mono)",
+                "PreDly": 0.50, "DampA": 0.60, "DampB": 0.55,
+                "Width": 0.0, "LowCut": 0.12,  # HPF 180Hz
+                "send_db": -14.0,
+            },
+            {
+                "key": "plate_2_stereo", "name": "HP Plate 2 (Stereo)",
+                "PreDly": 0.13, "DampA": 0.55, "DampB": 0.50,
+                "Width": 0.50, "LowCut": 0.17,  # HPF 250Hz
+                "send_db": -13.0,
+            },
+            {
+                "key": "plate_3_wide", "name": "HP Plate 3 (Wide)",
+                "PreDly": 0.13, "DampA": 0.50, "DampB": 0.45,
+                "Width": 1.0, "LowCut": 0.12,  # HPF 180Hz
+                "send_db": -12.0,
+            },
+        ]
+        for ps in plate_specs:
+            aux = self._tracks.create(name=ps["name"])
+            # Pro-Q 3 HPF
+            eq_idx = self._fx.add(aux, "FabFilter Pro-Q 3")
+            hpf_hz = 180 if "plate_1" in ps["key"] or "plate_3" in ps["key"] else 250
+            if eq_idx >= 0:
+                from hermes_core.engine import _apply_proq3_eq
+                try:
+                    hpf_intent = {
+                        "bands": [{"band_type": "hp", "freq_hz": hpf_hz,
+                                   "gain_db": 0.0, "q": 0.71,
+                                   "reason": f"Hewitt HPF {hpf_hz}Hz"}],
+                        "spectral_tilt": "neutral", "mud_detected": False,
+                    }
+                    normed = _apply_proq3_eq(hpf_intent)
+                    for pn, pv in normed.items():
+                        self._fx.set_param(aux, eq_idx, pn, pv)
+                except Exception:
+                    pass
+
+            # 优先 UAD EMT 140，回退 ValhallaPlate
+            plate_idx = self._fx.add(aux, "UAD EMT 140")
+            if plate_idx < 0:
+                plate_idx = self._fx.add(aux, "ValhallaPlate")
+                # ValhallaPlate 参数名不同
+                if plate_idx >= 0:
+                    vp_params = {
+                        "Decay": 0.40, "PreDelay": ps["PreDly"],
+                        "Size": 0.40, "Width": ps["Width"],
+                        "Type": 0.3, "Mix": 1.0,
+                    }
+                    for pn, pv in vp_params.items():
+                        self._fx.set_param(aux, plate_idx, pn, pv)
+            else:
+                # UAD EMT 140 参数
+                uad_params = {
+                    "PreDly": ps["PreDly"], "Width": ps["Width"],
+                    "Mix": 1.0, "LowCut": ps["LowCut"],
+                    "DampA": ps.get("DampA", 0.55),
+                    "DampB": ps.get("DampB", 0.50),
+                }
+                for pn, pv in uad_params.items():
+                    self._fx.set_param(aux, plate_idx, pn, pv)
+
+            send_info = self._send.create(
+                src=vocal_track, dest=aux, level_db=ps["send_db"],
+            )
+            result["plates"][ps["key"]] = {
+                "aux_index": aux, "fx_index": plate_idx, "send": send_info,
+            }
+
+        log.info("Hewitt template: 3 plates (UAD EMT 140 preferred)")
+        return result
+
+    def _master_serban(
+        self, vocal_track: int, genre: str, bpm: float | None,
+    ) -> dict:
+        """Master C: Serban Ghenea — 干净透明的 Sidechain Ducking 空间。
+
+        5 条标准返回轨，每条挂 Pro-C 2 侧链压缩（人声触发）。
+        注意：Sidechain 路由需要 REAPER 通道 3/4 接线，当前版本
+        仅添加 Pro-C 2 并设置参数，sidechain 接线需手动完成。
+        """
+        result: dict = {"buses": {}}
+        bus_specs = [
+            {"key": "plate", "name": "SG Plate", "plugin": "FabFilter Pro-R",
+             "params": {"Decay Rate": 0.35, "Mix": 1.0, "Predelay": 0.12,
+                        "Brightness": 0.55, "Character": 0.40},
+             "send_db": -12.0},
+            {"key": "hall", "name": "SG Hall", "plugin": "LX480",
+             "params": {
+                 "E1: Reverb Time Mid (RTM)": 0.32,
+                 "E1: Pre Delay (PDL)": 0.22,
+                 "E1: Mix (MIX)": 1.0,
+             }, "send_db": -14.0},
+            {"key": "room", "name": "SG Room", "plugin": "ValhallaRoom",
+             "params": {"decay": 0.10, "mix": 1.0, "predelay": 0.05},
+             "send_db": -16.0},
+            {"key": "slap", "name": "SG Slap", "plugin": "EchoBoy",
+             "params": {"Echo1Time": 0.05, "Feedback": 0.10,
+                        "Mix": 1.0, "Saturation": 0.10, "LowCut": 0.12},
+             "send_db": -14.0},
+            {"key": "rhythm", "name": "SG Rhythm", "plugin": "EchoBoy",
+             "params": {"RhythmNote": 0.30, "Feedback": 0.20,
+                        "Mix": 1.0, "Saturation": 0.10, "LowCut": 0.12},
+             "send_db": -16.0},
+        ]
+        for bs in bus_specs:
+            aux = self._tracks.create(name=bs["name"])
+            # Pro-Q 3
+            eq_idx = self._fx.add(aux, "FabFilter Pro-Q 3")
+            if eq_idx >= 0:
+                self._apply_return_eq(aux, eq_idx, bs["key"], genre)
+
+            # 空间插件
+            fx_idx = self._fx.add(aux, bs["plugin"])
+            if fx_idx >= 0:
+                for pn, pv in bs["params"].items():
+                    self._fx.set_param(aux, fx_idx, pn, pv)
+
+            # Sidechain 压缩: Pro-C 2
+            # 注意：通道 3/4 接线需要手动设置
+            sc_idx = self._fx.add(aux, "FabFilter Pro-C 2")
+            if sc_idx >= 0:
+                sc_params = {
+                    "Threshold": 0.35, "Ratio": 0.15,  # 2:1
+                    "Attack": 0.05, "Release": 0.25,
+                    "Knee": 0.10, "Range": 0.10,  # ~5dB max GR
+                    "Makeup Gain": 0.0,
+                }
+                for pn, pv in sc_params.items():
+                    self._fx.set_param(aux, sc_idx, pn, pv)
+                log.info(
+                    "Serban sidechain: Pro-C 2 on '%s' — "
+                    "手动设置通道 3/4 接线以完成 sidechain 路由", bs["name"],
+                )
+
+            send_info = self._send.create(
+                src=vocal_track, dest=aux, level_db=bs["send_db"],
+            )
+            result["buses"][bs["key"]] = {
+                "aux_index": aux, "fx_index": fx_idx, "send": send_info,
+                "sidechain_fx": sc_idx,
+            }
+
+        log.info("Serban template: 5 buses + sidechain compression")
+        return result
+
+    def _master_townsend(
+        self, vocal_track: int, genre: str, bpm: float | None,
+    ) -> dict:
+        """Master D: Devin Townsend — 不对称延迟 + 廉价混响粘合。
+
+        左右延迟不同时间 + 高 Feedback 产生雾状空间，
+        Little Plate 粘合整体，Pro-Q 3 激进 EQ 过滤。
+        """
+        result: dict = {}
+
+        # ── L Delay (EchoBoy SpaceEcho, 300ms, FB 40%, 硬左) ──
+        l_aux = self._tracks.create(name="DT L Delay")
+        l_eq = self._fx.add(l_aux, "FabFilter Pro-Q 3")
+        if l_eq >= 0:
+            from hermes_core.engine import _apply_proq3_eq
+            try:
+                intent = {
+                    "bands": [{"band_type": "hp", "freq_hz": 400,
+                               "gain_db": 0.0, "q": 0.71, "reason": "DT HPF 400Hz"},
+                              {"band_type": "lp", "freq_hz": 3000,
+                               "gain_db": 0.0, "q": 0.71, "reason": "DT LPF 3kHz"}],
+                    "spectral_tilt": "neutral", "mud_detected": False,
+                }
+                normed = _apply_proq3_eq(intent)
+                for pn, pv in normed.items():
+                    self._fx.set_param(l_aux, l_eq, pn, pv)
+            except Exception:
+                pass
+        l_eb = self._fx.add(l_aux, "EchoBoy")
+        if l_eb >= 0:
+            for pn, pv in {
+                "Echo1Time": 0.12, "Feedback": 0.40, "Mix": 1.0,
+                "Saturation": 0.25, "LowCut": 0.18,
+            }.items():
+                self._fx.set_param(l_aux, l_eb, pn, pv)
+        l_send = self._send.create(src=vocal_track, dest=l_aux, level_db=-12.0)
+        # 硬左声像
+        self._send.set_pan(vocal_track, l_send.get("index", 0), -1.0)
+        result["left_delay"] = {"aux_index": l_aux, "send": l_send, "pan": -1.0}
+
+        # ── R Delay (EchoBoy SpaceEcho, 500ms, FB 40%, 硬右) ──
+        r_aux = self._tracks.create(name="DT R Delay")
+        r_eq = self._fx.add(r_aux, "FabFilter Pro-Q 3")
+        if r_eq >= 0:
+            from hermes_core.engine import _apply_proq3_eq
+            try:
+                intent = {
+                    "bands": [{"band_type": "hp", "freq_hz": 400,
+                               "gain_db": 0.0, "q": 0.71, "reason": "DT HPF 400Hz"},
+                              {"band_type": "lp", "freq_hz": 3000,
+                               "gain_db": 0.0, "q": 0.71, "reason": "DT LPF 3kHz"}],
+                    "spectral_tilt": "neutral", "mud_detected": False,
+                }
+                normed = _apply_proq3_eq(intent)
+                for pn, pv in normed.items():
+                    self._fx.set_param(r_aux, r_eq, pn, pv)
+            except Exception:
+                pass
+        r_eb = self._fx.add(r_aux, "EchoBoy")
+        if r_eb >= 0:
+            for pn, pv in {
+                "Echo1Time": 0.18, "Feedback": 0.40, "Mix": 1.0,
+                "Saturation": 0.25, "LowCut": 0.18,
+            }.items():
+                self._fx.set_param(r_aux, r_eb, pn, pv)
+        r_send = self._send.create(src=vocal_track, dest=r_aux, level_db=-12.0)
+        self._send.set_pan(vocal_track, r_send.get("index", 0), 1.0)
+        result["right_delay"] = {"aux_index": r_aux, "send": r_send, "pan": 1.0}
+
+        # ── Glue Verb (Little Plate 1.5s + 激进 Post-EQ) ──
+        g_aux = self._tracks.create(name="DT Glue Verb")
+        g_eq = self._fx.add(g_aux, "FabFilter Pro-Q 3")
+        if g_eq >= 0:
+            from hermes_core.engine import _apply_proq3_eq
+            try:
+                intent = {
+                    "bands": [{"band_type": "hp", "freq_hz": 400,
+                               "gain_db": 0.0, "q": 0.71, "reason": "DT HPF 400Hz"},
+                              {"band_type": "lp", "freq_hz": 3000,
+                               "gain_db": 0.0, "q": 0.71, "reason": "DT LPF 3kHz"}],
+                    "spectral_tilt": "neutral", "mud_detected": False,
+                }
+                normed = _apply_proq3_eq(intent)
+                for pn, pv in normed.items():
+                    self._fx.set_param(g_aux, g_eq, pn, pv)
+            except Exception:
+                pass
+        g_fx = self._fx.add(g_aux, "Little Plate")
+        if g_fx >= 0:
+            for pn, pv in {"Decay": 0.25, "Mix": 1.0, "Low Cut": 0.18}.items():
+                self._fx.set_param(g_aux, g_fx, pn, pv)
+        g_send = self._send.create(src=vocal_track, dest=g_aux, level_db=-10.0)
+        result["glue_reverb"] = {
+            "aux_index": g_aux, "fx_index": g_fx, "send": g_send,
+            "post_eq": {"hpf": 400, "lpf": 3000},
+        }
+
+        log.info("Townsend template: L/R delays + glue verb")
         return result
 
     def _apply_eq_rms_match(

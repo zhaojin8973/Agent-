@@ -394,6 +394,13 @@ def _build_project_parser(subparsers):
     # project scan
     sp.add_parser("scan", help="重新扫描工程索引")
 
+    # project status
+    sp.add_parser("status", help="显示当前工程的生命周期和管线状态").add_argument(
+        "name", nargs="?", default="", help="工程名（留空则显示 REAPER 当前工程）")
+
+    # project close
+    sp.add_parser("close", help="保存并关闭当前工程（不弹窗）")
+
 
 def cmd_project(args):
     from hermes_core.config import HermesConfig
@@ -458,8 +465,48 @@ def cmd_project(args):
         n = idx.scan(root)
         print(f"扫描完成: 找到 {n} 个工程")
 
+    elif args.project_action == "status":
+        if args.name:
+            # 按名称查
+            idx = ProjectIndex.load(root)
+            found = idx.find(args.name)
+            if not found:
+                print(f"找不到工程 '{args.name}'")
+                return 1
+            for rel_path, entry in found:
+                meta = ProjectMeta.load(os.path.join(root, rel_path))
+                if meta:
+                    meta.update_lifecycle()
+                    print(f"{meta.name}: 管线={meta.pipeline_stage or '未开始'}, "
+                          f"生命周期={meta.lifecycle_state}")
+        else:
+            # 显示 REAPER 当前工程状态
+            eng = MixingEngine()
+            if not eng._bridge.connect():
+                print("REAPER 未运行")
+                return 1
+            info = eng.get_project_info()
+            print(f"当前工程: {info['name']}")
+            print(f"路径: {info['path']}")
+            print(f"轨道: {info['track_count']}")
+            if eng._meta:
+                eng._meta.update_lifecycle()
+                print(f"管线阶段: {eng._meta.pipeline_stage or '未开始'}")
+                print(f"生命周期: {eng._meta.lifecycle_state}")
+
+    elif args.project_action == "close":
+        eng = MixingEngine()
+        if not eng._bridge.connect():
+            print("REAPER 未运行")
+            return 1
+        info = eng.get_project_info()
+        print(f"关闭工程: {info['name']}")
+        result = eng.close_project(save=True)
+        print(f"已保存: {result['saved']}")
+        print("工程已关闭（无弹窗）")
+
     else:
-        print("用法: hermes project {list|info|create|scan}")
+        print("用法: hermes project {list|info|create|scan|status|close}")
         return 1
     return 0
 
@@ -506,6 +553,28 @@ def cmd_config(args):
     return 0
 
 
+# ── preflight 子命令 ──────────────────────────────────────────
+
+def cmd_preflight(args):
+    from hermes_core.engine import MixingEngine
+    eng = MixingEngine()
+    if not eng._bridge.connect():
+        print("REAPER 未运行，无法检查插件")
+        return 1
+    plugins = args.plugin if args.plugin else None
+    result = eng.preflight_plugins(required=plugins)
+    ok = sum(1 for v in result.values() if v)
+    total = len(result)
+    print(f"\n插件检查: {ok}/{total} 可用")
+    for name, available in sorted(result.items()):
+        status = "✓" if available else "✗ 缺失"
+        print(f"  {status}  {name}")
+    if ok < total:
+        print(f"\n⚠ {total - ok} 个插件缺失")
+        return 1
+    return 0
+
+
 # ── parser 构建 ───────────────────────────────────────────────
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -521,6 +590,11 @@ def _build_parser() -> argparse.ArgumentParser:
     _build_adjust_parser(subparsers)
     _build_project_parser(subparsers)
     _build_config_parser(subparsers)
+
+    # preflight
+    p = subparsers.add_parser("preflight", help="检查空间插件可用性")
+    p.add_argument("--plugin", nargs="*", help="指定检查的插件（默认全部空间插件）")
+
     return parser
 
 
@@ -542,6 +616,8 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(cmd_project(args))
     elif args.command == "config":
         sys.exit(cmd_config(args))
+    elif args.command == "preflight":
+        sys.exit(cmd_preflight(args))
     else:
         parser.print_help()
         sys.exit(1)

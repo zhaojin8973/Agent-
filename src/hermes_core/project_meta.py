@@ -63,6 +63,10 @@ class ProjectMeta:
     pipeline_stage: str = ""
     pipeline_completed: list[str] = field(default_factory=list)
 
+    # 工程生命周期（规范 §二）
+    # created → saved → prepared → imported → mixed → rendered → archived
+    lifecycle_state: str = "created"
+
     # 轨道快照
     track_count: int = 0
     vocal_fx: list[str] = field(default_factory=list)
@@ -104,6 +108,7 @@ class ProjectMeta:
                 bus_compressor=snapshot.get("bus_compressor", data.get("bus_compressor", {})),
                 audio_files=data.get("audio_files", []),
                 checkpoints=data.get("checkpoints", []),
+                lifecycle_state=data.get("lifecycle_state", "created"),
             )
         except (json.JSONDecodeError, OSError) as exc:
             log.warning("Failed to load meta from %s: %s", path, exc)
@@ -124,6 +129,7 @@ class ProjectMeta:
             "genre": self.genre,
             "created_at": self.created_at,
             "last_modified": self.last_modified,
+            "lifecycle_state": self.lifecycle_state,
             "pipeline": {
                 "stage": self.pipeline_stage,
                 "completed": self.pipeline_completed,
@@ -189,7 +195,48 @@ class ProjectMeta:
                 plugin = info.get("plugin", "?")
                 level = info.get("level_db", "?")
                 lines.append(f"  {bus}: {plugin} @ {level} dB")
+        lines.append(f"生命周期: {_LIFECYCLE_LABELS.get(self.lifecycle_state, self.lifecycle_state)}")
         return "\n".join(lines)
+
+    def update_lifecycle(self) -> str:
+        """根据管线完成情况自动推断生命周期状态。
+
+        规范 §二 映射：
+            created   — 目录已创建
+            saved     — RPP 已保存
+            prepared  — prepare_stems 完成
+            imported  — 音频已导入轨道
+            mixed     — 全部 6 段管线完成
+            rendered  — finalize_master 完成
+            archived  — 手动标记
+        """
+        completed = set(self.pipeline_completed)
+        if "finalize_master" in completed:
+            self.lifecycle_state = "rendered"
+        elif len(completed) >= 5:  # 5/6 以上 = mixed
+            self.lifecycle_state = "mixed"
+        elif "prepare_stems" in completed:
+            self.lifecycle_state = "imported"
+        elif self.track_count > 0:
+            self.lifecycle_state = "prepared"
+        elif self.last_modified:
+            self.lifecycle_state = "saved"
+        else:
+            self.lifecycle_state = "created"
+        return self.lifecycle_state
+
+
+# ── 生命周期标签 ──────────────────────────────────────────────
+
+_LIFECYCLE_LABELS: dict[str, str] = {
+    "created":   "目录已创建",
+    "saved":     "RPP 已保存",
+    "prepared":  "素材就绪",
+    "imported":  "音频已导入",
+    "mixed":     "混音完成",
+    "rendered":  "已渲染",
+    "archived":  "已归档",
+}
 
 
 # ── 索引管理 ──────────────────────────────────────────────────
@@ -376,3 +423,36 @@ def make_project_path(name: str, category: str = "",
     if category:
         return root / category / name
     return root / "未分类" / name
+
+
+# ── 标准子目录 ──────────────────────────────────────────────
+
+# 每个工程必须创建的标准子目录（规范 §三）
+STANDARD_SUBDIRS = [
+    "Audio",       # 音频素材（本地化）
+    "Renders",     # 渲染输出
+    "Stems",       # 分轨文件
+    "References",  # 参考音频
+    "Backups",     # .rpp-bak 自动备份
+    "Notes",       # 混音笔记
+]
+
+
+def create_project_dirs(project_path: str | Path) -> dict[str, Path]:
+    """在工程目录下创建所有标准子目录。
+
+    幂等 — 已存在的目录不会报错。
+
+    Returns
+    -------
+    dict
+        ``{"Audio": Path, "Renders": Path, ...}``
+    """
+    p = Path(project_path)
+    p.mkdir(parents=True, exist_ok=True)
+    created = {}
+    for sub in STANDARD_SUBDIRS:
+        d = p / sub
+        d.mkdir(exist_ok=True)
+        created[sub] = d
+    return created
