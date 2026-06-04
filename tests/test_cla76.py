@@ -106,7 +106,7 @@ class TestMsToCla76Attack:
     """ms → CLA-76 Attack knob position (1-7, CW=fast)."""
 
     def _call(self, ms):
-        from hermes_core.engine import _ms_to_cla76_attack
+        from hermes_core.comp_engine import _ms_to_cla76_attack
         return _ms_to_cla76_attack(ms)
 
     def test_very_fast(self):
@@ -136,7 +136,7 @@ class TestMsToCla76Release:
     """ms → CLA-76 Release knob position (1-7, CW=fast)."""
 
     def _call(self, ms):
-        from hermes_core.engine import _ms_to_cla76_release
+        from hermes_core.comp_engine import _ms_to_cla76_release
         return _ms_to_cla76_release(ms)
 
     def test_bpm_130(self):
@@ -174,7 +174,7 @@ class TestApplyCla76Params:
 
     def test_output_follows_gr(self):
         """Output should be negative, proportional to GR target."""
-        from hermes_core.engine import _apply_cla76_params
+        from hermes_core.comp_engine import _apply_cla76_params
         intent = CompressionIntent(
             amount="heavy", gr_target_db=8.2,
             crest_factor_db=20.6, rms_db=-18.0, peak_db=-0.1,
@@ -186,7 +186,7 @@ class TestApplyCla76Params:
 
     def test_output_more_negative_for_more_gr(self):
         """More GR → more Output attenuation."""
-        from hermes_core.engine import _apply_cla76_params
+        from hermes_core.comp_engine import _apply_cla76_params
         heavy = _apply_cla76_params(
             CompressionIntent(amount="heavy", gr_target_db=8.0,
                               crest_factor_db=20.0, rms_db=-18.0, peak_db=-2.0),
@@ -203,7 +203,7 @@ class TestApplyCla76Params:
 
     def test_input_in_valid_range(self):
         """CLA-76 Input must be in -48..0 range."""
-        from hermes_core.engine import _apply_cla76_params
+        from hermes_core.comp_engine import _apply_cla76_params
         intent = CompressionIntent(
             amount="heavy", gr_target_db=8.2,
             crest_factor_db=20.6, rms_db=-18.0, peak_db=-0.1,
@@ -214,7 +214,7 @@ class TestApplyCla76Params:
 
     def test_input_accounts_for_peak(self):
         """Same GR, peak closer to 0 → less Input needed."""
-        from hermes_core.engine import _apply_cla76_params
+        from hermes_core.comp_engine import _apply_cla76_params
         near_peak = _apply_cla76_params(
             CompressionIntent(amount="medium", gr_target_db=4.0,
                               crest_factor_db=12.0, rms_db=-18.0, peak_db=-2.0),

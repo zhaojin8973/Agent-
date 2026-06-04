@@ -1,0 +1,40 @@
+# Hermes-Core Mixing Profile: Vocal Chinese Bel Canto
+#
+# Use with:  hermes vocal-mix --profile profiles/vocal_chinese_bel_canto.yaml ...
+
+name: "Vocal Chinese Bel Canto"
+description: "中国民族美声人声混音配置 — 宏大气势，长混响尾，保持动态层次"
+
+# ── gain staging ──
+clip_gain_ref_db: -18.0
+target_lufs: -12.0
+ceiling_db: -0.5
+tolerance_lufs: 0.3
+
+# ── vocal processing chain ──
+vocal_chain:
+  - name: "FabFilter Pro-Q 3 (FabFilter)"
+  - name: "CLA-76 Mono (Waves)"
+  - name: "FabFilter Pro-DS (FabFilter)"
+  - name: "SSLEQ Mono (Waves)"
+  - name: "RVox Mono (Waves)"
+
+# ── backing (instrumental) processing chain ──
+backing_chain: []
+
+# ── reverb bus ──
+bus_reverb:
+  name: "ValhallaVintageVerb (Valhalla DSP)"
+  params:
+    Mix: 0.32
+reverb_level_db: -10.0
+
+# ── master limiter ──
+master_limiter:
+  name: "FabFilter Pro-L 2 (FabFilter)"
+  params:
+    "Output Level": -0.5
+
+# ── genre backing reduction (LU range) ──
+genre_table:
+  chinese_bel_canto: [6, 9]

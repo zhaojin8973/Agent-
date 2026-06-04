@@ -15,7 +15,7 @@ from unittest.mock import ANY, MagicMock, patch
 import pytest
 
 from hermes_core.bridge import ReaperBridge
-from hermes_core.render import RenderManager
+from hermes_core.render import RenderManager, verify_render
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1469,4 +1469,289 @@ class TestIsOutputSilent:
         mock_bridge, _ = _make_bridge()
         manager = RenderManager(mock_bridge)
         assert manager._is_output_silent("/nonexistent/file.wav") is False
+
+
+# ══════════════════════════════════════════════════════════════
+# Unit: _get_format_encoding()
+# ══════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestGetFormatEncoding:
+    """Tests for RenderManager._get_format_encoding()."""
+
+    def test_wav_encoding(self):
+        """WAV 编码包含 evaw sink code。"""
+        encoded = RenderManager._get_format_encoding("wav")
+        assert isinstance(encoded, str)
+        assert len(encoded) > 0
+
+    def test_mp3_encoding_default_bitrate(self):
+        """MP3 编码默认使用 320 kbps bitrate index 0。"""
+        encoded = RenderManager._get_format_encoding("mp3")
+        assert isinstance(encoded, str)
+        assert len(encoded) > 0
+
+    def test_mp3_encoding_various_bitrates(self):
+        """不同 bitrate 产生不同的编码字符串。"""
+        e320 = RenderManager._get_format_encoding("mp3", mp3_bitrate_kbps=320)
+        e128 = RenderManager._get_format_encoding("mp3", mp3_bitrate_kbps=128)
+        # 不同 bitrate 应产生不同编码
+        assert e320 != e128
+
+    def test_mp3_unknown_bitrate_falls_back_to_index_0(self):
+        """未知 bitrate → 回退到 320 kbps (index 0)。"""
+        encoded = RenderManager._get_format_encoding("mp3", mp3_bitrate_kbps=999)
+        e320 = RenderManager._get_format_encoding("mp3", mp3_bitrate_kbps=320)
+        assert encoded == e320
+
+    def test_flac_encoding(self):
+        """FLAC 编码包含 calf sink code。"""
+        encoded = RenderManager._get_format_encoding("flac")
+        assert isinstance(encoded, str)
+        assert len(encoded) > 0
+
+
+# ══════════════════════════════════════════════════════════════
+# Unit: render_mp3() / render_flac()
+# ══════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestConvenienceRenderMethods:
+    """Tests for render_mp3() and render_flac() convenience wrappers."""
+
+    def test_render_mp3_delegates_to_render_mix(self, tmp_path):
+        """render_mp3 调用 render_mix 并传入 fmt='mp3'。"""
+        mock_bridge, mock_api = _make_bridge(
+            GetSetProjectInfo_String=MagicMock(
+                side_effect=_render_config_side_effect()
+            )
+        )
+        manager = RenderManager(mock_bridge)
+        output_dir = tmp_path / "mp3_output"
+        output_dir.mkdir()
+
+        with patch("os.path.exists", return_value=True):
+            with patch("time.sleep", return_value=None):
+                result = manager.render_mp3(str(output_dir), bitrate_kbps=256)
+
+        assert isinstance(result, dict)
+        assert "output_path" in result
+
+    def test_render_flac_delegates_to_render_mix(self, tmp_path):
+        """render_flac 调用 render_mix 并传入 fmt='flac'。"""
+        mock_bridge, mock_api = _make_bridge(
+            GetSetProjectInfo_String=MagicMock(
+                side_effect=_render_config_side_effect()
+            )
+        )
+        manager = RenderManager(mock_bridge)
+        output_dir = tmp_path / "flac_output"
+        output_dir.mkdir()
+
+        with patch("os.path.exists", return_value=True):
+            with patch("time.sleep", return_value=None):
+                result = manager.render_flac(str(output_dir), compression_level=8)
+
+        assert isinstance(result, dict)
+        assert "output_path" in result
+
+    def test_render_mp3_passes_bitrate_to_render_mix(self, tmp_path):
+        """render_mp3 正确传递 bitrate 给底层 render_mix。"""
+        mock_bridge, mock_api = _make_bridge(
+            GetSetProjectInfo_String=MagicMock(
+                side_effect=_render_config_side_effect()
+            )
+        )
+        manager = RenderManager(mock_bridge)
+        output_dir = tmp_path / "mp3"
+        output_dir.mkdir()
+
+        with patch.object(manager, "render_mix", wraps=manager.render_mix) as spy:
+            with patch("os.path.exists", return_value=True):
+                with patch("time.sleep", return_value=None):
+                    manager.render_mp3(str(output_dir), bitrate_kbps=192)
+
+        spy.assert_called_once()
+        assert spy.call_args[1]["fmt"] == "mp3"
+        assert spy.call_args[1]["mp3_bitrate_kbps"] == 192
+
+    def test_render_flac_passes_compression_to_render_mix(self, tmp_path):
+        """render_flac 正确传递 compression_level 给底层 render_mix。"""
+        mock_bridge, mock_api = _make_bridge(
+            GetSetProjectInfo_String=MagicMock(
+                side_effect=_render_config_side_effect()
+            )
+        )
+        manager = RenderManager(mock_bridge)
+        output_dir = tmp_path / "flac"
+        output_dir.mkdir()
+
+        with patch.object(manager, "render_mix", wraps=manager.render_mix) as spy:
+            with patch("os.path.exists", return_value=True):
+                with patch("time.sleep", return_value=None):
+                    manager.render_flac(str(output_dir), compression_level=8)
+
+        spy.assert_called_once()
+        assert spy.call_args[1]["fmt"] == "flac"
+        assert spy.call_args[1]["flac_compression"] == 8
+
+
+# ══════════════════════════════════════════════════════════════
+# Unit: _wait_for_render()
+# ══════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestWaitForRender:
+    """Tests for RenderManager._wait_for_render() backoff polling."""
+
+    def test_returns_true_when_file_exists(self, tmp_path):
+        """文件已存在 → 立即返回 True。"""
+        fpath = tmp_path / "exists.wav"
+        fpath.write_text("data")
+        mock_bridge, _ = _make_bridge()
+        manager = RenderManager(mock_bridge)
+
+        with patch("time.sleep") as mock_sleep:
+            assert manager._wait_for_render(str(fpath), timeout=1.0) is True
+
+        # 文件已存在时不应 sleep
+        mock_sleep.assert_not_called()
+
+    def test_returns_false_on_timeout(self, tmp_path):
+        """文件始终不出现 → 超时返回 False。"""
+        fpath = tmp_path / "never.wav"
+        mock_bridge, _ = _make_bridge()
+        manager = RenderManager(mock_bridge)
+
+        with patch("os.path.exists", return_value=False):
+            with patch("time.sleep", return_value=None):
+                with patch("time.time", side_effect=[0.0, 0.1, 500.0]):
+                    assert manager._wait_for_render(str(fpath), timeout=1.0) is False
+
+    def test_eventually_finds_file(self, tmp_path):
+        """文件在几次轮询后出现 → 返回 True。"""
+        fpath = tmp_path / "appears.wav"
+        fpath.write_text("hello")
+        mock_bridge, _ = _make_bridge()
+        manager = RenderManager(mock_bridge)
+
+        call_count = [0]
+
+        def fake_exists(path):
+            call_count[0] += 1
+            # 第一次不存在，第二次及之后存在
+            return call_count[0] >= 2
+
+        def fake_size(path):
+            return 100  # 非零，稳定
+
+        with patch("os.path.exists", side_effect=fake_exists):
+            with patch("os.path.getsize", side_effect=fake_size):
+                with patch("time.sleep", return_value=None):
+                    assert manager._wait_for_render(str(fpath), timeout=30.0) is True
+
+
+# ══════════════════════════════════════════════════════════════
+# Unit: verify_render()
+# ══════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestVerifyRender:
+    """Tests for standalone verify_render() function."""
+
+    def test_file_not_found(self):
+        """文件不存在 → passed=False，file_exists 检查失败。"""
+        result = verify_render("/nonexistent/file.wav", expected_duration_sec=10.0,
+                               target_lufs=-12.0)
+        assert result["passed"] is False
+        assert result["checks"][0]["name"] == "file_exists"
+        assert result["checks"][0]["passed"] is False
+
+    def test_valid_wav_passes_checks(self, tmp_path):
+        """有效的 WAV 文件通过所有检查。"""
+        import soundfile as sf
+        import numpy as np
+
+        wav_path = str(tmp_path / "valid.wav")
+        sr = 48000
+        duration = 3.0
+        t = np.linspace(0, duration, int(sr * duration), endpoint=False)
+        # -12 dBFS 信号（~ -12 LUFS for sine）
+        amplitude = 10.0 ** (-12.0 / 20.0) * 0.7
+        mono = (amplitude * np.sin(2 * np.pi * 440 * t)).astype(np.float64)
+        stereo = np.column_stack([mono, mono])
+        sf.write(wav_path, stereo, sr)
+
+        result = verify_render(wav_path, expected_duration_sec=duration,
+                               target_lufs=-14.0, ceiling_db=-1.0,
+                               tolerance=5.0)
+        # 大部分检查应通过（tolerance 宽松）
+        assert "file_not_empty" in [c["name"] for c in result["checks"]]
+        # 文件有内容
+        file_check = [c for c in result["checks"] if c["name"] == "file_not_empty"]
+        assert file_check and file_check[0]["passed"] is True
+
+    def test_silent_file_detected(self, tmp_path):
+        """静音文件被 not_silent 检查捕获。"""
+        import soundfile as sf
+        import numpy as np
+
+        wav_path = str(tmp_path / "silent.wav")
+        silent = np.full((48000, 2), 1e-10, dtype=np.float64)
+        sf.write(wav_path, silent, 48000)
+
+        result = verify_render(wav_path, expected_duration_sec=1.0,
+                               target_lufs=-12.0, ceiling_db=-1.0)
+        # not_silent 检查应失败
+        silence_checks = [c for c in result["checks"] if c["name"] == "not_silent"]
+        if silence_checks:
+            assert silence_checks[0]["passed"] is False
+
+    def test_empty_file_detected(self, tmp_path):
+        """空文件被 file_not_empty 检查捕获。"""
+        wav_path = tmp_path / "empty.wav"
+        wav_path.write_text("")
+
+        result = verify_render(str(wav_path), expected_duration_sec=1.0,
+                               target_lufs=-12.0)
+        assert result["passed"] is False
+        assert result["measurements"]["file_size_bytes"] == 0
+
+    def test_duration_mismatch_detected(self, tmp_path):
+        """时长不匹配被 duration_match 检查捕获。"""
+        import soundfile as sf
+        import numpy as np
+
+        wav_path = str(tmp_path / "short.wav")
+        sr = 48000
+        actual_duration = 1.0
+        t = np.linspace(0, actual_duration, int(sr * actual_duration), endpoint=False)
+        mono = (0.3 * np.sin(2 * np.pi * 440 * t)).astype(np.float64)
+        stereo = np.column_stack([mono, mono])
+        sf.write(wav_path, stereo, sr)
+
+        # 期望 10s，实际 1s → 偏差 90%
+        result = verify_render(wav_path, expected_duration_sec=10.0,
+                               target_lufs=-12.0, ceiling_db=-1.0)
+        dur_checks = [c for c in result["checks"] if c["name"] == "duration_match"]
+        assert dur_checks and dur_checks[0]["passed"] is False
+
+    def test_returns_measurements_dict(self, tmp_path):
+        """验证结果包含 measurements 键。"""
+        import soundfile as sf
+        import numpy as np
+
+        wav_path = str(tmp_path / "meas.wav")
+        sr = 48000
+        t = np.linspace(0, 2.0, int(sr * 2.0), endpoint=False)
+        mono = (0.3 * np.sin(2 * np.pi * 440 * t)).astype(np.float64)
+        stereo = np.column_stack([mono, mono])
+        sf.write(wav_path, stereo, sr)
+
+        result = verify_render(wav_path, expected_duration_sec=2.0,
+                               target_lufs=-12.0)
+        assert "measurements" in result
+        meas = result["measurements"]
+        assert "file_size_bytes" in meas
+        assert meas["file_size_bytes"] > 0
 

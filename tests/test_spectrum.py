@@ -467,3 +467,351 @@ class TestFullPipeline:
         assert isinstance(report, SpectrumReport)
         # Mid band should have energy from 1 kHz sine
         assert report.band_energy_db["mid"] > -40
+
+
+# ══════════════════════════════════════════════════════════════
+# Data class tests
+# ══════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestResonanceDataclass:
+    """Verify Resonance dataclass fields."""
+
+    def test_creation_and_fields(self):
+        r = Resonance(freq_hz=340.0, prominence_db=12.5, q_factor=25.0,
+                       is_harmonic=False)
+        assert r.freq_hz == 340.0
+        assert r.prominence_db == 12.5
+        assert r.q_factor == 25.0
+        assert r.is_harmonic is False
+
+    def test_harmonic_resonance(self):
+        r = Resonance(freq_hz=400.0, prominence_db=8.0, q_factor=10.0,
+                       is_harmonic=True)
+        assert r.is_harmonic is True
+        assert r.freq_hz == 400.0
+
+
+@pytest.mark.unit
+class TestSpectrumReportDataclass:
+    """Verify SpectrumReport dataclass creation and field access."""
+
+    def test_manual_creation(self):
+        r = Resonance(freq_hz=500.0, prominence_db=10.0, q_factor=20.0,
+                       is_harmonic=False)
+        report = SpectrumReport(
+            band_energy_db={"mid": -10.0, "low": -20.0},
+            spectral_tilt_db_per_octave=-3.5,
+            resonances=[r],
+            mud_ratio_db=2.0,
+            presence_deficit_db=4.0,
+            sibilance_peak_hz=6500.0,
+            air_level_db=-25.0,
+        )
+        assert report.band_energy_db["mid"] == -10.0
+        assert report.spectral_tilt_db_per_octave == -3.5
+        assert len(report.resonances) == 1
+        assert report.resonances[0].freq_hz == 500.0
+        assert report.mud_ratio_db == 2.0
+        assert report.presence_deficit_db == 4.0
+        assert report.sibilance_peak_hz == 6500.0
+        assert report.air_level_db == -25.0
+
+
+# ══════════════════════════════════════════════════════════════
+# SpectrumAnalyzer class methods (_read_pcm, _to_mono)
+# ══════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestReadPcmClassMethod:
+    """Test SpectrumAnalyzer._read_pcm static method."""
+
+    def test_reads_mono_wav(self, tmp_path):
+        """Mono WAV is read as 2-D array."""
+        import soundfile as sf
+        sig = _sine(1000, 1.0)
+        p = str(tmp_path / "mono.wav")
+        sf.write(p, sig, _SR)
+        data, sr = SpectrumAnalyzer._read_pcm(p)
+        assert data.ndim == 2
+        assert data.shape[1] == 1
+        assert sr == _SR
+
+    def test_reads_stereo_wav(self, tmp_path):
+        """Stereo WAV has 2 channels."""
+        import soundfile as sf
+        sig = _sine(1000, 1.0)
+        stereo = np.column_stack([sig, sig * 0.5])
+        p = str(tmp_path / "stereo.wav")
+        sf.write(p, stereo, _SR)
+        data, sr = SpectrumAnalyzer._read_pcm(p)
+        assert data.ndim == 2
+        assert data.shape[1] == 2
+        assert sr == _SR
+
+
+@pytest.mark.unit
+class TestToMonoClassMethod:
+    """Test SpectrumAnalyzer._to_mono static method."""
+
+    def test_mono_input_1d(self):
+        """1-D input returns float64 copy."""
+        sig = np.array([0.1, 0.2, 0.3], dtype=np.float32)
+        result = SpectrumAnalyzer._to_mono(sig)
+        assert result.dtype == np.float64
+        assert len(result) == 3
+
+    def test_mono_input_2d_single_channel(self):
+        """2-D single channel extracts first column."""
+        sig = np.array([[0.1], [0.2], [0.3]], dtype=np.float32)
+        result = SpectrumAnalyzer._to_mono(sig)
+        assert result.ndim == 1
+        assert result.dtype == np.float64
+        assert len(result) == 3
+
+    def test_stereo_input_averaged(self):
+        """Multi-channel averaged across channels."""
+        sig = np.array([[0.1, 0.3], [0.2, 0.4], [0.3, 0.5]], dtype=np.float32)
+        result = SpectrumAnalyzer._to_mono(sig)
+        assert result.ndim == 1
+        assert len(result) == 3
+        assert result[0] == pytest.approx(0.2)  # mean(0.1, 0.3)
+
+
+# ══════════════════════════════════════════════════════════════
+# Edge-case and branch coverage tests
+# ══════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestSmoothSpectrumEdgeCase:
+    """Test _smooth_spectrum with window_bins < 1."""
+
+    def test_window_bins_zero_returns_copy(self):
+        """window_bins < 1 → return undmodified copy."""
+        mag = np.array([-10.0, -20.0, -30.0, -40.0, -50.0])
+        result = SpectrumAnalyzer._smooth_spectrum(mag, 0)
+        np.testing.assert_array_equal(result, mag)
+        assert result is not mag  # verify it is a copy
+
+    def test_window_bins_negative_returns_copy(self):
+        """Negative window_bins also returns a copy."""
+        mag = np.array([-5.0, -15.0])
+        result = SpectrumAnalyzer._smooth_spectrum(mag, -1)
+        np.testing.assert_array_equal(result, mag)
+        assert result is not mag
+
+
+@pytest.mark.unit
+class TestFindPeaksEdgeCase:
+    """Test _find_peaks with short arrays."""
+
+    def test_empty_array_returns_empty(self):
+        assert SpectrumAnalyzer._find_peaks(np.array([]), 6.0) == []
+
+    def test_single_element_returns_empty(self):
+        assert SpectrumAnalyzer._find_peaks(np.array([5.0]), 6.0) == []
+
+    def test_two_elements_returns_empty(self):
+        assert SpectrumAnalyzer._find_peaks(np.array([5.0, 7.0]), 6.0) == []
+
+    def test_no_peak_above_threshold(self):
+        """Peaks below threshold are filtered out."""
+        # [5, 10, 5] has a peak at idx=1, but prominence 10 < 12
+        p = np.array([5.0, 10.0, 5.0])
+        assert SpectrumAnalyzer._find_peaks(p, 12.0) == []
+
+    def test_finds_peaks_above_threshold(self):
+        """Peaks above threshold are detected."""
+        p = np.array([5.0, 15.0, 5.0, 20.0, 5.0])
+        peaks = SpectrumAnalyzer._find_peaks(p, 6.0)
+        assert peaks == [1, 3]
+
+
+@pytest.mark.unit
+class TestDetectResonancesEdgeCase:
+    """Test _detect_resonances with edge-case inputs."""
+
+    def test_short_spectrum_returns_empty(self):
+        """Spectrum with < 10 bins returns empty list."""
+        mag = np.array([-10.0, -20.0, -30.0, -40.0, -50.0])
+        freqs = np.array([100.0, 200.0, 300.0, 400.0, 500.0])
+        result = SpectrumAnalyzer._detect_resonances(mag, freqs)
+        assert result == []
+
+    def test_detects_single_resonance(self):
+        """Spectrum with a single narrow peak detects it."""
+        sr = _SR
+        sig = _sine(500, 2.0, sr)
+        mag_db, freqs = SpectrumAnalyzer._stft_p90(sig, sr)
+        result = SpectrumAnalyzer._detect_resonances(mag_db, freqs)
+        # A pure sine should be detected as a resonance
+        assert len(result) > 0
+
+
+@pytest.mark.unit
+class TestComputeQFactorEdgeCase:
+    """Test _compute_q_factor with invalid indices and zero bandwidth."""
+
+    def test_negative_index_returns_100(self):
+        """Negative peak index returns 100.0."""
+        mag = np.array([-10.0, -20.0, -30.0, -40.0, -50.0])
+        freqs = np.array([100.0, 200.0, 300.0, 400.0, 500.0])
+        q = SpectrumAnalyzer._compute_q_factor(mag, freqs, -1)
+        assert q == 100.0
+
+    def test_out_of_bounds_index_returns_100(self):
+        """Out-of-bounds peak index returns 100.0."""
+        mag = np.array([-10.0, -20.0, -30.0, -40.0, -50.0])
+        freqs = np.array([100.0, 200.0, 300.0, 400.0, 500.0])
+        q = SpectrumAnalyzer._compute_q_factor(mag, freqs, 5)  # >= len
+        assert q == 100.0
+
+    def test_single_element_zero_bandwidth(self):
+        """Single-element spectrum → zero bandwidth → returns 100.0."""
+        mag = np.array([-10.0])
+        freqs = np.array([100.0])
+        q = SpectrumAnalyzer._compute_q_factor(mag, freqs, 0)
+        assert q == 100.0
+
+
+@pytest.mark.unit
+class TestEstimateF0RangeEdgeCase:
+    """Test _estimate_f0_range edge cases."""
+
+    def test_sparse_data_returns_default(self):
+        """Too few bins (< 3) in F0 range → returns [200.0]."""
+        mag = np.array([-10.0, -20.0])
+        freqs = np.array([50.0, 100.0])  # only 1 bin in 80-400 range
+        result = SpectrumAnalyzer._estimate_f0_range(mag, freqs)
+        assert result == [200.0]
+
+    def test_no_peaks_fallback_returns_max_energy(self):
+        """No peaks in F0 range → returns frequency with max energy."""
+        mag = np.array([-10.0, -15.0, -20.0, -18.0, -25.0])
+        freqs = np.array([80.0, 120.0, 200.0, 250.0, 350.0])
+        result = SpectrumAnalyzer._estimate_f0_range(mag, freqs)
+        assert len(result) == 1
+        assert result[0] == 80.0  # highest energy
+
+    def test_finds_peaks_in_f0_range(self):
+        """Normal case returns top 3 peak frequencies."""
+        sr = _SR
+        sig = _sine(200, 2.0, sr, 0.8)
+        mag_db, freqs = SpectrumAnalyzer._stft_p90(sig, sr)
+        result = SpectrumAnalyzer._estimate_f0_range(mag_db, freqs)
+        assert len(result) >= 1
+        # Should detect peak near 200 Hz
+        assert any(abs(f - 200.0) < 50 for f in result)
+
+
+@pytest.mark.unit
+class TestIsHarmonicEdgeCase:
+    """Test _is_harmonic with zero/negative F0 and frequency below F0."""
+
+    def test_f0_zero_is_skipped(self):
+        """F0 <= 0 is skipped, not causing division by zero."""
+        f0_list = [0.0, -1.0, 200.0]
+        assert SpectrumAnalyzer._is_harmonic(400.0, f0_list)  # 2×200
+        assert not SpectrumAnalyzer._is_harmonic(350.0, f0_list)
+
+    def test_all_f0_zero_or_negative(self):
+        """All F0 values <= 0 → not harmonic."""
+        assert not SpectrumAnalyzer._is_harmonic(400.0, [0.0, -100.0])
+
+    def test_frequency_below_f0(self):
+        """Freq lower than F0 → nearest_int < 1 → skipped, not harmonic."""
+        f0_list = [500.0]
+        assert not SpectrumAnalyzer._is_harmonic(200.0, f0_list)
+
+
+# ══════════════════════════════════════════════════════════════
+# Sibilance fallback test
+# ══════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestSibilanceFallback:
+    """Test sibilance detection fallback when no energy in 4-12 kHz."""
+
+    def test_low_sample_rate_triggers_fallback(self, tmp_path):
+        """SR 7 kHz → Nyquist 3.5 kHz → no bins in 4-12 kHz → fallback."""
+        sr = 7000
+        dur = 0.5
+        t = np.arange(int(sr * dur)) / sr
+        sig = 0.8 * np.sin(2.0 * np.pi * 500 * t)
+        p = tmp_path / "low_sr.wav"
+        _write_wav(p, sig, sample_rate=sr)
+        report = SpectrumAnalyzer.analyze(str(p))
+        assert report.sibilance_peak_hz == 8000.0
+
+
+# ══════════════════════════════════════════════════════════════
+# Spectral tilt edge cases
+# ══════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestSpectralTiltEdgeCases:
+    """Test _compute_spectral_tilt edge cases."""
+
+    def test_too_few_bins_returns_zero(self):
+        """< 4 bins in 100Hz-10kHz range → return 0.0."""
+        mag = np.array([-10.0, -20.0, -30.0])
+        freqs = np.array([50.0, 150.0, 12000.0])  # only 150 Hz in range
+        tilt = SpectrumAnalyzer._compute_spectral_tilt(mag, freqs)
+        assert tilt == 0.0
+
+    def test_near_zero_denominator_returns_zero(self):
+        """All log_f values identical → denominator near zero → return 0.0."""
+        mag = np.array([-10.0, -20.0, -30.0, -40.0])
+        freqs = np.array([200.0, 200.0, 200.0, 200.0])
+        tilt = SpectrumAnalyzer._compute_spectral_tilt(mag, freqs)
+        assert tilt == 0.0
+
+
+# ══════════════════════════════════════════════════════════════
+# Band energy — no-bins-in-band test
+# ══════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestBandEnergyEdgeCases:
+    """Test _compute_band_energy when some bands have no bins."""
+
+    def test_band_with_no_bins_returns_minus_120(self):
+        """Bands with no frequency bins get -120 dB fallback."""
+        mag = np.array([-10.0, -20.0])
+        freqs = np.array([10000.0, 15000.0])  # all > 8 kHz, only air band
+        result = SpectrumAnalyzer._compute_band_energy(mag, freqs)
+        for band in ["sub", "low", "low_mid", "mid", "high_mid", "presence"]:
+            assert result[band] == -120.0, f"Band '{band}' should be -120"
+        assert result["air"] > -120.0
+
+
+# ══════════════════════════════════════════════════════════════
+# Very-low-sample-rate test (frame_samples < 16)
+# ══════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestVeryLowSampleRate:
+    """Test _stft_p90 with sample rates so low that frame_samples < 16."""
+
+    def test_frame_samples_clamped_to_minimum(self):
+        """sr=100, frame_ms=50 → frame_samples=5 → clamped to 16."""
+        sr = 100
+        dur = 2.0
+        t = np.arange(int(sr * dur)) / sr
+        sig = np.sin(2.0 * np.pi * 10 * t)
+        mag_db, freqs = SpectrumAnalyzer._stft_p90(sig, sr)
+        assert len(mag_db) > 0
+
+
+# ══════════════════════════════════════════════════════════════
+# Error handling in analyze()
+# ══════════════════════════════════════════════════════════════
+
+@pytest.mark.unit
+class TestAnalyzeErrorPaths:
+    """Test SpectrumAnalyzer.analyze error handling."""
+
+    def test_file_not_found(self, tmp_path):
+        """Non-existent file should raise an exception."""
+        with pytest.raises(Exception):
+            SpectrumAnalyzer.analyze(str(tmp_path / "nonexistent.wav"))

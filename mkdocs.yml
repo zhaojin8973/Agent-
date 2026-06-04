@@ -1,0 +1,63 @@
+site_name: Hermes-Core
+site_description: REAPER DAW 自动化混音 Python SDK
+site_author: Zhao Jin
+repo_url: https://github.com/zhaojin/hermes-core
+theme:
+  name: material
+  language: zh
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: 切换暗色模式
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: 切换亮色模式
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.sections
+    - navigation.indexes
+    - content.code.copy
+    - content.code.annotate
+
+nav:
+  - 首页: index.md
+  - 快速开始: quickstart.md
+  - API 参考:
+    - 引擎: api/engine.md
+    - Agent Protocol: api/agent_protocol.md
+    - 安全层: api/security.md
+  - 混音指南:
+    - 流派 Profile: guides/profiles.md
+    - 插件注册表: guides/plugins.md
+  - 开发:
+    - 架构: dev/architecture.md
+    - 贡献指南: dev/contributing.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed
+  - pymdownx.tasklist
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            show_source: true
+            show_root_heading: true

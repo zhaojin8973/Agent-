@@ -1,0 +1,40 @@
+# Hermes-Core Mixing Profile: Vocal Electronic
+#
+# Use with:  hermes vocal-mix --profile profiles/vocal_electronic.yaml ...
+
+name: "Vocal Electronic"
+description: "电子人声混音配置 — 大气空间感，较长混响尾，强力动态控制"
+
+# ── gain staging ──
+clip_gain_ref_db: -18.0
+target_lufs: -9.0
+ceiling_db: -0.5
+tolerance_lufs: 0.3
+
+# ── vocal processing chain ──
+vocal_chain:
+  - name: "FabFilter Pro-Q 3 (FabFilter)"
+  - name: "CLA-76 Mono (Waves)"
+  - name: "FabFilter Pro-DS (FabFilter)"
+  - name: "SSLEQ Mono (Waves)"
+  - name: "RVox Mono (Waves)"
+
+# ── backing (instrumental) processing chain ──
+backing_chain: []
+
+# ── reverb bus ──
+bus_reverb:
+  name: "ValhallaVintageVerb (Valhalla DSP)"
+  params:
+    Mix: 0.35
+reverb_level_db: -10.0
+
+# ── master limiter ──
+master_limiter:
+  name: "FabFilter Pro-L 2 (FabFilter)"
+  params:
+    "Output Level": -0.5
+
+# ── genre backing reduction (LU range) ──
+genre_table:
+  electronic: [9, 13]

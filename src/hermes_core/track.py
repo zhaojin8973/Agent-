@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from hermes_core.bridge import ReaperBridge
-from hermes_core.audio_utils import db_to_norm, norm_to_db
+from hermes_core.audio_utils import db_to_norm, norm_to_db, _register_pcm_temp
 
 log = logging.getLogger(__name__)
 
@@ -78,11 +78,21 @@ def _convert_to_pcm(file_path: str) -> str:
 
     fd, tmp_path = tempfile.mkstemp(suffix=".wav", prefix="hermes_pcm_")
     os.close(fd)
-    with wave.open(tmp_path, "wb") as wf:
-        wf.setnchannels(channels)
-        wf.setsampwidth(2)
-        wf.setframerate(sr)
-        wf.writeframes(i16.tobytes())
+    try:
+        with wave.open(tmp_path, "wb") as wf:
+            wf.setnchannels(channels)
+            wf.setsampwidth(2)
+            wf.setframerate(sr)
+            wf.writeframes(i16.tobytes())
+        # 注册到 atexit 兜底清理，防止调用方忘记清理
+        _register_pcm_temp(tmp_path)
+    except Exception:
+        # 写入失败时清理已创建的临时文件
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
     return tmp_path
 
 

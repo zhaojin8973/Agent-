@@ -4,9 +4,18 @@ Layer 1.5: 音频工具函数 — 公共的音频数据处理工具。
 提供跨模块共享的音频处理函数，避免代码重复。
 """
 
+import atexit
+import logging
 import math
+import os
+import shutil
+import threading
+from pathlib import Path
+
 import numpy as np
 import soundfile as sf
+
+log = logging.getLogger(__name__)
 
 
 # ════════════════════════════════════════════════════════════════
@@ -181,3 +190,66 @@ def note_to_ms(note: str, bpm: float = 120.0) -> float:
             f"未知音符值 '{note}'。支持: {sorted(mapping.keys())} 或纯毫秒值"
         )
     return quarter_ms * multiplier
+
+
+# ════════════════════════════════════════════════════════════════
+# PCM 临时文件生命周期管理
+# ════════════════════════════════════════════════════════════════
+
+_pcm_temp_files: list[str] = []
+_pcm_temp_lock: threading.Lock = threading.Lock()
+_atexit_registered: bool = False
+
+
+def _cleanup_pcm_temps() -> None:
+    """清理所有已注册的 PCM 临时文件。
+
+    在 atexit 或 finally 块中调用，确保进程退出时不留残留文件。
+    """
+    global _pcm_temp_files
+    with _pcm_temp_lock:
+        paths = list(_pcm_temp_files)
+        _pcm_temp_files.clear()
+
+    cleaned = 0
+    for path in paths:
+        try:
+            if os.path.isfile(path):
+                os.unlink(path)
+                cleaned += 1
+            elif os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+                cleaned += 1
+        except OSError:
+            pass
+
+    if cleaned:
+        log.debug("已清理 %d 个 PCM 临时文件", cleaned)
+
+
+def _register_pcm_temp(path: str | Path) -> Path:
+    """注册 PCM 临时文件路径，进程退出时自动清理。
+
+    在创建 PCM 临时文件后立即调用此函数，确保 atexit 兜底清理。
+
+    Parameters
+    ----------
+    path : str | Path
+        临时文件路径。
+
+    Returns
+    -------
+    Path
+        注册后的绝对路径。
+    """
+    global _atexit_registered
+    if not _atexit_registered:
+        atexit.register(_cleanup_pcm_temps)
+        _atexit_registered = True
+
+    path_str = str(Path(path).expanduser().resolve())
+    with _pcm_temp_lock:
+        if path_str not in _pcm_temp_files:
+            _pcm_temp_files.append(path_str)
+            log.debug("注册 PCM 临时文件: %s", path_str)
+    return Path(path_str)

@@ -11,13 +11,17 @@ from hermes_core.engine import MixingEngine
 from hermes_core.profiles import MixingProfile, FXPreset
 from hermes_core.exceptions import (
     HermesError,
-    ConnectionError,
+    BridgeConnectionError,
     TrackError,
     RenderError,
     AnalysisError,
     CalibrationError,
     UnregisteredPluginError,
     UnregisteredParamError,
+    InvalidStateError,
+    SecurityError,
+    PluginNotFoundError,
+    Result,
 )
 from hermes_core.normalize import (
     PLUGIN_REGISTRY,
@@ -48,13 +52,17 @@ __all__ = [
     "FXPreset",
     # Exceptions
     "HermesError",
-    "ConnectionError",
+    "BridgeConnectionError",
     "TrackError",
     "RenderError",
     "AnalysisError",
     "CalibrationError",
     "UnregisteredPluginError",
     "UnregisteredParamError",
+    "InvalidStateError",
+    "SecurityError",
+    "PluginNotFoundError",
+    "Result",
     # Normalisation
     "PLUGIN_REGISTRY",
     "normalize_param",

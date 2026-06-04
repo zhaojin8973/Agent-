@@ -14,7 +14,8 @@ import pytest
 
 from hermes_core.spectrum import SpectrumReport, Resonance
 from hermes_core.loudness_optimizer import EqIntent, EqBandIntent
-from hermes_core.engine import _derive_eq_intent, _apply_proq3_eq, _GENRE_EQ_TWEAKS
+from hermes_core.eq_engine import _derive_eq_intent, _apply_proq3_eq
+from hermes_core.engine import _GENRE_EQ_TWEAKS
 
 
 # ══════════════════════════════════════════════════════════════
@@ -284,7 +285,7 @@ class TestProQ3Translation:
 
     def test_hpf_maps_to_low_cut(self):
         """HPF band_type → Pro-Q 3 Low Cut (Shape=2/8=0.25)."""
-        from hermes_core.engine import _proq3_freq_norm, _proq3_q_norm
+        from hermes_core.eq_engine import _proq3_freq_norm, _proq3_q_norm
         band = EqBandIntent(
             band_type="hp", freq_hz=80.0, gain_db=0.0, q=0.7,
             reason="Test HPF",
@@ -300,7 +301,7 @@ class TestProQ3Translation:
 
     def test_bell_maps_to_bell(self):
         """Bell band_type → Pro-Q 3 Bell (Shape=0)."""
-        from hermes_core.engine import _proq3_freq_norm, _proq3_q_norm
+        from hermes_core.eq_engine import _proq3_freq_norm, _proq3_q_norm
         band = EqBandIntent(
             band_type="bell", freq_hz=3000.0, gain_db=2.5, q=1.0,
             reason="Test bell",
@@ -470,7 +471,7 @@ class TestSSLEQTranslation:
     """_apply_ssleq_eq maps EqIntent → SSL EQ 0–1 params."""
 
     def test_presence_maps_to_hmf(self):
-        from hermes_core.engine import _apply_ssleq_eq
+        from hermes_core.eq_engine import _apply_ssleq_eq
 
         band = EqBandIntent(
             band_type="bell", freq_hz=3000.0, gain_db=3.0, q=1.0,
@@ -484,7 +485,7 @@ class TestSSLEQTranslation:
         assert 0.0 < params["HMF Frq"] < 1.0
 
     def test_air_maps_to_hf(self):
-        from hermes_core.engine import _apply_ssleq_eq
+        from hermes_core.eq_engine import _apply_ssleq_eq
 
         band = EqBandIntent(
             band_type="high_shelf", freq_hz=8000.0, gain_db=1.5, q=0.7,
@@ -497,7 +498,7 @@ class TestSSLEQTranslation:
         assert 0.0 < params["HF Frq"] < 1.0
 
     def test_analog_always_on(self):
-        from hermes_core.engine import _apply_ssleq_eq
+        from hermes_core.eq_engine import _apply_ssleq_eq
 
         intent = EqIntent(bands=[], spectral_tilt="neutral", mud_detected=False)
         params = _apply_ssleq_eq(intent)
@@ -507,7 +508,7 @@ class TestSSLEQTranslation:
 
     def test_output_attenuation_for_boost(self):
         """Output Gain should be reduced when total boost > 0."""
-        from hermes_core.engine import _apply_ssleq_eq
+        from hermes_core.eq_engine import _apply_ssleq_eq
 
         band = EqBandIntent(
             band_type="bell", freq_hz=3000.0, gain_db=4.0, q=1.0,
@@ -520,7 +521,7 @@ class TestSSLEQTranslation:
         assert params["Gain"] < 0.5, f"Output should be attenuated, got {params['Gain']}"
 
     def test_all_params_in_range(self):
-        from hermes_core.engine import _apply_ssleq_eq
+        from hermes_core.eq_engine import _apply_ssleq_eq
 
         bands = [
             EqBandIntent("bell", 3000.0, 3.0, 1.0, "presence"),

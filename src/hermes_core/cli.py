@@ -233,7 +233,7 @@ def cmd_batch(args) -> int:
                 eng.prepare_stems(stem_paths, genre="pop", bpm=resolved_bpm)
                 eng.apply_profile(profile, genre="pop", bpm=resolved_bpm)
                 eng.post_fx_balance()
-                from hermes_core.engine import _get_genre_target_lufs
+                from hermes_core.mastering import _get_genre_target_lufs
                 target_lufs = args.target_lufs if args.target_lufs is not None else _get_genre_target_lufs("pop")
                 result = eng.finalize_master(target_lufs=target_lufs)
                 if result.get("passed"):
@@ -335,7 +335,7 @@ def cmd_adjust(args) -> int:
             balance.get("backing_lufs", float("nan")),
         )
 
-        from hermes_core.engine import _get_genre_target_lufs
+        from hermes_core.mastering import _get_genre_target_lufs
         genre = getattr(args, "genre", "pop")
         target_lufs = args.target_lufs if args.target_lufs is not None else _get_genre_target_lufs(genre)
 

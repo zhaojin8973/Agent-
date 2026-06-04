@@ -32,6 +32,10 @@ _TYPE_ALIASES: dict[str, str] = {
     "Pro-L":    "limiter",
     "Valhalla": "reverb",
     "ReaVerb":  "reverb",
+    "Decapitator": "saturation",
+    "Saturn":      "saturation",
+    "MicroShift":  "doubler",
+    "Doubler":     "doubler",
 }
 
 
@@ -264,18 +268,27 @@ class MixingProfile:
 
 
 def get_default_vocal_chain() -> list[FXPreset]:
-    """Return the default 5-node vocal processing chain.
+    """Return the default 9-stage vocal processing chain.
 
-    ``Pro-Q 3 (pre-EQ) → CLA-76 (peak) → Pro-DS (de-ess)
-    → SSL EQ (post-EQ) → RVox (body)``
+    ``HPF → Saturation → Surgical EQ → Peak Comp → De-Esser
+    → Dynamic EQ → RMS Comp → Color EQ → Doubler``
 
-    This is the recommended starting point for vocal mixing.
+    This is the recommended 9-stage vocal chain per the MIXING_KNOWLEDGE_BASE.
     """
     return [
         FXPreset(
             name="VST: FabFilter Pro-Q 3 (FabFilter)",
             fx_type="eq",
             eq_position="pre",
+        ),
+        FXPreset(
+            name="VST3: Decapitator Mono (Soundtoys)",
+            fx_type="saturation",
+        ),
+        FXPreset(
+            name="VST: FabFilter Pro-Q 3 (FabFilter)",
+            fx_type="eq",
+            eq_position="solo",
         ),
         FXPreset(
             name="VST3: CLA-76 Mono (Waves)",
@@ -286,12 +299,20 @@ def get_default_vocal_chain() -> list[FXPreset]:
             fx_type="deesser",
         ),
         FXPreset(
+            name="VST: FabFilter Pro-Q 3 (FabFilter)",
+            fx_type="dynamic_eq",
+        ),
+        FXPreset(
+            name="VST3: RVox Mono (Waves)",
+            fx_type="rvox",
+        ),
+        FXPreset(
             name="VST3: SSLEQ Mono (Waves)",
             fx_type="eq",
             eq_position="post",
         ),
         FXPreset(
-            name="VST3: RVox Mono (Waves)",
-            fx_type="rvox",
+            name="VST3: MicroShift (Soundtoys)",
+            fx_type="doubler",
         ),
     ]

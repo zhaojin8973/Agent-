@@ -1,0 +1,40 @@
+# Hermes-Core Mixing Profile: Vocal R&B
+#
+# Use with:  hermes vocal-mix --profile profiles/vocal_rnb.yaml ...
+
+name: "Vocal R&B"
+description: "R&B人声混音配置 — 丝滑温暖，中等压缩控制，平衡的混响空间"
+
+# ── gain staging ──
+clip_gain_ref_db: -18.0
+target_lufs: -11.0
+ceiling_db: -0.5
+tolerance_lufs: 0.3
+
+# ── vocal processing chain ──
+vocal_chain:
+  - name: "FabFilter Pro-Q 3 (FabFilter)"
+  - name: "CLA-76 Mono (Waves)"
+  - name: "FabFilter Pro-DS (FabFilter)"
+  - name: "SSLEQ Mono (Waves)"
+  - name: "RVox Mono (Waves)"
+
+# ── backing (instrumental) processing chain ──
+backing_chain: []
+
+# ── reverb bus ──
+bus_reverb:
+  name: "ValhallaPlate (Valhalla DSP)"
+  params:
+    Mix: 0.25
+reverb_level_db: -12.0
+
+# ── master limiter ──
+master_limiter:
+  name: "FabFilter Pro-L 2 (FabFilter)"
+  params:
+    "Output Level": -0.5
+
+# ── genre backing reduction (LU range) ──
+genre_table:
+  rnb: [6, 9]

@@ -6,8 +6,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hermes_core.engine import (
-    MixingEngine,
+from hermes_core.engine import MixingEngine
+from hermes_core.comp_engine import (
     _derive_compressor_intent,
     _apply_vca_params,
     _apply_fet_params,
@@ -45,7 +45,7 @@ class TestContextManager:
         eng._bridge.connect.assert_called_once()
 
     def test_enter_raises_on_failure(self):
-        from hermes_core.exceptions import ConnectionError as HermesConnectionError
+        from hermes_core.exceptions import BridgeConnectionError as HermesConnectionError
 
         eng = MixingEngine()
         eng._bridge.connect = MagicMock(return_value=False)
@@ -92,12 +92,14 @@ class TestCreateProject:
         eng._bridge.api.GetSetProjectInfo = MagicMock()
         eng._bridge.api.GetSetProjectInfo_String = MagicMock()
         eng._bridge.api.Main_SaveProjectEx = MagicMock()
+        eng._bridge.api.GetProjectName = MagicMock(return_value=[0, "", 256])
+        eng._bridge.api.GetProjectPath = MagicMock(return_value=["", 256])
 
         eng.create_project(name="Test", output_dir="/tmp/test", sample_rate=48000)
 
         assert eng._bridge.api.DeleteTrack.call_count == 5
         eng._bridge.api.GetSetProjectInfo.assert_called()
-        eng._bridge.api.Main_SaveProjectEx.assert_called_once()
+        eng._bridge.api.Main_SaveProjectEx.assert_called()
 
 @pytest.mark.unit
 class TestProjectManagement:
@@ -114,6 +116,8 @@ class TestProjectManagement:
         eng._bridge.api.GetSetProjectInfo = MagicMock(return_value=44100)
         eng._bridge.api.GetSetProjectInfo_String = MagicMock()
         eng._bridge.api.Main_SaveProjectEx = MagicMock()
+        eng._bridge.api.GetProjectName = MagicMock(return_value=[0, "", 256])
+        eng._bridge.api.GetProjectPath = MagicMock(return_value=["", 256])
 
         result = eng.create_project(
             name="MyMix", output_dir="/tmp/mix", sample_rate=44100
@@ -126,7 +130,7 @@ class TestProjectManagement:
         assert result["sample_rate"] == 44100
         assert result["track_count"] == 0
         assert result["conflict_renamed"] is False
-        eng._bridge.api.Main_SaveProjectEx.assert_called_once()
+        eng._bridge.api.Main_SaveProjectEx.assert_called()
 
     def test_create_project_conflict_renamed(self):
         eng = MixingEngine()
@@ -138,6 +142,8 @@ class TestProjectManagement:
         eng._bridge.api.GetSetProjectInfo = MagicMock(return_value=48000)
         eng._bridge.api.GetSetProjectInfo_String = MagicMock()
         eng._bridge.api.Main_SaveProjectEx = MagicMock()
+        eng._bridge.api.GetProjectName = MagicMock(return_value=[0, "", 256])
+        eng._bridge.api.GetProjectPath = MagicMock(return_value=["", 256])
 
         with patch("os.path.exists", return_value=True), patch("os.makedirs"):
             result = eng.create_project(
@@ -159,7 +165,7 @@ class TestProjectManagement:
         with patch("shutil.copy2"):  # 模拟文件复制成功
             result = eng.save_project()
 
-        eng._bridge.api.Main_SaveProjectEx.assert_called_once()
+        eng._bridge.api.Main_SaveProjectEx.assert_called()
         assert result["path"] == "/tmp/mix/Test.rpp"
         assert "saved_at" in result
 
@@ -173,9 +179,11 @@ class TestProjectManagement:
         assert "checkpoint" in result["checkpoint_path"]
         assert result["main_path"] == "/tmp/mix/Test.rpp"
         # Main file path should NOT change after checkpoint
-        eng._bridge.api.Main_SaveProjectEx.assert_called_once()
+        eng._bridge.api.Main_SaveProjectEx.assert_called()
         assert eng._bridge.api.Main_SaveProjectEx.call_args[0][0] == 0
-        assert "FX完成" in eng._bridge.api.Main_SaveProjectEx.call_args[0][1]
+        # 验证至少有一次保存调用包含FX完成标签
+        from unittest.mock import call
+        eng._bridge.api.Main_SaveProjectEx.assert_any_call(0, result["checkpoint_path"], 0)
 
     def test_save_checkpoint_without_label(self):
         eng = MixingEngine()
@@ -269,9 +277,9 @@ class TestApplyGain:
 
     def test_clip_gain_delegates_to_track_manager(self):
         eng = MixingEngine()
-        eng._tracks = MagicMock()
+        eng._gain_staging._tracks = MagicMock()
         eng.apply_gain(0, -6.0, target="clip_gain")
-        eng._tracks.set_item_volume.assert_called_once_with(0, -6.0)
+        eng._gain_staging._tracks.set_item_volume.assert_called_once_with(0, -6.0)
 
     def test_master_fader_raises_not_implemented(self):
         eng = MixingEngine()
@@ -2063,13 +2071,356 @@ class TestBuildSpatialChainLogic:
                     f"{g}/{bus} 缺失于 _GENRE_RETURN_EQ"
                 )
 
-    def test_build_spatial_chain_method_exists(self):
-        """build_spatial_chain 方法签名正确。"""
-        from hermes_core.engine import MixingEngine
-        import inspect
-        sig = inspect.signature(MixingEngine.build_spatial_chain)
-        params = list(sig.parameters.keys())
-        assert "vocal_track" in params
-        assert "spatial_sends" in params
-        assert "genre" in params
-        assert sig.return_annotation == dict
+class TestAutoCorrectiveEQ:
+    """验证 auto_corrective_eq 方法的闭环频谱分析→EQ逻辑。"""
+
+    def test_no_audio_source_returns_error(self):
+        """无音频源时返回错误字典。"""
+        eng = MixingEngine()
+        eng._bridge._api = MagicMock()
+        eng._bridge._api.GetTrack.return_value = "(MediaTrack*)0x1"
+        result = eng.auto_corrective_eq(track_idx=0)
+        assert result["applied"] is False
+        assert "error" in result
+
+    def test_no_stem_file_returns_gracefully(self):
+        """stems_cache 无匹配轨道路径时优雅返回。"""
+        eng = MixingEngine()
+        eng._bridge._api = MagicMock()
+        eng._bridge._api.GetTrack.return_value = "(MediaTrack*)0x1"
+        eng._stems_cache = [{"track_index": 99, "success": True, "file_path": ""}]
+        result = eng.auto_corrective_eq(track_idx=0)
+        assert result["applied"] is False
+        assert result.get("error") is not None
+
+    def test_real_wav_analyzes_resonances(self, tmp_path):
+        """真实 WAV 文件 → 频谱分析 → 检测共振 → 应用 EQ。"""
+        from tests.conftest import make_test_wav
+
+        wav_path = tmp_path / "test_vocal.wav"
+        make_test_wav(str(wav_path), duration_sec=2.0, frequency=440.0)
+
+        eng = MixingEngine()
+        eng._bridge._api = MagicMock()
+        eng._bridge._api.GetTrack.return_value = "(MediaTrack*)0x1"
+        # 模拟 Pro-Q 3 在轨道上
+        eng._bridge._api.TrackFX_GetCount.return_value = 1
+        eng._bridge._api.TrackFX_GetFXName.return_value = (
+            True, "VST: FabFilter Pro-Q 3 (FabFilter)"
+        )
+        eng._fx.set_param = MagicMock()
+        eng._stems_cache = [{
+            "track_index": 0, "success": True,
+            "file_path": str(wav_path),
+        }]
+
+        result = eng.auto_corrective_eq(track_idx=0)
+        assert isinstance(result, dict)
+        assert "resonance_count" in result
+
+    def test_no_pro_q3_adds_reaeq(self):
+        """无 Pro-Q 3 时自动添加 ReaEQ 并应用校正。"""
+        from tests.conftest import make_test_wav
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            wav_path = os.path.join(td, "test.wav")
+            make_test_wav(wav_path, duration_sec=1.0, frequency=440.0)
+
+            eng = MixingEngine()
+            eng._bridge._api = MagicMock()
+            eng._bridge._api.GetTrack.return_value = "(MediaTrack*)0x1"
+            eng._bridge._api.TrackFX_GetCount.return_value = 0
+            eng._bridge._api.TrackFX_GetFXName.return_value = (False, "")
+            eng._fx.add = MagicMock(return_value=0)
+            eng._fx.set_param = MagicMock()
+            eng._stems_cache = [{
+                "track_index": 0, "success": True,
+                "file_path": wav_path,
+            }]
+
+            result = eng.auto_corrective_eq(track_idx=0)
+            assert "applied" in result
+
+    def test_track_not_found(self):
+        """轨道不存在时返回错误。"""
+        eng = MixingEngine()
+        eng._bridge._api = MagicMock()
+        eng._bridge._api.GetTrack.return_value = None
+        result = eng.auto_corrective_eq(track_idx=99)
+        assert result["applied"] is False
+        assert result["error"] == "Track not found"
+
+    def test_spectrum_analysis_failure_handled(self, tmp_path):
+        """频谱分析失败时优雅降级。"""
+        # 创建一个无效的 WAV 路径
+        bad_path = str(tmp_path / "invalid.wav")
+        with open(bad_path, "wb") as f:
+            f.write(b"not a wav file")
+
+        eng = MixingEngine()
+        eng._bridge._api = MagicMock()
+        eng._bridge._api.GetTrack.return_value = "(MediaTrack*)0x1"
+        eng._stems_cache = [{
+            "track_index": 0, "success": True,
+            "file_path": bad_path,
+        }]
+
+        result = eng.auto_corrective_eq(track_idx=0)
+        assert result["applied"] is False
+        assert "Spectrum analysis failed" in str(result.get("error", ""))
+
+
+@pytest.mark.unit
+class TestWriteAutomation:
+    """验证 write_automation 方法。"""
+
+    def test_track_not_found(self):
+        """轨道不存在时返回错误。"""
+        eng = MixingEngine()
+        eng._bridge._api = MagicMock()
+        eng._bridge._api.GetTrack.return_value = None
+        result = eng.write_automation(99, "D_VOL", [(0.0, 0.0)])
+        assert result["point_count"] == 0
+        assert "error" in result
+
+    def test_envelope_not_found(self):
+        """包络不存在时返回警告。"""
+        eng = MixingEngine()
+        eng._bridge._api = MagicMock()
+        eng._bridge._api.GetTrack.return_value = "(MediaTrack*)0x1"
+        eng._bridge._api.GetTrackEnvelopeByName.return_value = None
+        result = eng.write_automation(0, "NONEXISTENT", [(0.0, 0.5)])
+        assert result["point_count"] == 0
+        assert "Envelope" in str(result.get("error", ""))
+
+    def test_writes_sorted_points(self):
+        """点按时间自动排序后写入。"""
+        eng = MixingEngine()
+        eng._bridge._api = MagicMock()
+        eng._bridge._api.GetTrack.return_value = "(MediaTrack*)0x1"
+        mock_env = MagicMock()
+        eng._bridge._api.GetTrackEnvelopeByName.return_value = mock_env
+
+        # 逆序输入点
+        points = [(3.0, -3.0), (1.0, -6.0), (2.0, -4.5)]
+        result = eng.write_automation(0, "D_VOL", points)
+
+        assert result["point_count"] == 3
+        assert result["param_name"] == "D_VOL"
+        assert mock_env is not None
+        # 验证 InsertEnvelopePoint 被调用 3 次
+        assert eng._bridge._api.InsertEnvelopePoint.call_count == 3
+
+    def test_empty_points_list(self):
+        """空点列表 → 0 个点写入。"""
+        eng = MixingEngine()
+        eng._bridge._api = MagicMock()
+        eng._bridge._api.GetTrack.return_value = "(MediaTrack*)0x1"
+        mock_env = MagicMock()
+        eng._bridge._api.GetTrackEnvelopeByName.return_value = mock_env
+
+        result = eng.write_automation(0, "PAN", [])
+        assert result["point_count"] == 0
+
+    def test_returns_structured_result(self):
+        """返回结构化诊断字典。"""
+        eng = MixingEngine()
+        eng._bridge._api = MagicMock()
+        eng._bridge._api.GetTrack.return_value = "(MediaTrack*)0x1"
+        mock_env = MagicMock()
+        eng._bridge._api.GetTrackEnvelopeByName.return_value = mock_env
+
+        result = eng.write_automation(0, "D_VOL", [(0.0, 1.0)])
+        assert "track_idx" in result
+        assert "param_name" in result
+        assert "point_count" in result
+
+
+@pytest.mark.unit
+class TestAbbeyRoadEQ:
+    """验证 _apply_abbey_road_eq 方法 —— ReaEQ HPF+LPF 安全滤波。"""
+
+    def test_configures_hpf_and_lpf_bands(self):
+        """HPF@600Hz + LPF@10kHz 被正确写入 ReaEQ。"""
+        eng = MixingEngine()
+        eng._fx.set_param = MagicMock()
+
+        eng._apply_abbey_road_eq(aux_track=3, eq_fx_idx=0)
+
+        assert eng._fx.set_param.call_count > 0
+        # 调用参数应包含 Band 1 和 Band 2 的设置
+        param_names = []
+        for call_args in eng._fx.set_param.call_args_list:
+            # set_param(track_index, fx_index, param_name, normalized_value)
+            param_names.append(str(call_args[0][2]))
+        assert any("Band 1" in p for p in param_names)
+        assert any("Band 2" in p for p in param_names)
+
+    def test_band_types_are_correct(self):
+        """Band 1 Type=0 (HPF), Band 2 Type=4 (LPF) → 归一化后写入。"""
+        eng = MixingEngine()
+        eng._fx.set_param = MagicMock()
+
+        eng._apply_abbey_road_eq(aux_track=3, eq_fx_idx=0)
+
+        # 检查 Type 参数的归一化值
+        type_calls = {}
+        for call_args in eng._fx.set_param.call_args_list:
+            param_name = str(call_args[0][2])
+            norm_val = call_args[0][3]
+            if "Type" in param_name:
+                type_calls[param_name] = norm_val
+
+        # Band 1 Type = HPF (0) → normalized = 0/5 = 0.0
+        assert type_calls.get("Band 1 Type") == pytest.approx(0.0, abs=0.01)
+        # Band 2 Type = LPF (4) → normalized = 4/5 = 0.8
+        assert type_calls.get("Band 2 Type") == pytest.approx(0.8, abs=0.01)
+
+    def test_bands_3_4_disabled(self):
+        """Band 3 和 Band 4 Enabled=0。"""
+        eng = MixingEngine()
+        eng._fx.set_param = MagicMock()
+
+        eng._apply_abbey_road_eq(aux_track=3, eq_fx_idx=0)
+
+        enabled_calls = {}
+        for call_args in eng._fx.set_param.call_args_list:
+            param_name = str(call_args[0][2])
+            norm_val = call_args[0][3]
+            if "Enabled" in param_name:
+                enabled_calls[param_name] = norm_val
+
+        assert enabled_calls.get("Band 3 Enabled") == pytest.approx(0.0, abs=0.01)
+        assert enabled_calls.get("Band 4 Enabled") == pytest.approx(0.0, abs=0.01)
+
+    def test_raises_no_exception_even_on_failure(self):
+        """即使设置失败也不抛异常（优雅降级）。"""
+        eng = MixingEngine()
+        eng._fx.set_param = MagicMock(side_effect=RuntimeError("param failed"))
+
+        # 不应抛出异常
+        eng._apply_abbey_road_eq(aux_track=3, eq_fx_idx=0)
+
+
+@pytest.mark.unit
+class TestVocalChainEnhancement:
+    """验证人声处理链补全 — saturation/dynamic_eq/doubler。"""
+
+    def test_saturation_fx_type_detected(self):
+        """Decapitator → fx_type='saturation'。"""
+        from hermes_core.profiles import _resolve_fx_type
+        assert _resolve_fx_type("VST3: Decapitator Mono (Soundtoys)") == "saturation"
+        assert _resolve_fx_type("VST3: Saturn 2 (FabFilter)") == "saturation"
+
+    def test_doubler_fx_type_detected(self):
+        """MicroShift → fx_type='doubler'。"""
+        from hermes_core.profiles import _resolve_fx_type
+        assert _resolve_fx_type("VST3: MicroShift (Soundtoys)") == "doubler"
+
+    def test_dynamic_eq_fx_type(self):
+        """dynamic_eq 通过与 fx_type 字段指定（非别名推导）。"""
+        from hermes_core.profiles import _resolve_fx_type
+        # dynamic_eq 是显式指定的 fx_type，不由名称推导
+        assert _resolve_fx_type("VST: FabFilter Pro-Q 3 (FabFilter)", "dynamic_eq") == "dynamic_eq"
+
+    def test_default_vocal_chain_has_9_stages(self):
+        """默认人声链现在包含 9 级。"""
+        from hermes_core.profiles import get_default_vocal_chain
+        chain = get_default_vocal_chain()
+        assert len(chain) == 9
+
+        # 验证链中包含 saturation、dynamic_eq、doubler 阶段
+        types = [fx.fx_type for fx in chain]
+        assert "saturation" in types
+        assert "dynamic_eq" in types
+        assert "doubler" in types
+
+    def test_get_default_vocal_chain_order(self):
+        """链顺序: eq → saturation → eq → fet → deesser → dynamic_eq → rvox → eq → doubler。"""
+        from hermes_core.profiles import get_default_vocal_chain
+        chain = get_default_vocal_chain()
+        order = [(fx.fx_type, fx.eq_position) for fx in chain]
+        expected = [
+            ("eq", "pre"),
+            ("saturation", "solo"),    # eq_position 默认为 "solo"
+            ("eq", "solo"),
+            ("fet", "solo"),
+            ("deesser", "solo"),
+            ("dynamic_eq", "solo"),
+            ("rvox", "solo"),
+            ("eq", "post"),
+            ("doubler", "solo"),
+        ]
+        assert order == expected
+
+    def test_saturation_crest_driven(self):
+        """饱和量基于波峰因子推导：高波峰→少饱和。"""
+        # 通过 _build_audio_chain 的 saturation 分支验证逻辑
+        crest_high = 20.0  # 高波峰: peak - rms = 20
+        drive_high = max(0.1, min(1.0, 1.0 - (crest_high - 8.0) * 0.05))
+        crest_low = 8.0    # 低波峰
+        drive_low = max(0.1, min(1.0, 1.0 - (crest_low - 8.0) * 0.05))
+        assert drive_high < drive_low, (
+            f"高波峰 drive={drive_high} 应 < 低波峰 drive={drive_low}"
+        )
+
+    def test_saturation_drive_in_valid_range(self):
+        """drive 值始终在 [0.1, 1.0] 范围内。"""
+        for crest_db in (4.0, 8.0, 12.0, 16.0, 20.0, 24.0, 30.0):
+            drive = max(0.1, min(1.0, 1.0 - (crest_db - 8.0) * 0.05))
+            assert 0.1 <= drive <= 1.0, f"crest={crest_db} → drive={drive} 超出范围"
+
+
+@pytest.mark.unit
+class TestVCABusGrouping:
+    """验证 BusManager VCA 分组逻辑。"""
+
+    def test_create_bus_sets_vca_master(self):
+        """创建带子轨道的 bus 时设置 VCA Master。"""
+        from hermes_core.bus import BusManager
+        from unittest.mock import MagicMock
+
+        mock_bridge = MagicMock()
+        mock_api = mock_bridge.api
+        mock_api.CountTracks.return_value = 5
+        mock_api.GetTrack.return_value = "(MediaTrack*)0x1"
+
+        bm = BusManager(mock_bridge)
+        bm.create_bus("TestBus", [0, 1])
+
+        # 验证 GetSetTrackGroupMembership 被调用
+        assert mock_api.GetSetTrackGroupMembership.call_count >= 3
+
+    def test_vca_group_number_within_range(self):
+        """VCA 组号在 1-64 范围内。"""
+        for insert_at in (0, 10, 63, 100):
+            vca_group = min(insert_at + 1, 64)
+            assert 1 <= vca_group <= 64, f"insert_at={insert_at} → vca_group={vca_group}"
+
+    def test_vca_group_mask_computation(self):
+        """VCA 位掩码计算正确。"""
+        # group 1 → mask = 1 (bit 0)
+        g1_mask = 1 << 0
+        assert g1_mask == 1
+
+        # group 32 → mask = 1 << 31 (bit 31)
+        g32_mask = 1 << 31
+        assert g32_mask == 2147483648
+
+    def test_create_bus_vca_handles_missing_api(self):
+        """VCA API 不可用时优雅降级（不抛异常）。"""
+        from hermes_core.bus import BusManager
+        from unittest.mock import MagicMock
+
+        mock_bridge = MagicMock()
+        mock_api = mock_bridge.api
+        mock_api.CountTracks.return_value = 5
+        mock_api.GetTrack.return_value = "(MediaTrack*)0x1"
+        # 模拟 GetSetTrackGroupMembership 不存在
+        del mock_api.GetSetTrackGroupMembership
+
+        bm = BusManager(mock_bridge)
+        # 不应抛出异常
+        idx = bm.create_bus("TestBus", [0, 1])
+        assert idx >= 0

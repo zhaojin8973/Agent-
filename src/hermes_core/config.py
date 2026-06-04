@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 # ── 默认配置 ──────────────────────────────────────────────────
 
 _DEFAULT_CONFIG: dict[str, Any] = {
-    "project_root": "~/REAPER 工程文件",
+    "project_root": "~/REAPER_Projects",
     "default_sample_rate": 48000,
     "default_genre": "pop",
     "auto_save_prompt": True,
@@ -44,7 +44,7 @@ def _config_path() -> Path:
 class HermesConfig:
     """全局配置，对应 ``~/.hermes/config.json``。"""
 
-    project_root: str = "~/REAPER 工程文件"
+    project_root: str = "~/REAPER_Projects"
     default_sample_rate: int = 48000
     default_genre: str = "pop"
     auto_save_prompt: bool = True

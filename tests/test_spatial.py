@@ -20,9 +20,9 @@ from hermes_core.engine import (
     _SEND_LEVEL_MIN,
     _SEND_LEVEL_MAX,
     _SEND_DISABLED_THRESHOLD,
-    _compute_spatial_sends,
     MixingEngine,
 )
+from hermes_core.spatial_engine import _compute_spatial_sends
 from hermes_core.audio_utils import note_to_ms
 from hermes_core.normalize import PLUGIN_REGISTRY, normalize_params
 

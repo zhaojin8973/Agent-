@@ -8,6 +8,7 @@ import subprocess
 import threading
 import time
 import logging
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -73,6 +74,15 @@ _KNOWN_SAFE_PATTERNS = [
     "sample rate",
     "block size",
     "not responding",
+    # REAPER update / render completion / file conflict dialogs
+    "Update Available",
+    "new version",
+    "Rendering complete",
+    "Render complete",
+    "Save format",
+    "File exists",
+    "overwrite",
+    "Replace",
 ]
 
 _NEEDS_DIAGNOSIS_PATTERNS = [
@@ -301,6 +311,15 @@ class DialogKiller:
 
     # ── Internal ───────────────────────────────────────────
 
+    def get_pending_dialogs(self) -> list[str]:
+        """返回当前检测到的弹窗标题列表（不执行关闭动作）。
+
+        用于主动弹窗检测场景，如 ``_with_dialog_guard`` 在执行
+        关键操作前先扫描是否有阻塞弹窗。
+        """
+        windows = self._inspect_windows()
+        return [title for title, _ in windows]
+
     def _run(self) -> None:
         """Main loop: wait for interval, then inspect and dismiss dialogs."""
         while not self._stop_event.wait(self._interval):
@@ -480,6 +499,7 @@ class ReaperBridge:
         self._api = None
         self._reapy_module = None
         self._ui_refresh_depth = 0     # nesting-safe counter (was simple bool)
+        self._undo_depth = 0            # nesting-safe undo block counter
         self._dialog_killer_enabled = dialog_killer
         self._dialog_killer = DialogKiller()
         atexit.register(self._emergency_cleanup)
@@ -638,6 +658,85 @@ class ReaperBridge:
                 return (False, TimeoutError(f"RPC call timed out after {timeout:.1f}s"))
             except Exception as exc:
                 return (False, exc)
+
+    # ── Undo Block ──────────────────────────────────────────
+
+    @contextmanager
+    def undo_block(self, description: str):
+        """嵌套安全的 REAPER Undo Block 上下文管理器。
+
+        支持嵌套调用：最外层触发 ``Undo_BeginBlock`` / ``Undo_EndBlock``，
+        内层仅调整计数器。
+
+        异常时自动 ``Undo_DoUndo2(0)`` 回滚到 block 开始前的状态。
+
+        用法::
+
+            with bridge.undo_block("添加 EQ + 压缩"):
+                bridge.api.TrackFX_AddByName(...)
+                bridge.api.TrackFX_AddByName(...)
+        """
+        is_outer = self._undo_depth == 0
+        self._undo_depth += 1
+        try:
+            if is_outer and self._api is not None:
+                self._api.Undo_BeginBlock()
+            yield
+            if is_outer and self._api is not None:
+                self._api.Undo_EndBlock(description, -1)
+        except Exception:
+            if is_outer and self._api is not None:
+                try:
+                    self._api.Undo_DoUndo2(0)
+                except Exception:
+                    pass
+            raise
+        finally:
+            self._undo_depth -= 1
+
+    # ── Dialog Guard ────────────────────────────────────────
+
+    def _with_dialog_guard(self, fn, *args, timeout=30.0):
+        """执行 *fn* 并主动监控弹窗，超时自动重试。
+
+        1. 操作前清除已有弹窗
+        2. 执行操作（带超时）
+        3. 如果超时 → 可能被弹窗阻塞 → 清除弹窗 → 重试一次
+
+        返回 ``(ok, result)`` 元组，与 ``call_rpc`` 一致。
+        """
+        import concurrent.futures
+
+        for attempt in range(2):
+            # 操作前主动清除已有弹窗
+            self._dialog_killer._dismiss_dialogs()
+
+            def _target():
+                return fn(*args)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                future = ex.submit(_target)
+                try:
+                    result = future.result(timeout=timeout)
+                    return (True, result)
+                except concurrent.futures.TimeoutError:
+                    if attempt == 0:
+                        log.warning(
+                            "Dialog guard: 操作超时 (%.1fs)，清除弹窗后重试", timeout,
+                        )
+                        self._dialog_killer._dismiss_dialogs()
+                        time.sleep(0.3)
+                    else:
+                        log.error(
+                            "Dialog guard: 重试后仍超时 — %s",
+                            getattr(fn, "__name__", fn),
+                        )
+                        return (
+                            False,
+                            TimeoutError(f"操作超时 ({timeout:.1f}s)，重试后仍失败"),
+                        )
+                except Exception as exc:
+                    return (False, exc)
 
     # ── Dialog Killer helpers ──────────────────────────────
 

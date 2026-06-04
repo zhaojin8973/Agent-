@@ -1,0 +1,40 @@
+# Hermes-Core Mixing Profile: Vocal Jazz
+#
+# Use with:  hermes vocal-mix --profile profiles/vocal_jazz.yaml ...
+
+name: "Vocal Jazz"
+description: "爵士人声混音配置 — 温暖自然，最少压缩，微妙混响保持亲切现场感"
+
+# ── gain staging ──
+clip_gain_ref_db: -18.0
+target_lufs: -14.0
+ceiling_db: -0.5
+tolerance_lufs: 0.3
+
+# ── vocal processing chain ──
+vocal_chain:
+  - name: "FabFilter Pro-Q 3 (FabFilter)"
+  - name: "CLA-76 Mono (Waves)"
+  - name: "FabFilter Pro-DS (FabFilter)"
+  - name: "SSLEQ Mono (Waves)"
+  - name: "RVox Mono (Waves)"
+
+# ── backing (instrumental) processing chain ──
+backing_chain: []
+
+# ── reverb bus ──
+bus_reverb:
+  name: "ValhallaRoom (Valhalla DSP)"
+  params:
+    Mix: 0.15
+reverb_level_db: -18.0
+
+# ── master limiter ──
+master_limiter:
+  name: "FabFilter Pro-L 2 (FabFilter)"
+  params:
+    "Output Level": -0.5
+
+# ── genre backing reduction (LU range) ──
+genre_table:
+  jazz: [3, 5]

@@ -3,7 +3,6 @@ MixingEngine — Layer 3 public API. Composes all Layer 2 modules into
 a single entry point for Hermes acceptance scenarios.
 """
 
-import bisect
 import logging
 import math
 import os
@@ -11,6 +10,7 @@ import shutil
 import tempfile
 import time
 from datetime import datetime
+from enum import Enum
 from typing import Callable
 
 from hermes_core.bridge import ReaperBridge
@@ -20,7 +20,7 @@ from hermes_core.fx import FxManager
 from hermes_core.send import SendManager
 from hermes_core.render import RenderManager
 from hermes_core.signal import SignalAnalyzer
-from hermes_core.exceptions import ConnectionError as HermesConnectionError
+from hermes_core.exceptions import BridgeConnectionError as HermesConnectionError, InvalidStateError
 from hermes_core.project_meta import (
     ProjectMeta, ProjectIndex, make_project_path, create_project_dirs,
 )
@@ -33,9 +33,7 @@ from hermes_core.loudness_optimizer import (
     EqIntent,
     EqBandIntent,
 )
-from hermes_core.normalize import (
-    normalize_params, compute_bus_compressor_params, PLUGIN_REGISTRY,
-)
+from hermes_core.normalize import normalize_params, compute_bus_compressor_params, PLUGIN_REGISTRY
 from hermes_core.audio_utils import note_to_ms
 from hermes_core.profiles import (
     _resolve_fx_type,
@@ -45,747 +43,98 @@ from hermes_core.profiles import (
 )
 from hermes_core.dag import AudioNode, SendNode, ChainExecutor
 from hermes_core.spectrum import SpectrumAnalyzer, SpectrumReport
+from hermes_core.config import HermesConfig
+
+# ── 从提取的子模块重新导出（向后兼容）──────────────────────────
+from hermes_core.genre_tables import (
+    _GENRE_VOCAL_TO_BACKING,
+    _PEAK_CEILING_DB,
+    _GENRE_TARGET_LUFS,
+    _CLIP_GAIN_REF_DB,
+    _DEFAULT_TARGET_LUFS,
+    _PRO_L2_RANGE_DB,
+    _GENRE_CREST_GR_RATIO,
+    _GENRE_RVOX_MULTIPLIER,
+    _GENRE_PRODS_RANGE,
+    _GENRE_CLA76_ATTACK_BASE,
+    _GENRE_CLA76_ATTACK_K,
+    _GENRE_REVERB_SEND_BASE,
+    _GENRE_DELAY_SEND_BASE,
+    _SEND_LEVEL_MIN,
+    _SEND_LEVEL_MAX,
+    _SEND_DISABLED_THRESHOLD,
+    _CREST_REFERENCE,
+    _PRESENCE_DEFICIT_THRESHOLD,
+    _SIBILANCE_REFERENCE_PEAK,
+    _SECTION_BOOST,
+    _GENRE_RETURN_EQ,
+    _GENRE_SPATIAL_PARAMS,
+    _SPATIAL_PARAM_FALLBACK_MAP,
+    _SPATIAL_PLUGIN,
+    _SPATIAL_BUS_NAMES,
+    _REVERB_BUS_TYPES,
+    _DELAY_BUS_TYPES,
+    _CLA76_ATTACK_KNOB_MIN,
+    _CLA76_ATTACK_KNOB_MAX,
+    _CLA76_GR_TABLE,
+    _CLA76_ATTACK_MS_TABLE,
+    _CLA76_RELEASE_MS_TABLE,
+    _GENRE_EQ_TWEAKS,
+    _MIN_EQ_Q,
+    _PROQ3_SHAPE,
+    _PROQ3_FREQ_LOG_BASE,
+    _LF_FRQ_TABLE,
+    _LMF_FRQ_STEPS,
+    _HMF_FRQ_TABLE,
+    _HF_FRQ_TABLE,
+    _HP_FRQ_TABLE,
+    _SSL_Q_MIN,
+    _SSL_Q_MAX,
+    _SSL_Q_RANGE,
+)
+from hermes_core.comp_engine import (
+    _compute_cla76_attack_knob,
+    _derive_compressor_intent,
+    _apply_vca_params,
+    _apply_fet_params,
+    _apply_cla76_params,
+    _apply_opto_params,
+    _apply_rvox_params,
+    _ms_to_cla76_attack,
+    _ms_to_cla76_release,
+    _lookup_ms_table,
+)
+from hermes_core.eq_engine import (
+    _derive_eq_intent,
+    _proq3_freq_norm,
+    _proq3_q_norm,
+    _apply_proq3_eq,
+    _ssleq_freq_norm,
+    _ssleq_q_norm,
+    _apply_ssleq_eq,
+)
+from hermes_core.mastering import MasteringEngine, _get_genre_target_lufs, _master_error, _friendly_hint
+from hermes_core.gain_staging import GainStagingEngine
+from hermes_core.spatial_engine import _compute_spatial_sends
 
 log = logging.getLogger(__name__)
 
-# Genre-based backing track reduction (LU) for prepare_stems.
-# Genre → vocal/backing ratio (LU).  Higher values = vocal more forward.
-# Backing target LUFS = vocal_LUFS - ratio.
-_GENRE_VOCAL_TO_BACKING: dict[str, float] = {
-    "electronic":              2,     # vocal sits in the mix
-    "pop":                     3,     # standard pop placement
-    "rock":                    3,
-    "folk":                    4,     # vocal-forward, sparse backing
-    "ballad":                  5,     # vocal most prominent
-    "chinese_folk_bel_canto":  5,     # majestic, vocal-forward
-}
 
-# Peak ceiling for combined mix after fader balance.
-# If the full-mix peak exceeds this, both vocal and backing are
-# attenuated equally until peak ≤ ceiling.
-_PEAK_CEILING_DB: float = -3.0
+# ════════════════════════════════════════════════════════════════
+# 管线状态枚举
+# ════════════════════════════════════════════════════════════════
 
-# Genre-based target integrated LUFS for the final master.
-# Calibrated to domestic Chinese streaming platforms, 2026-06.
-_GENRE_TARGET_LUFS = {
-    "folk":                    -13.0,   # preserve dynamics
-    "ballad":                  -13.0,   # same as folk — gentle, dynamic
-    "pop":                     -10.0,   # commercial, competitive
-    "rock":                    -10.0,   # same as pop — competitive
-    "electronic":              -9.0,    # loudness war — EDM expects density
-    "chinese_folk_bel_canto":  -11.0,   # red songs / art songs
-}
-
-# Standard clip gain reference level (dBFS RMS).
-# -18 dBFS = 0 VU — industry standard for analog-modelled plugin input calibration.
-_CLIP_GAIN_REF_DB: float = -18.0
-
-# Fallback target when genre is not in _GENRE_TARGET_LUFS.
-_DEFAULT_TARGET_LUFS: float = -10.0
-
-
-def _get_genre_target_lufs(genre: str) -> float:
-    """Return the recommended target LUFS for *genre*."""
-    return _GENRE_TARGET_LUFS.get(genre, _DEFAULT_TARGET_LUFS)
-
-# Pro-L 2 calibrated VST parameter ranges (verified 2026-05-28 via REAPER GUI).
-# Gain: normalized 0.0 = 0 dB, 1.0 = +30 dB (boost only).
-# Output Level: normalized 0.0 = -30 dB, 1.0 = 0 dB.
-# Both share a 30 dB span.
-_PRO_L2_RANGE_DB: float = 30.0
-
-
-def _master_error(target_lufs: float, ceiling_db: float, error: str) -> dict:
-    """Build a finalize_master error result dict."""
-    return {
-        "target_lufs": target_lufs,
-        "achieved_lufs": None,
-        "probe_lufs": None,
-        "gain_db": 0.0,
-        "ceiling_db": ceiling_db,
-        "passed": False,
-        "converged": False,
-        "error": error,
-        "hint": _friendly_hint(error),
-        "output_path": None,
-        "pre_limiter_peak_db": None,
-    }
-
-
-def _friendly_hint(error: str) -> str:
-    """Return a user-friendly hint for common errors."""
-    hints = {
-        "Probe render failed":
-            "REAPER may be blocked by a modal dialog. Try watchdog=True "
-            "to auto-dismiss dialogs, or check that tracks have media items.",
-        "Probe is near-silent":
-            "The probe render produced near-silent audio. Check that "
-            "the source files are not empty and have audible content.",
-        "Pro-L 2 Output Level param not found":
-            "Pro-L 2 parameter name doesn't match. Verify the plugin is "
-            "installed and named exactly 'VST: FabFilter Pro-L 2 (FabFilter)'. "
-            "Try running preflight_plugins() first.",
-        "Pro-L 2 Gain param not found":
-            "Pro-L 2 Gain parameter not found. Same as above — check "
-            "plugin installation and name.",
-        "Failed to add":
-            "Plugin not found in REAPER. Check the FX name matches "
-            "the REAPER FX browser exactly, including vendor suffix.",
-        "Not a WAV file":
-            "Input file is not a valid WAV. Supported formats: WAV "
-            "(16/24-bit PCM, 32-bit float), FLAC, MP3 via soundfile.",
-        "WAV data chunk not found":
-            "WAV file appears corrupted — data chunk is missing. "
-            "Try re-exporting the file from your DAW.",
-    }
-    for key, hint in hints.items():
-        if key.lower() in error.lower():
-            return hint
-    return "Check the log for details. Common issues: missing plugins, "
-    "unwritable output directory, insufficient disk space, or REAPER "
-    "modal dialogs blocking automation."
+class PipelineState(Enum):
+    CREATED = "created"
+    STEMS_PREPARED = "stems_prepared"
+    FX_APPLIED = "fx_applied"
+    SPATIAL_APPLIED = "spatial_applied"
+    MASTERED = "mastered"
+    RENDERED = "rendered"
 
 
 # ════════════════════════════════════════════════════════════════
-# Compression derivation + translator layer
-# ════════════════════════════════════════════════════════════════
-
-
-# Genre → crest multiplier for per-track compression GR.
-# Mirrors bus compressor GR targets: transparent genres use lighter
-# multipliers so the whole pipeline breathes consistently.
-_GENRE_CREST_GR_RATIO: dict[str, float] = {
-    "folk":                    0.12,   # lightest — preserve breath
-    "ballad":                  0.12,
-    "chinese_folk_bel_canto":  0.14,   # medium-light — majestic
-    "pop":                     0.17,   # standard
-    "rock":                    0.17,
-    "electronic":              0.22,   # heaviest — control dynamics
-}
-
-# RVox body compression multiplier (on top of CLA-76 GR).
-# CLA-76 grabs peaks → RVox smooths the body.  The multiplier
-# controls how much ADDITIONAL body compression RVox applies.
-# >1.0 = RVox compresses more than the peak GR (dense genres).
-_GENRE_RVOX_MULTIPLIER: dict[str, float] = {
-    "electronic":              1.8,
-    "pop":                     1.7,
-    "rock":                    1.7,
-    "chinese_folk_bel_canto":  1.5,
-    "folk":                    1.0,   # sparse backing, vocal already forward
-    "ballad":                  1.2,
-}
-
-# Pro-DS de-esser Range (max gain reduction in dB) per genre.
-# Sparse genres → lower Range (natural vocal, light touch).
-# Dense genres → higher Range (stronger sibilance control).
-_GENRE_PRODS_RANGE: dict[str, float] = {
-    "folk":                    6.0,   # 自然人声，轻触
-    "ballad":                  6.0,   # 柔和，保留呼吸感
-    "chinese_folk_bel_canto":  7.0,   # 中等，兼顾力度
-    "pop":                     8.5,   # 标准商业控制
-    "rock":                    8.5,   # 与 pop 一致
-    "electronic":              10.0,  # 强力控制，密集混音
-}
-
-# CLA-76 attack knob — continuous, crest-driven, genre-aware.
-# Formula: attack_knob = base - (crest - 10) × k, clamped [1, 6.5].
-# Base = genre "normal" attack when crest ≈ 10 dB.
-# k    = how much crest deviates from the attack (higher k = more responsive).
-_GENRE_CLA76_ATTACK_BASE: dict[str, float] = {
-    "electronic":              5.0,
-    "pop":                     4.0,
-    "rock":                    4.0,
-    "chinese_folk_bel_canto":  3.5,
-    "folk":                    3.0,
-    "ballad":                  3.0,
-}
-_GENRE_CLA76_ATTACK_K: dict[str, float] = {
-    "electronic":              0.05,
-    "pop":                     0.10,
-    "rock":                    0.10,
-    "chinese_folk_bel_canto":  0.08,
-    "folk":                    0.05,
-    "ballad":                  0.05,
-}
-
-# ── 空间效果器发送量基准 ─────────────────────────────────────
-
-# Reverb send level base per genre (dB, post-fader send).
-# Values are confirmed mid-range from professional mixing practice.
-# Western folk: intimate, dry.  Chinese folk bel canto: bright,
-# grand, long — wetter than Western genres but not muddy.
-_GENRE_REVERB_SEND_BASE: dict[str, dict[str, float]] = {
-    # 民谣 (Western folk): 自然、亲近、干声为主
-    "folk":                    {"plate": -18.0, "hall": -20.0, "room": -14.0},
-    "ballad":                  {"plate": -14.0, "hall": -16.0, "room": -12.0},
-    "pop":                     {"plate": -12.0, "hall": -14.0, "room": -16.0},
-    "rock":                    {"plate": -16.0, "hall": -14.0, "room": -14.0},
-    "electronic":              {"plate": -10.0, "hall": -10.0, "room": -18.0},
-    # 中国民歌/民族美声：透亮水灵 + 大气绵长，混响偏大但不浑
-    "chinese_folk_bel_canto":  {"plate": -10.0, "hall": -10.0, "room": -14.0},
-}
-
-# Delay send level base per genre (dB).  -99.0 = disabled for this genre.
-_GENRE_DELAY_SEND_BASE: dict[str, dict[str, float]] = {
-    "folk":                    {"slap": -99.0, "rhythm": -99.0},
-    "ballad":                  {"slap": -20.0, "rhythm": -22.0},
-    "pop":                     {"slap": -14.0, "rhythm": -16.0},
-    "rock":                    {"slap": -12.0, "rhythm": -18.0},
-    "electronic":              {"slap": -10.0, "rhythm": -12.0},
-    "chinese_folk_bel_canto":  {"slap": -14.0, "rhythm": -16.0},
-}
-
-# Send level range (dB).  Outside these bounds is impractical.
-_SEND_LEVEL_MIN: float = -24.0
-_SEND_LEVEL_MAX: float = -6.0
-_SEND_DISABLED_THRESHOLD: float = -90.0  # below this = bus not created
-
-# Crest factor reference point (dB).  Vocals with crest ≈ 12 dB are
-# "normally dynamic" — no adjustment applied.
-_CREST_REFERENCE: float = 12.0
-# Presence deficit threshold (dB).  Below 2 dB deficit is normal;
-# above that the vocal sounds dull → reduce sends so reverb doesn't
-# push it further back.
-_PRESENCE_DEFICIT_THRESHOLD: float = 2.0
-# Sibilance reference peak (dBFS).  Peaks above this trigger a
-# plate-send reduction because plates resonate in the 5–8 kHz range.
-_SIBILANCE_REFERENCE_PEAK: float = -32.0
-
-# Section boost amounts (dB) — added to all send buses.
-_SECTION_BOOST: dict[str, float] = {
-    "verse":  0.0,
-    "chorus": 2.0,
-    "bridge": 3.0,
-}
-
-
-def _compute_spatial_sends(
-    genre: str,
-    crest_factor_db: float,
-    presence_deficit_db: float,
-    mud_ratio_db: float,
-    sibilance_peak_db: float | None = None,
-    section: str = "verse",
-) -> dict[str, float | None]:
-    """Compute reverb and delay send levels from vocal signal analysis.
-
-    Each send is derived from a genre-reference base, then adjusted by
-    four objective biases:
-
-    - **crest_bias**: high-crest vocals already sound "big" — dial back
-      reverb so it doesn't wash out the dynamics.
-    - **density_bias**: muddy vocals get less reverb to avoid piling
-      low-mid energy onto the mud.
-    - **presence_bias**: a dull vocal (high presence deficit) should
-      stay forward — reverb would push it back.
-    - **sibilance_bias** (plate only): plate reverbs resonate at
-      5–8 kHz, so bright sibilant vocals get less plate send.
-
-    Returns a dict mapping bus keys to send levels in dB.
-    ``None`` means the bus is disabled for this genre (no need to
-    create it).
-    """
-    _DEFAULT_REVERB = _GENRE_REVERB_SEND_BASE["pop"]
-    _DEFAULT_DELAY = _GENRE_DELAY_SEND_BASE["pop"]
-
-    base_reverb = _GENRE_REVERB_SEND_BASE.get(genre, _DEFAULT_REVERB)
-    base_delay = _GENRE_DELAY_SEND_BASE.get(genre, _DEFAULT_DELAY)
-
-    # ── Bias computations ──────────────────────────────────────
-    crest_bias = -(crest_factor_db - _CREST_REFERENCE) * 0.5
-    density_bias = mud_ratio_db * 0.3
-    presence_bias = -(presence_deficit_db - _PRESENCE_DEFICIT_THRESHOLD) * 0.3
-    section_bias = _SECTION_BOOST.get(section, 0.0)
-
-    sibilance_bias = 0.0
-    if sibilance_peak_db is not None:
-        sibilance_bias = -max(0.0, sibilance_peak_db - _SIBILANCE_REFERENCE_PEAK) * 0.1
-
-    # ── Assemble sends ─────────────────────────────────────────
-    sends: dict[str, float | None] = {}
-
-    for bus_type, base_db in base_reverb.items():
-        bias = crest_bias + density_bias + presence_bias + section_bias
-        if bus_type == "plate":
-            bias += sibilance_bias
-        sends[f"reverb_{bus_type}"] = round(
-            max(_SEND_LEVEL_MIN, min(_SEND_LEVEL_MAX, base_db + bias)), 1,
-        )
-
-    for bus_type, base_db in base_delay.items():
-        if base_db <= _SEND_DISABLED_THRESHOLD:
-            sends[f"delay_{bus_type}"] = None
-        else:
-            bias = crest_bias + presence_bias + section_bias
-            sends[f"delay_{bus_type}"] = round(
-                max(_SEND_LEVEL_MIN, min(_SEND_LEVEL_MAX, base_db + bias)), 1,
-            )
-
-    return sends
-
-
-# ── 返回轨 EQ 参数（按流派 × 总线） ──────────────────────────
-
-# HPF removes low-end mud from reverb/delay returns.
-# LPF tames sibilance / harshness in the tail.
-# Delay returns are filtered more aggressively (narrower band).
-_GENRE_RETURN_EQ: dict[str, dict[str, dict[str, float]]] = {
-    "folk": {
-        "plate": {"hpf": 200, "lpf": 10000},
-        "hall":  {"hpf": 400, "lpf": 8000},
-        "room":  {"hpf": 150, "lpf": 12000},
-        "delay": {"hpf": 500, "lpf": 5000},
-    },
-    "ballad": {
-        "plate": {"hpf": 180, "lpf": 10000},
-        "hall":  {"hpf": 350, "lpf": 8000},
-        "room":  {"hpf": 120, "lpf": 12000},
-        "delay": {"hpf": 400, "lpf": 6000},
-    },
-    "pop": {
-        "plate": {"hpf": 200, "lpf": 10000},
-        "hall":  {"hpf": 400, "lpf": 8000},
-        "room":  {"hpf": 180, "lpf": 12000},
-        "delay": {"hpf": 500, "lpf": 6000},
-    },
-    "rock": {
-        "plate": {"hpf": 250, "lpf": 9000},
-        "hall":  {"hpf": 450, "lpf": 7000},
-        "room":  {"hpf": 200, "lpf": 11000},
-        "delay": {"hpf": 600, "lpf": 5000},
-    },
-    "electronic": {
-        "plate": {"hpf": 300, "lpf": 8000},
-        "hall":  {"hpf": 500, "lpf": 6000},
-        "room":  {"hpf": 250, "lpf": 10000},
-        "delay": {"hpf": 600, "lpf": 4000},
-    },
-    "chinese_folk_bel_canto": {
-        "plate": {"hpf": 180, "lpf": 10000},
-        "hall":  {"hpf": 350, "lpf": 8000},
-        "room":  {"hpf": 150, "lpf": 12000},
-        "delay": {"hpf": 400, "lpf": 6000},
-    },
-}
-
-# ── 流派空间插件参数表 ──────────────────────────────────────────
-# 每个 bus 使用其首选插件的参数名和归一化值 (0.0–1.0)。
-# 如果回退插件被加载，通过 _SPATIAL_PARAM_FALLBACK_MAP 做名称转换。
-# 设计值来源: docs/spatial-effects-design.md §1。
-# 验证: 用 REAPER 运行 tools/discover_spatial_params.py 确认参数名。
-
-_GENRE_SPATIAL_PARAMS: dict[str, dict[str, dict[str, float]]] = {
-    # ── 民谣 (Western folk) ──
-    "folk": {
-        # plate → Little Plate: Decay 1.8s, Pre-Delay N/A (无此参数), HPF 200Hz
-        "plate": {"Decay": 0.28, "Low Cut": 0.15, "Mix": 1.0},
-        # hall → LX480: Decay 1.5s, Pre-Delay 60ms
-        "hall":  {
-            "E1: Reverb Time Mid (RTM)": 0.25,
-            "E1: Pre Delay (PDL)": 0.30,
-            "E1: Mix (MIX)": 1.0,
-        },
-        # room → ValhallaRoom: Decay 0.8s, Pre-Delay 10ms
-        "room":  {"decay": 0.18, "predelay": 0.05, "mix": 1.0},
-    },
-
-    # ── 情歌 (Ballad) ──
-    "ballad": {
-        "plate": {"Decay": 0.35, "Low Cut": 0.12, "Mix": 1.0},
-        "hall":  {
-            "E1: Reverb Time Mid (RTM)": 0.35,
-            "E1: Pre Delay (PDL)": 0.40,
-            "E1: Mix (MIX)": 1.0,
-        },
-        "room":  {"decay": 0.22, "predelay": 0.10, "mix": 1.0},
-        # slap → EchoBoy: 100ms, Feedback 10%
-        "slap":  {
-            "Echo1Time": 0.05, "Feedback": 0.10, "Mix": 1.0,
-            "Saturation": 0.15,
-        },
-    },
-
-    # ── 流行 (Pop) ──
-    "pop": {
-        # plate → Little Plate: Decay 2.0s, Pre-Delay N/A (回退到ValhallaPlate设PreDelay)
-        "plate": {"Decay": 0.32, "Low Cut": 0.12, "Mix": 1.0, "Mod Enable": 0.0},
-        # hall → LX480: Decay 2.2s, Pre-Delay 40ms
-        "hall":  {
-            "E1: Reverb Time Mid (RTM)": 0.32,
-            "E1: Pre Delay (PDL)": 0.25,
-            "E1: Mix (MIX)": 1.0,
-            "E1: Size (SIZ)": 0.45,
-        },
-        # room → ValhallaRoom: Decay 0.6s, Pre-Delay 10ms
-        "room":  {"decay": 0.14, "predelay": 0.05, "mix": 1.0, "lateSize": 0.35},
-        # slap → EchoBoy: 100ms, Feedback 10%
-        "slap":  {
-            "Echo1Time": 0.05, "Feedback": 0.10, "Mix": 1.0,
-            "Saturation": 0.15, "LowCut": 0.15,
-        },
-        # rhythm → EchoBoy: 1/4 Note, Feedback 20%（音符值在 _apply_spatial_params 中处理）
-        "rhythm": {
-            "RhythmNote": 0.30, "Feedback": 0.20, "Mix": 1.0,
-            "Saturation": 0.12, "LowCut": 0.15,
-        },
-    },
-
-    # ── 摇滚 (Rock) ──
-    "rock": {
-        "plate": {"Decay": 0.25, "Low Cut": 0.15, "Mix": 1.0, "Mod Enable": 0.0},
-        "hall":  {
-            "E1: Reverb Time Mid (RTM)": 0.28,
-            "E1: Pre Delay (PDL)": 0.28,
-            "E1: Mix (MIX)": 1.0,
-            "E1: Size (SIZ)": 0.40,
-        },
-        "room":  {"decay": 0.14, "predelay": 0.05, "mix": 1.0},
-        "slap":  {
-            "Echo1Time": 0.04, "Feedback": 0.15, "Mix": 1.0,
-            "Saturation": 0.20, "LowCut": 0.18,
-        },
-        "rhythm": {
-            "RhythmNote": 0.20, "Feedback": 0.20, "Mix": 1.0,
-            "Saturation": 0.15, "LowCut": 0.18,
-        },
-    },
-
-    # ── 电子 (Electronic) ──
-    "electronic": {
-        "plate": {"Decay": 0.38, "Low Cut": 0.22, "Mix": 1.0},
-        "hall":  {
-            "E1: Reverb Time Mid (RTM)": 0.45,
-            "E1: Pre Delay (PDL)": 0.20,
-            "E1: Mix (MIX)": 1.0,
-        },
-        "room":  {"decay": 0.10, "predelay": 0.03, "mix": 1.0},
-        "slap":  {
-            "Echo1Time": 0.06, "Feedback": 0.25, "Mix": 1.0,
-            "Saturation": 0.10, "LowCut": 0.08,
-        },
-        "rhythm": {
-            "RhythmNote": 0.25, "Feedback": 0.30, "Mix": 1.0,
-        },
-    },
-
-    # ── 中国民歌/民族美声 ──
-    "chinese_folk_bel_canto": {
-        "plate": {"Decay": 0.32, "Low Cut": 0.10, "Mix": 1.0, "Mod Enable": 0.0},
-        "hall":  {
-            "E1: Reverb Time Mid (RTM)": 0.38,
-            "E1: Pre Delay (PDL)": 0.22,
-            "E1: Mix (MIX)": 1.0,
-            "E1: Size (SIZ)": 0.50,
-        },
-        "room":  {"decay": 0.20, "predelay": 0.05, "mix": 1.0},
-        "slap":  {
-            "Echo1Time": 0.05, "Feedback": 0.10, "Mix": 1.0,
-            "Saturation": 0.10, "LowCut": 0.12,
-        },
-        "rhythm": {
-            "RhythmNote": 0.30, "Feedback": 0.20, "Mix": 1.0,
-        },
-    },
-}
-
-# ── 空间插件参数名回退映射 ──────────────────────────────────────
-# 当回退插件被加载时，将首选插件的参数名映射到回退插件的对应参数名。
-# 键: (首选插件注册名, 首选参数名) → 回退参数名
-# 值通过 _resolve_spatial_plugin_key 匹配后查找。
-
-_SPATIAL_PARAM_FALLBACK_MAP: dict[str, dict[str, str]] = {
-    # Little Plate → ValhallaPlate 回退 (plate bus)
-    "ValhallaPlate": {
-        "Decay":      "Decay",
-        "Low Cut":    "LowEQFreq",
-        "Mix":        "Mix",
-        "Mod Enable": "ModDepth",
-    },
-    # LX480 → ValhallaVintageVerb 回退 (hall bus)
-    "ValhallaVintageVerb": {
-        "E1: Reverb Time Mid (RTM)":  "Decay",
-        "E1: Pre Delay (PDL)":        "PreDelay",
-        "E1: Mix (MIX)":              "Mix",
-        "E1: Size (SIZ)":             "Size",
-        "E1: High Frequency Cutoff (HFC)": "HighCut",
-        "E1: Low Frequency Cutoff (LFC)":  "LowCut",
-    },
-    # ValhallaRoom → Pro-R 2 回退 (room bus)
-    "Pro-R": {
-        "decay":    "Decay Rate",
-        "predelay": "Predelay",
-        "mix":      "Mix",
-        "lateSize": "Distance",
-        "HiCut":    "Brightness",
-        "LoCut":    "Brightness",
-    },
-    # EchoBoy → ValhallaDelay 回退 (slap/rhythm bus)
-    "ValhallaDelay": {
-        "Echo1Time":   "DelayL_Ms",
-        "Feedback":    "Feedback",
-        "Mix":         "Mix",
-        "Saturation":  "DriveIn",
-        "LowCut":      "LowCut",
-        "HighCut":     "HighCut",
-        "RhythmNote":  "DelayL_Ms",
-    },
-}
-
-# ── 空间插件映射 ──────────────────────────────────────────────
-
-# Bus type → REAPER plugin name (substring-matched by TrackFX_AddByName).
-# Each bus maps to the user's preferred plugin for that role.
-_SPATIAL_PLUGIN: dict[str, list[str]] = {
-    "plate":   ["Little Plate", "UAD EMT 140", "ValhallaPlate"],  # Soundtoys → UA → Valhalla
-    "hall":    ["LX480", "ValhallaVintageVerb"],         # Relab → Valhalla
-    "room":    ["ValhallaRoom", "FabFilter Pro-R"],      # Valhalla → FabFilter
-    "slap":    ["EchoBoy", "ValhallaDelay"],             # Soundtoys → Valhalla
-    "rhythm":  ["EchoBoy", "ValhallaDelay"],             # Soundtoys → Valhalla
-}
-
-# 返回轨名称（中文，REAPER 中可读）
-_SPATIAL_BUS_NAMES: dict[str, str] = {
-    "plate":   "Plate Verb",
-    "hall":    "Hall Verb",
-    "room":    "Room Verb",
-    "slap":    "Slap Delay",
-    "rhythm":  "Rhythm Delay",
-}
-
-# Reverb bus types (for EQ routing).
-_REVERB_BUS_TYPES = frozenset({"plate", "hall", "room"})
-_DELAY_BUS_TYPES = frozenset({"slap", "rhythm"})
-
-
-_CLA76_ATTACK_KNOB_MIN: float = 1.0
-_CLA76_ATTACK_KNOB_MAX: float = 6.5
-
-
-def _compute_cla76_attack_knob(crest_db: float, genre: str = "pop") -> float:
-    """Continuous CLA-76 attack knob from crest factor and genre.
-
-    ``attack_knob = base - (crest - 10) × k``, clamped to
-    [``_CLA76_ATTACK_KNOB_MIN``, ``_CLA76_ATTACK_KNOB_MAX``].
-
-    Higher crest → slower attack (smaller knob) to preserve transients.
-    """
-    base = _GENRE_CLA76_ATTACK_BASE.get(genre, 4.0)
-    k = _GENRE_CLA76_ATTACK_K.get(genre, 0.10)
-    knob = base - (crest_db - 10.0) * k
-    return round(max(_CLA76_ATTACK_KNOB_MIN, min(_CLA76_ATTACK_KNOB_MAX, knob)), 2)
-
-
-def _derive_compressor_intent(
-    rms_db: float, peak_db: float, *, genre: str = "pop"
-) -> CompressionIntent:
-    """Derive compression targets from Crest Factor (Peak – RMS).
-
-    ==============  ============  ============================
-    Crest Factor    Amount        Typical material
-    ==============  ============  ============================
-    ≥ 15 dB         ``"heavy"``   Folk ballad, classical vocal
-    10–15 dB        ``"medium"``  Pop vocal, rock vocal
-    < 10 dB         ``"light"``   Pre-compressed, synth, EDM
-    ==============  ============  ============================
-
-    *gr_target_db* is genre-aware — transparent genres (folk, ballad)
-    use a lighter crest multiplier (0.10) while dense genres
-    (electronic) use 0.20.  This keeps per-track compression aligned
-    with the bus compressor's genre-based GR target.
-    """
-    crest = peak_db - rms_db
-    ratio = _GENRE_CREST_GR_RATIO.get(genre, 0.15)
-
-    if crest >= 15.0:
-        amount = "heavy"
-        gr_target = round(crest * ratio, 1)
-    elif crest >= 10.0:
-        amount = "medium"
-        gr_target = round(crest * ratio, 1)
-    else:
-        amount = "light"
-        gr_target = round(crest * ratio, 1)
-
-    return CompressionIntent(
-        amount=amount,
-        gr_target_db=gr_target,
-        crest_factor_db=round(crest, 1),
-        rms_db=round(rms_db, 1),
-        peak_db=round(peak_db, 1),
-    )
-
-
-def _apply_vca_params(intent: CompressionIntent,
-                       preset: dict[str, float]) -> dict[str, float]:
-    """VCA / digital compressor → physical parameter dict.
-
-    Threshold is placed so that the signal's peak exceeds it by
-    *gr_target_db* — the compressor catches the transient and
-    reduces it by the target amount.
-    """
-    threshold = intent.peak_db - intent.gr_target_db
-    ratio = {
-        "light":  2.0,
-        "medium": 4.0,
-        "heavy":  8.0,
-    }.get(intent.amount, 4.0)
-
-    return {
-        "Threshold":   round(threshold, 1),
-        "Ratio":       ratio,
-        "Attack":      preset["attack_ms"],
-        "Release":     preset["release_ms"],
-        # 0.6: conservative makeup gain coefficient (60% of GR)
-        #      prevents over-compensation while restoring perceived loudness
-        "Makeup Gain": round(intent.gr_target_db * 0.6, 1),
-    }
-
-
-def _apply_fet_params(intent: CompressionIntent,
-                       preset: dict[str, float]) -> dict[str, float]:
-    """FET compressor (1176-style) → physical parameter dict.
-
-    The Input knob sets an *equivalent threshold* — we compute the
-    threshold from peak + target GR, then let the normalisation layer
-    reverse-lookup the knob position via the calibration table.
-    """
-    threshold = intent.peak_db - intent.gr_target_db
-    return {
-        "Input":    round(threshold, 1),
-        "Output":   round(intent.gr_target_db * 0.5, 1),
-        "Attack":   preset["attack_ms"],
-        "Release":  preset["release_ms"],
-    }
-
-
-# CLA-76 Input→GR calibration (pink noise -18 dBFS RMS, 2026-05-31).
-# (input_dB, gr_db) sorted by GR ascending.  GR is negative — the table
-# stores absolute values for readability.
-_CLA76_GR_TABLE: list[tuple[float, float]] = [
-    (-32.0,  0),    # threshold barely touched
-    (-24.0,  3),    # moderate
-    (-20.0,  8),    # heavy
-    (-16.0, 15),    # very heavy
-    (-8.0,  20),    # max
-]
-
-
-def _gr_to_cla76_input(gr_target: float) -> float:
-    """Given a GR target (dB), return the CLA-76 Input dB setting."""
-    gr_list = [row[1] for row in _CLA76_GR_TABLE]
-    if gr_target <= gr_list[0]:
-        return _CLA76_GR_TABLE[0][0]
-    if gr_target >= gr_list[-1]:
-        return _CLA76_GR_TABLE[-1][0]
-    idx = bisect.bisect_left(gr_list, gr_target)
-    lo_in, lo_gr = _CLA76_GR_TABLE[idx - 1]   # (input_dB, gr_db)
-    hi_in, hi_gr = _CLA76_GR_TABLE[idx]
-    t = (gr_target - lo_gr) / (hi_gr - lo_gr)
-    return lo_in + t * (hi_in - lo_in)
-
-
-def _apply_cla76_params(intent: CompressionIntent,
-                        attack_knob: float,
-                        release_knob: float | None = None) -> dict[str, float]:
-    r"""CLA-76 (Waves) physical parameter dict.
-
-    CLA-76 (1176-style FET) has a **fixed internal threshold**.
-    *Input* drives signal into that threshold.  *Output* attenuates
-    to balance the boosted uncompressed signal.
-
-    *attack_knob* is the CLA-76 knob position (1–7, CW=fast) computed
-    from crest + genre via :func:`_compute_cla76_attack_knob`.
-
-    *release_knob* is the BPM-derived knob position (1–7).  When
-    ``None`` the release parameter is not included in the output
-    (plugin default is left untouched).
-    """
-    gr = intent.gr_target_db
-    peak = intent.peak_db
-
-    # Calibrated on vocal (望归, crest≈20, peak≈-0.4, 2026-05-31).
-    # Input positions signal relative to 1176 fixed threshold.
-    # Higher peak → less Input needed (signal already near threshold).
-    # More GR → more Input needed (push harder into threshold).
-    #
-    # Formula: input_db = BASELINE + (gr * SLOPE) - peak
-    #   -40.4: baseline offset at -18 dBFS RMS (0 VU reference)
-    #   0.8:   empirical slope from linear regression on calibration data
-    #          (Input vs GR at fixed peak level)
-    input_db = -40.4 + gr * 0.8 - peak
-    input_db = max(-48.0, min(0.0, input_db))
-
-    # Output: level-match — keep signal roughly unity through the 76
-    # 3.25: empirical makeup gain coefficient (dB output per dB GR)
-    #       tuned to compensate for perceived loudness loss
-    output_db = -gr * 3.25
-    output_db = max(-48.0, min(0.0, output_db))
-
-    physical = {
-        "Input":  round(input_db, 1),
-        "Output": round(output_db, 1),
-        "Attack": attack_knob,
-    }
-    if release_knob is not None:
-        physical["Release"] = release_knob
-    return physical
-
-
-def _apply_opto_params(intent: CompressionIntent,
-                        preset: dict[str, float]) -> dict[str, float]:
-    """Optical compressor (LA-2A style) → physical parameter dict."""
-    return {
-        "Peak Reduction": round(intent.gr_target_db, 1),
-        "Gain":           round(intent.gr_target_db * 0.4, 1),
-    }
-
-
-def _apply_rvox_params(intent: CompressionIntent,
-                        preset: dict[str, float],
-                        rvox_multiplier: float = 1.0) -> dict[str, float]:
-    """Waves RVox → physical parameter dict.
-
-    RVox is a single-fader dynamic processor with fixed internal
-    ceiling (0 dBFS).  The Compression fader combines threshold,
-    auto-ratio, and auto make-up gain into one control.
-
-    Body compression = CLA-76 GR × *rvox_multiplier*.  Since CLA-76
-    already grabbed the peaks, RVox focuses on body/RMS consistency.
-    Dense genres use >1.0 for more body control; sparse genres use
-    lower values.
-
-    Calibration (望归 Vocal, 2026-05-31):
-      Comp  →  GR_peak  (3 data points, 1:1 linear relationship)
-      -12.3  →  -12 dB
-      -6.0   →  -6 dB
-      -3.0   →  -2.5 dB
-
-    Level-match: Gain = Comp × 0.6 (verified by A/B bypass).
-    Gate is a gentle downward expander, defaulting to off.
-    """
-    # Compression: genre-scaled body targeting.
-    compression_db = -intent.gr_target_db * rvox_multiplier
-    compression_db = max(-36.0, min(0.0, compression_db))
-
-    # Gain: level-match — prevent auto-gain loudness from masking compression.
-    # Coeff 0.6 is the user-verified sweet spot.
-    gain_db = compression_db * 0.6
-    gain_db = max(-36.0, min(0.0, gain_db))
-
-    # Gate: off by default (-120 dB ≈ -Inf).  Signal analysis does not yet
-    # produce a noise-floor estimate to justify an automatic gate.
-    gate_db = -120.0
-
-    return {
-        "Compression": round(compression_db, 1),
-        "Gate":        round(gate_db, 1),
-        "Gain":        round(gain_db, 1),
-    }
-
-
-# ════════════════════════════════════════════════════════════════
-# Compressor dispatcher
+# Compressor dispatcher（保留在 engine.py，是引擎级调度逻辑）
 # ════════════════════════════════════════════════════════════════
 
 # Note: "rvox" is NOT in this dictionary because it requires special handling
@@ -796,621 +145,6 @@ _TRANSLATORS = {
     "fet":  _apply_fet_params,
     "opto": _apply_opto_params,
 }
-
-
-# ════════════════════════════════════════════════════════════════
-# CLA-76 ms → knob conversion (CW=fast, range 1−7)
-# ════════════════════════════════════════════════════════════════
-
-# Attack: (ms, knob_position) sorted by ms ascending.
-# Attack ms → knob.  FET compressor attack times saturate below ~800 μs,
-# so engine ms values (3-10 ms from BPM presets) are all "slow" in FET
-# terms.  We compress the upper range so every BPM tier maps to a usable
-# knob position (nothing below 2 — knob 1 is too sluggish for vocals).
-_CLA76_ATTACK_MS_TABLE: list[tuple[float, float]] = [
-    (0.02,  7.0),   # fastest (knob 7 = ~20 μs)
-    (1.0,   6.0),   # knob 6
-    (2.0,   5.0),   # knob 5 — BPM FAST   (3 ms) lands near here
-    (3.0,   4.0),   # knob 4
-    (5.0,   3.0),   # knob 3 — BPM MED    (5 ms) lands here
-    (8.0,   2.5),   # knob 2.5
-    (12.0,  2.0),   # knob 2 — BPM SLOW   (10 ms) lands near here
-]
-
-# Release: (ms, knob_position) sorted by ms ascending.
-_CLA76_RELEASE_MS_TABLE: list[tuple[float, float]] = [
-    (50.0,   7.0),   # fastest
-    (150.0,  6.0),
-    (300.0,  5.0),
-    (500.0,  4.0),
-    (700.0,  3.0),
-    (900.0,  2.0),
-    (1100.0, 1.0),   # slowest
-]
-
-
-def _ms_to_cla76_attack(ms: float) -> float:
-    """Convert attack time (ms) to CLA-76 knob position (1−7, CW=fast)."""
-    return _lookup_ms_table(ms, _CLA76_ATTACK_MS_TABLE)
-
-
-def _ms_to_cla76_release(ms: float) -> float:
-    """Convert release time (ms) to CLA-76 knob position (1−7, CW=fast)."""
-    return _lookup_ms_table(ms, _CLA76_RELEASE_MS_TABLE)
-
-
-def _lookup_ms_table(ms: float, table: list[tuple[float, float]]) -> float:
-    """Bisect *table* (sorted by ms) and return the knob position.
-
-    Values outside the table range are clamped to the nearest endpoint.
-    """
-    ms_list = [row[0] for row in table]
-    if ms <= ms_list[0]:
-        return table[0][1]
-    if ms >= ms_list[-1]:
-        return table[-1][1]
-    idx = bisect.bisect_left(ms_list, ms)
-    # Interpolate between idx-1 and idx
-    lo_ms, lo_knob = table[idx - 1]
-    hi_ms, hi_knob = table[idx]
-    t = (ms - lo_ms) / (hi_ms - lo_ms)
-    return lo_knob + t * (hi_knob - lo_knob)
-
-
-# ════════════════════════════════════════════════════════════════
-# EQ derivation + translator layer (mirrors compressor pattern)
-# ════════════════════════════════════════════════════════════════
-
-# Genre-specific tweaks to EQ derivation thresholds
-_GENRE_EQ_TWEAKS: dict[str, dict] = {
-    "pop":  {"presence_extra_db": 0.5, "mud_threshold_db": 3.0, "boost_scale": 1.0},
-    "rock": {"presence_extra_db": 0.0, "mud_threshold_db": 4.0, "boost_scale": 1.0},
-    "folk": {"presence_extra_db": 0.0, "mud_threshold_db": 3.0, "boost_scale": 0.75},
-    "default": {"presence_extra_db": 0.0, "mud_threshold_db": 3.0, "boost_scale": 1.0},
-}
-
-
-def _derive_eq_intent(
-    report: SpectrumReport,
-    role: str = "vocal",
-    genre: str = "pop",
-    position: str = "solo",
-) -> EqIntent:
-    """Derive EQ goals from spectrum analysis.
-
-    Rule-based decision logic — no ML required.  Rules are applied
-    selectively based on *position* in the FX chain:
-
-    - ``"pre"`` — corrective EQ before compression.
-      Runs all 6 rules, but boost thresholds are conservative
-      (prefer subtraction; only boost when the signal truly needs it).
-    - ``"post"`` — tonal / colour EQ after compression.
-      Runs all 6 rules without restriction.  Cuts are allowed because
-      compression (especially FET saturation) can introduce new peaks
-      that need taming.
-    - ``"solo"`` — all rules (standalone, backward-compatible default).
-
-    The six rules are:
-    1. **HPF** — frequency scales with sub-band energy.
-    2. **Resonance cuts** — narrow peaks (Q > 15, non-harmonic) get
-       bell cuts proportional to their prominence.
-    3. **Low-mid mud cut** — broad attenuation when the low-mid band
-       exceeds the mid band by the genre threshold.
-    4. **Presence boost** — gentle bell lift when the presence band
-       is quiet relative to mid / dark vocal.
-    5. **Air shelf** — high shelf when the air band is low and the
-       spectral tilt is steeply negative.
-    6. **Genre adjustments** — pop gets extra presence, rock tolerates
-       more mud, folk scales back all boosts.
-    """
-    _POSITIONS = ("pre", "post", "solo")
-    if position not in _POSITIONS:
-        raise ValueError(f"position must be one of {_POSITIONS}, got {position!r}")
-
-    # All positions run the full rule set.
-    # Pre-comp is conservative on boosts: higher threshold, lower gain.
-    conservative = position == "pre"
-
-    tweaks = _GENRE_EQ_TWEAKS.get(genre, _GENRE_EQ_TWEAKS["default"])
-    bands: list[EqBandIntent] = []
-
-    # ── Rule 1: HPF ─────────────────────────────────────────
-    sub_energy = report.band_energy_db.get("sub", -60.0)
-    mid_energy = report.band_energy_db.get("mid", -60.0)
-    sub_excess = sub_energy - mid_energy
-
-    # HPF frequency selection based on sub-bass energy relative to midrange
-    # 3.0 dB: threshold for "excessive" sub-bass (triggers HPF raise)
-    # 10 Hz/dB: slope - how aggressively to raise HPF as sub-bass increases
-    # 80/120 Hz (vocal) and 40/80 Hz (backing): safe HPF limits
-    #   - vocal: 80 Hz default, max 120 Hz (avoid cutting fundamental)
-    #   - backing: 40 Hz default, max 80 Hz (preserve low-end instruments)
-    if role == "vocal":
-        hpf_freq = 80.0
-        if sub_excess > 3.0:
-            hpf_freq = min(120.0, 80.0 + (sub_excess - 3.0) * 10)
-    else:
-        hpf_freq = 40.0
-        if sub_excess > 3.0:
-            hpf_freq = min(80.0, 40.0 + (sub_excess - 3.0) * 10)
-
-    bands.append(EqBandIntent(
-        band_type="hp", freq_hz=round(hpf_freq, 1), gain_db=0.0,
-        q=0.7,
-        reason=f"HPF@{hpf_freq:.0f}Hz sub_excess={sub_excess:.1f}dB",
-    ))
-
-    # ── Rule 2: Resonance cuts ──────────────────────────────
-    for res in report.resonances:
-        # Skip harmonics — they're musical content, not problems
-        if res.is_harmonic:
-            bands.append(EqBandIntent(
-                band_type="bell", freq_hz=res.freq_hz,
-                gain_db=max(-2.0, -res.prominence_db * 0.3),
-                q=min(res.q_factor * 0.5, 10.0),
-                reason=f"{res.freq_hz}Hz harmonic Q={res.q_factor:.0f} (light touch)",
-            ))
-            continue
-
-        # Q > 15 → genuine room resonance → cut
-        if res.q_factor < _MIN_EQ_Q:
-            continue
-
-        # Skip presence band (2-5 kHz) — critical for intelligibility
-        if 2000.0 <= res.freq_hz <= 5000.0:
-            continue
-
-        cut_db = -min(res.prominence_db, 6.0)
-        bands.append(EqBandIntent(
-            band_type="bell", freq_hz=res.freq_hz,
-            gain_db=round(cut_db, 1),
-            q=min(res.q_factor * 0.5, 10.0),
-            reason=f"{res.freq_hz}Hz room mode Q={res.q_factor:.0f} prominence={res.prominence_db:.1f}dB",
-        ))
-
-    # ── Rule 3: Low-mid mud cut ─────────────────────────────
-    mud_threshold = tweaks.get("mud_threshold_db", 3.0)
-    if report.mud_ratio_db > mud_threshold:
-        cut_db = -min(report.mud_ratio_db - 2.0, 4.0)
-        cut_db = max(cut_db, -4.0)
-        bands.append(EqBandIntent(
-            band_type="bell", freq_hz=350.0, gain_db=round(cut_db, 1),
-            q=0.7,
-            reason=f"Mud cut@{350}Hz mud_ratio={report.mud_ratio_db:.1f}dB",
-        ))
-
-    # ── Rule 4: Presence boost ──────────────────────────────
-    # Pre-comp: higher threshold (4 dB deficit) to be conservative.
-    # Post-comp: lower threshold (2 dB) since compression can reduce presence.
-    #
-    # 4.0 / 2.0 dB: presence deficit thresholds (dB below midrange)
-    # 0.5: boost coefficient (50% of deficit, conservative correction)
-    # 3.0 dB: maximum boost cap (avoid over-EQing)
-    # 3000 Hz: presence band center frequency (vocal intelligibility region)
-    presence_deficit_threshold = 4.0 if conservative else 2.0
-    if report.presence_deficit_db > presence_deficit_threshold:
-        boost = min(report.presence_deficit_db * 0.5, 3.0)
-        boost += tweaks.get("presence_extra_db", 0.0)
-        boost *= tweaks.get("boost_scale", 1.0)
-        if conservative:
-            boost *= 0.5  # pre-comp boosts at half strength
-        bands.append(EqBandIntent(
-            band_type="bell", freq_hz=3000.0, gain_db=round(boost, 1),
-            q=1.0,
-            reason=f"Presence boost@{3000}Hz deficit={report.presence_deficit_db:.1f}dB",
-        ))
-
-    # ── Rule 5: Air shelf ───────────────────────────────────
-    # Graduated: severe tilt + moderately low air deserves air too.
-    # Pre-comp: thresholds are stricter (air < -35, tilt < -5).
-    if conservative:
-        air_low = report.air_level_db < -35.0
-        air_moderate = report.air_level_db < -28.0
-        tilt_dark = report.spectral_tilt_db_per_octave < -5.0
-        tilt_very_dark = report.spectral_tilt_db_per_octave < -6.5
-        air_gain_scale = 0.5
-    else:
-        air_low = report.air_level_db < -30.0
-        air_moderate = report.air_level_db < -22.0
-        tilt_dark = report.spectral_tilt_db_per_octave < -3.0
-        tilt_very_dark = report.spectral_tilt_db_per_octave < -4.5
-        air_gain_scale = 1.0
-
-    air_gain = 0.0
-    if air_low and tilt_dark:
-        air_gain = 1.5  # both severe: full boost
-    elif tilt_very_dark and air_moderate:
-        air_gain = 1.0  # very dark + moderately low air
-    elif air_low and tilt_very_dark:
-        air_gain = 1.5  # severe air loss + very dark
-
-    if air_gain > 0.0:
-        air_gain *= tweaks.get("boost_scale", 1.0)
-        air_gain *= air_gain_scale
-        bands.append(EqBandIntent(
-            band_type="high_shelf", freq_hz=8000.0, gain_db=round(air_gain, 1),
-            q=0.7,
-            reason=f"Air shelf@8kHz air={report.air_level_db:.1f}dB tilt={report.spectral_tilt_db_per_octave:.1f}dB/oct",
-        ))
-
-    # ── Assemble ─────────────────────────────────────────────
-    # Cap at 8 bands (Pro-Q 3 limit).  Priority order:
-    #   1. HPF (always included — structural necessity)
-    #   2. Resonance cuts (most prominent first)
-    #   3. Tonal balance (mud → presence → air)
-    hpf_bands = [b for b in bands if b.band_type == "hp"]
-    reso_bands = [b for b in bands if b.band_type == "bell" and b.gain_db < -2.0]
-    tonal_bands = [b for b in bands if b not in hpf_bands and b not in reso_bands]
-
-    capped: list[EqBandIntent] = []
-    capped.extend(hpf_bands[:1])                    # exactly 1 HPF
-    capped.extend(reso_bands[:5])                    # top 5 resonance cuts
-    remaining = 8 - len(capped)
-    capped.extend(tonal_bands[:remaining])
-
-    return EqIntent(
-        bands=capped,
-        spectral_tilt=(
-            "dark" if report.spectral_tilt_db_per_octave < -2.0
-            else "bright" if report.spectral_tilt_db_per_octave > 2.0
-            else "neutral"
-        ),
-        mud_detected=report.mud_ratio_db > mud_threshold,
-    )
-
-
-# Minimum Q factor for EQ resonance cuts (mirrors spectrum._MIN_Q_FACTOR)
-_MIN_EQ_Q = 15.0
-
-# Pro-Q 3 Shape enum — verified 2026-05-31 via reapy readback.
-# Denominator is 8 (not 7).  Values correspond to:
-#   0=Bell  1=Low Shelf  2=Low Cut  3=High Shelf
-#   4=High Cut  5=Notch  6=Band Pass  7=Tilt Shelf
-_PROQ3_SHAPE: dict[str, float] = {
-    "bell":        0.0 / 8.0,
-    "low_shelf":   1.0 / 8.0,
-    "high_shelf":  3.0 / 8.0,
-    "hp":          2.0 / 8.0,  # Low Cut
-    "lp":          4.0 / 8.0,  # High Cut
-}
-
-# Pro-Q 3 log-frequency formula (verified): norm = log10(f / 10) / log10(3000).
-# Frequency range is 10 Hz – 30 kHz.
-_PROQ3_FREQ_LOG_BASE = math.log10(30000.0 / 10.0)  # ≈ 3.477
-
-
-def _proq3_freq_norm(hz: float) -> float:
-    """Convert Hz to Pro-Q 3 normalised frequency (0–1, log scale)."""
-    return math.log10(max(float(hz), 10.0) / 10.0) / _PROQ3_FREQ_LOG_BASE
-
-
-def _proq3_q_norm(q: float) -> float:
-    """Convert Q value to Pro-Q 3 normalised Q (0–1, log scale).
-
-    Verified: Q=1.0 ↔ norm=0.5.  Range is 0.025 – 40.
-    Formula: norm = log10(Q / 0.025) / log10(40.0 / 0.025).
-    """
-    return math.log10(max(float(q), 0.025) / 0.025) / math.log10(40.0 / 0.025)
-
-
-def _apply_proq3_eq(eq_intent: EqIntent) -> dict[str, float]:
-    """Translate an :class:`EqIntent` into Pro-Q 3 normalised (0–1) parameters.
-
-    Maps each :class:`EqBandIntent` to Pro-Q 3 band slots (1–8).
-    **All** values are normalised to 0–1 and ready for direct REAPER use.
-    Callers should write these values directly via ``FxManager.set_param``
-    — do **not** route through :func:`normalize_params`.
-
-    **Every** parameter is set explicitly so that no garbage values
-    leak from previous plugin state.
-
-    Verified parameter names, defaults, and curve formulas (reapy, 2026-05-31).
-    """
-    _GAIN_RANGE = 60.0  # -30 .. +30 dB
-
-    _DEFAULTS = {
-        "Dynamic Range":       0.5,    # 0 dB
-        "Dynamics Enabled":    0.0,    # static EQ — no dynamic bands
-        "Threshold":           1.0,    # Auto
-        "Slope":               0.0,
-        "Stereo Placement":    0.5,    # Stereo
-        "Speakers":            0.0,    # Stereo (not Center/Surround)
-        "Solo":                0.0,    # Disabled
-    }
-
-    _SLOPE_12DB = 1.0 / 9.0    # 12 dB/oct (10 values 0–9, index 1)
-
-    params: dict[str, float] = {}
-
-    for i, band in enumerate(eq_intent.bands[:8]):
-        n = i + 1
-        shape = _PROQ3_SHAPE.get(band.band_type, 0.0)
-        gain_norm = (band.gain_db + 30.0) / _GAIN_RANGE
-
-        params[f"Band {n} Used"] = 1.0
-        params[f"Band {n} Enabled"] = 1.0
-        params[f"Band {n} Frequency"] = round(_proq3_freq_norm(band.freq_hz), 10)
-        params[f"Band {n} Gain"] = round(max(0.0, min(1.0, gain_norm)), 10)
-        params[f"Band {n} Q"] = round(_proq3_q_norm(band.q), 10)
-        params[f"Band {n} Shape"] = round(shape, 10)
-
-        for pname, pval in _DEFAULTS.items():
-            params.setdefault(f"Band {n} {pname}", pval)
-
-        if band.band_type in ("hp", "lp"):
-            params[f"Band {n} Slope"] = _SLOPE_12DB
-
-    # Disable unused bands
-    for n in range(len(eq_intent.bands) + 1, 9):
-        params[f"Band {n} Used"] = 0.0
-        params[f"Band {n} Enabled"] = 0.0
-        params[f"Band {n} Speakers"] = 0.0        # Stereo
-        params[f"Band {n} Stereo Placement"] = 0.5
-        params[f"Band {n} Solo"] = 0.0
-
-    # Global: Output Level with headroom protection.
-    # Pro-Q 3's Output Level range is -36 .. +36 dB, norm = (dB + 36) / 72.
-    # If the EQ adds any net boost, attenuate the output so the next plugin
-    # (typically a compressor calibrated at -18 dBFS) doesn't clip internally.
-    total_boost = sum(max(0.0, b.gain_db) for b in eq_intent.bands)
-    if total_boost > 0.0:
-        out_db = -total_boost
-        params["Output Level"] = round((out_db + 36.0) / 72.0, 10)
-    else:
-        params["Output Level"] = 0.5  # 0 dB, unity
-
-    return params
-
-
-# ════════════════════════════════════════════════════════════════
-# SSL EQ translation (post-comp tonal shaping)
-# ════════════════════════════════════════════════════════════════
-
-# Frequency lookup tables: (norm, Hz) pairs sorted by Hz.
-# Verified via reapy readback (2026-05-31).
-# Interpolation between knots for continuous norm values.
-
-_LF_FRQ_TABLE: list[tuple[float, float]] = [
-    (0.000, 30),
-    (0.230, 60),
-    (0.425, 150),
-    (0.650, 300),
-    (1.000, 450),
-]
-
-# LMF frequency steps (verified reapy, 2026-05-31).
-# SSL EQ frequency selectors are physically detented — interpolation
-# is meaningless.  Use nearest-neighbour lookup.
-_LMF_FRQ_STEPS: list[tuple[float, float]] = [
-    (0.007, 200),
-    (0.190, 300),
-    (0.237, 420),
-    (0.322, 710),
-    (0.589, 1300),
-    (0.670, 1570),
-    (0.799, 2000),
-    (1.000, 2500),
-]
-
-_HMF_FRQ_TABLE: list[tuple[float, float]] = [
-    (0.000, 600),
-    (0.450, 2500),
-    (1.000, 7000),
-]
-
-_HF_FRQ_TABLE: list[tuple[float, float]] = [
-    (0.000, 1500),
-    (0.650, 10000),
-    (1.000, 16000),
-]
-
-_HP_FRQ_TABLE: list[tuple[float, float]] = [
-    (0.012, 16),
-    (0.440, 100),
-    (1.000, 350),
-]
-
-# Q: 0.1 (widest, norm=1.0) → 3.5 (narrowest, norm=0.0), reverse-linear.
-_SSL_Q_MIN = 0.1
-_SSL_Q_MAX = 3.5
-_SSL_Q_RANGE = _SSL_Q_MAX - _SSL_Q_MIN  # 3.4
-
-
-def _ssleq_freq_norm(target_hz: float, table: list[tuple[float, float]]) -> float:
-    """Find the norm value for *target_hz* via interpolation in *table*.
-
-    The table is ``[(norm, Hz), …]`` sorted ascending by Hz.
-    SSL EQ frequency is continuous in the VST — interpolation between
-    calibration knots is correct even for detented knobs.
-    Values outside the table range are clamped to the nearest endpoint.
-    """
-    hz_list = [row[1] for row in table]
-
-    if target_hz <= hz_list[0]:
-        return table[0][0]
-    if target_hz >= hz_list[-1]:
-        return table[-1][0]
-
-    idx = bisect.bisect_left(hz_list, target_hz)
-    if idx == 0:
-        return table[0][0]
-
-    lo_n, lo_hz = table[idx - 1]
-    hi_n, hi_hz = table[idx]
-
-    if hi_hz == lo_hz:
-        return lo_n
-
-    t = (target_hz - lo_hz) / (hi_hz - lo_hz)
-    return lo_n + t * (hi_n - lo_n)
-
-
-def _ssleq_q_norm(q: float) -> float:
-    """Map SSL EQ Q value (0.1–3.5) to norm (1.0–0.0)."""
-    clamped = max(_SSL_Q_MIN, min(_SSL_Q_MAX, q))
-    return (_SSL_Q_MAX - clamped) / _SSL_Q_RANGE
-
-
-def _apply_ssleq_eq(eq_intent: EqIntent) -> dict[str, float]:
-    """Translate an :class:`EqIntent` into SSL EQ normalised (0–1) parameters.
-
-    SSL EQ has 4 bands: LF (shelf), LMF (bell), HMF (bell), HF (shelf).
-    All values are normalised to 0–1, ready for direct REAPER use.
-
-    Band assignment by frequency:
-    - ≤ 2 kHz → LMF (200–2500 Hz range, e.g. resonance / mud cuts)
-    - > 2 kHz → HMF (600–7000 Hz range, e.g. presence boost)
-    - ``high_shelf`` / ``air`` → HF
-    - ``low_shelf`` / ``warmth`` → LF
-    - ``hp`` → HP On/Off + HP Frq
-    """
-    _LF_GAIN_RANGE = 34.0   # ±17 dB
-    _MF_GAIN_RANGE = 40.0   # ±20 dB
-    _HF_GAIN_RANGE = 34.0   # ±17 dB
-    _OUT_GAIN_RANGE = 24.0  # +12 dB (boost); cut side is 48.0 (-24 dB) — piecewise
-    _LMF_HMF_BOUNDARY = 2000.0  # Hz — frequencies ≤ this go to LMF, above to HMF
-
-    params: dict[str, float] = {
-        "Bypass": 0.0,
-        "EQ IN": 1.0,
-        "Analog": 1.0,       # always on for character
-        "HP On/Off": 0.0,
-        "LMF Div3": 0.0,
-        "HMF Mul3": 0.0,
-        # Default gains at 0 dB
-        "LF Gain": 0.5,
-        "LMF Gain": 0.5,
-        "HMF Gain": 0.5,
-        "HF Gain": 0.5,
-        "Gain": 0.5,
-        # Default frequencies at mid-points
-        "LF Frq": 0.5,
-        "LMF Frq": 0.5,
-        "HMF Frq": 0.5,
-        "HF Frq": 0.5,
-        "HP Frq": 0.012,
-        # Default Q at mid-point
-        "LMF Q": 0.5,
-        "HMF Q": 0.5,
-    }
-
-    for band in eq_intent.bands:
-        if band.band_type in ("high_shelf", "air"):
-            # → HF shelf
-            gain_norm = (band.gain_db + _HF_GAIN_RANGE / 2) / _HF_GAIN_RANGE
-            params["HF Gain"] = round(max(0.0, min(1.0, gain_norm)), 10)
-            params["HF Frq"] = round(_ssleq_freq_norm(band.freq_hz, _HF_FRQ_TABLE), 10)
-
-        elif band.band_type in ("bell", "presence"):
-            # Route by frequency: ≤2kHz → LMF, >2kHz → HMF
-            if band.freq_hz <= _LMF_HMF_BOUNDARY:
-                gain_norm = (band.gain_db + _MF_GAIN_RANGE / 2) / _MF_GAIN_RANGE
-                params["LMF Gain"] = round(max(0.0, min(1.0, gain_norm)), 10)
-                params["LMF Frq"] = round(_ssleq_freq_norm(band.freq_hz, _LMF_FRQ_STEPS), 10)
-                params["LMF Q"] = round(_ssleq_q_norm(band.q), 10)
-            else:
-                gain_norm = (band.gain_db + _MF_GAIN_RANGE / 2) / _MF_GAIN_RANGE
-                params["HMF Gain"] = round(max(0.0, min(1.0, gain_norm)), 10)
-                params["HMF Frq"] = round(_ssleq_freq_norm(band.freq_hz, _HMF_FRQ_TABLE), 10)
-                params["HMF Q"] = round(_ssleq_q_norm(band.q), 10)
-
-        elif band.band_type == "low_shelf":
-            # → LF shelf (optional low warmth)
-            gain_norm = (band.gain_db + _LF_GAIN_RANGE / 2) / _LF_GAIN_RANGE
-            params["LF Gain"] = round(max(0.0, min(1.0, gain_norm)), 10)
-            params["LF Frq"] = round(_ssleq_freq_norm(band.freq_hz, _LF_FRQ_TABLE), 10)
-
-        elif band.band_type in ("hp",):
-            # HPF — unlikely in post-comp, but handle gracefully
-            params["HP On/Off"] = 1.0
-            params["HP Frq"] = round(_ssleq_freq_norm(band.freq_hz, _HP_FRQ_TABLE), 10)
-
-    # Output level: check total boost, compensate.
-    # SSL EQ Output Gain is piecewise-linear (verified reapy, 2026-05-31):
-    #   boost side: norm = (dB + 12) / 24   0 .. +12 dB
-    #   cut side:   norm = (dB + 24) / 48   -24 .. 0 dB
-    total_boost = sum(max(0.0, b.gain_db) for b in eq_intent.bands)
-    if total_boost > 0.0:
-        out_db = -total_boost
-        if out_db >= 0:
-            out_norm = (out_db + 12.0) / 24.0
-        else:
-            out_norm = (out_db + 24.0) / 48.0
-        params["Gain"] = round(max(0.0, min(1.0, out_norm)), 10)
-
-    return params
-
-
-def _reaeq_apply_baseline_band(fx_mgr, track_idx, fx_idx,
-                               band_idx, btype, freq, gain, q):
-    """Apply a single baseline EQ band using ReaEQ param names."""
-    n = band_idx + 1
-    if btype == "hp":
-        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Type", 0.0)
-        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Freq", freq)
-        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Q", q)
-        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Enabled", 1.0)
-    elif btype == "bell":
-        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Type", 2.0)
-        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Freq", freq)
-        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Gain", gain)
-        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Q", q)
-        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Enabled", 1.0)
-
-
-def _proq3_apply_baseline_band(fx_mgr, track_idx, fx_idx,
-                                band_idx, btype, freq, gain, q):
-    """Apply a single baseline EQ band using Pro-Q 3 param names."""
-    n = band_idx + 1
-    fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Used", 1.0)
-    fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Enabled", 1.0)
-    fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Frequency", freq)
-    fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Q", q)
-    fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Dynamic Range", 0.5)
-    fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Dynamics Enabled", 0.0)
-    fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Threshold", 1.0)
-    fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Stereo Placement", 0.5)
-    if btype == "hp":
-        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Shape", 0.25)
-        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Slope", 0.1111)
-    elif btype == "bell":
-        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Shape", 0.0)
-        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Gain", gain)
-    elif btype == "hs":
-        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Shape", 0.75)
-        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Slope", 0.1111)
-        fx_mgr.set_param(track_idx, fx_idx, f"Band {n} Gain", gain)
-
-
-def _ssleq_apply_baseline_band(fx_mgr, track_idx, fx_idx,
-                                band_idx, btype, freq, gain, q):
-    """Apply a single baseline EQ band using SSL EQ param names.
-
-    SSL EQ has fixed band assignments:
-      - HF shelf  (1.5-16 kHz)
-      - HMF bell  (600-7000 Hz)
-      - LMF bell  (200-2500 Hz)
-      - LF shelf  (30-450 Hz)
-      - HP filter (30-350 Hz, separate from bands)
-
-    Baseline bands are mapped to the most appropriate SSL band.
-    """
-    if btype == "hp":
-        fx_mgr.set_param(track_idx, fx_idx, "HP On/Off", 1.0)
-        fx_mgr.set_param(track_idx, fx_idx, "HP Frq", freq)
-    elif btype == "bell":
-        if freq < 2000:
-            fx_mgr.set_param(track_idx, fx_idx, "LMF Gain", gain)
-            fx_mgr.set_param(track_idx, fx_idx, "LMF Frq", freq)
-            fx_mgr.set_param(track_idx, fx_idx, "LMF Q", q)
-        else:
-            fx_mgr.set_param(track_idx, fx_idx, "HMF Gain", gain)
-            fx_mgr.set_param(track_idx, fx_idx, "HMF Frq", freq)
-            fx_mgr.set_param(track_idx, fx_idx, "HMF Q", q)
-    elif btype == "hs":
-        fx_mgr.set_param(track_idx, fx_idx, "HF Gain", gain)
-        fx_mgr.set_param(track_idx, fx_idx, "HF Frq", freq)
-
 
 class MixingEngine:
     """Top-level REAPER mixing engine. Use as context manager for auto-connect.
@@ -1448,6 +182,19 @@ class MixingEngine:
         self._backing_chain_nodes: list[AudioNode] = []
         self._reverb_send_node: SendNode | None = None
 
+        # ── 状态机 ────────────────────────────────────────────────
+        self._pipeline_state = PipelineState.CREATED
+        self._undo_depth = 0
+
+        # ── 子引擎 ────────────────────────────────────────────────
+        self._mastering = MasteringEngine(
+            self._bridge, self._fx, self._render,
+        )
+        self._gain_staging = GainStagingEngine(
+            self._bridge, self._tracks, SignalAnalyzer,
+        )
+        self._spatial_result: dict = {}
+
     # ── Context manager ──────────────────────────────────
 
     def __enter__(self):
@@ -1459,6 +206,14 @@ class MixingEngine:
         if self._watchdog_enabled and self._bridge.dialog_killer_active:
             self._bridge.stop_dialog_killer()
         return False
+
+    def connect(self) -> bool:
+        """连接到 REAPER bridge。
+
+        Returns:
+            True 表示连接成功，False 表示连接失败
+        """
+        return self._bridge.connect()
 
     # ── Undo / state helpers ────────────────────────────────
 
@@ -1478,7 +233,34 @@ class MixingEngine:
             except Exception as inner_e:
                 log.debug("Undo_EndBlock cleanup failed: %s", inner_e)
             raise
-            raise
+
+    # ── 状态机方法 ───────────────────────────────────────────
+
+    def _require_state(self, *allowed: PipelineState) -> None:
+        """验证当前管线状态在允许集合内。
+
+        ``CREATED`` 是宽容入口 — 允许独立调用（不强制严格顺序）。
+        """
+        if PipelineState.CREATED in allowed:
+            return
+        if self._pipeline_state in allowed:
+            return
+        raise InvalidStateError(
+            f"操作要求状态为 {[s.value for s in allowed]}，"
+            f"当前状态为 {self._pipeline_state.value}"
+        )
+
+    def _transition_to(self, state: PipelineState) -> None:
+        """将管线状态转移到 *state*。"""
+        self._pipeline_state = state
+
+    def _auto_save(self) -> None:
+        """自动保存工程（静默，不弹窗）。"""
+        try:
+            if self._bridge._api is not None:
+                self._bridge._api.Main_SaveProjectEx(0, "", 0)
+        except Exception:
+            pass
 
     def _ensure_project_match(self):
         """Raise ``RuntimeError`` if REAPER's current project has changed
@@ -1528,36 +310,8 @@ class MixingEngine:
         self._bpm = None
         self._last_spectrum: dict = {}
         self._dirty = False
-
-    def preflight_plugins(self, fx_names: list[str]) -> list[str]:
-        """Check which of *fx_names* are available in REAPER.  Returns the
-        list of **missing** plugin names (empty = all present).
-
-        Uses a disposable probe track to test instantiation.  The master
-        track is **never** touched — plugins that fail to load leave no
-        residue.
-        """
-        missing: list[str] = []
-        # ── Create a temporary probe track ──────────────────────
-        api = self._bridge.api
-        probe_idx = api.CountTracks(0)
-        api.InsertTrackAtIndex(probe_idx, True)  # True = hidden under folder
-        try:
-            for name in fx_names:
-                idx = self._fx.add(probe_idx, name)
-                if idx < 0:
-                    missing.append(name)
-                else:
-                    track = api.GetTrack(0, probe_idx)
-                    if track:
-                        api.TrackFX_Delete(track, idx)
-        finally:
-            # Remove the probe track (also deletes any leftover FX).
-            track = api.GetTrack(0, probe_idx)
-            if track:
-                api.DeleteTrack(track)
-
-        return missing
+        self._pipeline_state = PipelineState.CREATED
+        self._spatial_result.clear()
 
     def apply_profile(self, profile, /, *, vocal_track: int = 0,
                       backing_tracks: list[int] | None = None,
@@ -1794,6 +548,77 @@ class MixingEngine:
                     "threshold=%.1f dB, range=%.1f dB (genre=%s)",
                     presence_def, threshold_db, range_db, genre,
                 )
+            elif fx_type == "saturation":
+                # 饱和增强：Crest Factor 推导 Drive 量。
+                # 高波峰 → 保留瞬态，少饱和；低波峰 → 增加谐波密度。
+                # 优先使用 Decapitator，不可用则跳过（fallback 为 None）。
+                crest_db = 12.0
+                if rms is not None and peak is not None:
+                    crest_db = peak - rms
+                drive = round(max(0.1, 1.0 - (crest_db - 8.0) * 0.05), 2)
+                drive = max(0.1, min(1.0, drive))
+
+                try:
+                    physical = {"Drive": drive, "Mix": 0.5}
+                    normalized = normalize_params(fx.name, physical)
+                    for pname, pval in normalized.items():
+                        self._fx.set_param(track_index, idx, pname, pval)
+                    node.params = dict(physical)
+                    log.info(
+                        "Auto-saturation: crest=%.1fdB → drive=%.2f (plugin=%s)",
+                        crest_db, drive, fx.name,
+                    )
+                except Exception as exc:
+                    log.debug("Saturation plugin unavailable (%s), skipping", exc)
+
+            elif fx_type == "dynamic_eq":
+                # 动态 EQ：对共振频率设置动态衰减。
+                # 使用 Pro-Q 3 动态模式（Dynamics Enabled = 1.0）处理
+                # _derive_eq_intent 检测到的共振频点。
+                dyn_stem_path = sd.get("file_path", "")
+                if dyn_stem_path and os.path.exists(dyn_stem_path):
+                    try:
+                        report = SpectrumAnalyzer.analyze(dyn_stem_path)
+                        eq_intent = _derive_eq_intent(
+                            report, role=role, genre=genre, position="solo",
+                        )
+                        # 为共振频段启用动态模式
+                        normalized = _apply_proq3_eq(eq_intent)
+                        # 启用动态 EQ 特性：在共振频段开启 Dynamics Enabled
+                        for band_num in range(1, 9):
+                            band_key = f"Band {band_num} Used"
+                            if band_key in normalized and normalized.get(band_key, 0.0) > 0.0:
+                                normalized[f"Band {band_num} Dynamics Enabled"] = 1.0
+                                normalized[f"Band {band_num} Dynamic Range"] = 0.6
+                                normalized[f"Band {band_num} Threshold"] = 0.5
+                        for pname, pval in normalized.items():
+                            self._fx.set_param(track_index, idx, pname, pval)
+                        node.params = dict(normalized)
+                        log.info(
+                            "Auto-dynamic-EQ: %d resonance bands with dynamic mode (plugin=%s)",
+                            sum(1 for b in eq_intent.bands if b.gain_db < 0), fx.name,
+                        )
+                    except Exception as exc:
+                        log.debug("Dynamic EQ spectrum analysis failed (%s), skipping", exc)
+                else:
+                    log.debug("Dynamic EQ: no stem file available, skipping")
+
+            elif fx_type == "doubler":
+                # Doubler/MicroShift：增加人声宽度和空间感。
+                # 如果可用则设置默认参数，否则跳过。
+                try:
+                    physical = {"Mix": 0.3, "Detune": 0.15, "Delay": 0.05}
+                    normalized = normalize_params(fx.name, physical)
+                    for pname, pval in normalized.items():
+                        self._fx.set_param(track_index, idx, pname, pval)
+                    node.params = dict(physical)
+                    log.info(
+                        "Auto-doubler: Mix=%.2f Detune=%.2f (plugin=%s)",
+                        0.3, 0.15, fx.name,
+                    )
+                except Exception as exc:
+                    log.debug("Doubler plugin unavailable (%s), skipping", exc)
+
             else:
                 for pname, pval in fx.params.items():
                     self._fx.set_param(track_index, idx, pname, pval)
@@ -1819,6 +644,58 @@ class MixingEngine:
         if changed:
             log.info("[DAG] %s.%s changed → cascade dirty", node.name, param_name)
         return changed
+
+    def write_automation(self, track_idx: int, param_name: str,
+                         points: list[tuple[float, float]]) -> dict:
+        """写入自动化曲线。
+
+        为指定轨道的参数创建自动化包络并写入时间值对。
+
+        Args:
+            track_idx: 轨道索引
+            param_name: 参数名（如 ``"D_VOL"``, ``"PAN"``）
+            points: ``[(time_sec, value), ...]`` 时间秒和值的二元组列表
+
+        Returns
+        -------
+        dict
+            ``{track_idx, param_name, point_count, envelope_index}``
+        """
+        api = self._bridge.api
+        track_ptr = api.GetTrack(0, track_idx)
+        if not track_ptr:
+            return {"track_idx": track_idx, "param_name": param_name,
+                    "error": "Track not found", "point_count": 0}
+
+        # 获取或创建自动化包络
+        envelope = api.GetTrackEnvelopeByName(track_ptr, param_name)
+        if not envelope:
+            # 尝试通过参数索引创建可见包络
+            # REAPER API: GetTrackEnvelopeByName 返回 None 时
+            # 可能需要先通过其他方式创建
+            log.warning(
+                "write_automation: envelope '%s' not found on track %d — "
+                "参数可能不可自动化或轨道无该参数",
+                param_name, track_idx,
+            )
+            return {"track_idx": track_idx, "param_name": param_name,
+                    "error": f"Envelope '{param_name}' not found",
+                    "point_count": 0}
+
+        # 写入时间-值点（按时间排序以确保曲线正确）
+        sorted_points = sorted(points, key=lambda p: p[0])
+        for time_sec, value in sorted_points:
+            api.InsertEnvelopePoint(envelope, time_sec, value, 0, 0.0, 0, True)
+
+        log.info(
+            "write_automation: track %d, param=%s — %d points written",
+            track_idx, param_name, len(sorted_points),
+        )
+        return {
+            "track_idx": track_idx,
+            "param_name": param_name,
+            "point_count": len(sorted_points),
+        }
 
     def _apply_eq_baseline(self, track_index: int, fx_index: int,
                            role: str, *,
@@ -1954,6 +831,133 @@ class MixingEngine:
             role, genre, len(bands),
         )
 
+    def auto_corrective_eq(self, track_idx: int) -> dict:
+        """基于频谱分析的共振检测自动生成校正性 EQ。
+
+        分析轨道上的音频，检测共振频率，并自动设置 Pro-Q 3 的
+        衰减频段来削减不需要的共振。
+
+        返回包含应用频段和共振信息的诊断字典。
+
+        spectrum.py 的共振检测结果直接反馈到 EQ 参数设置，
+        闭环连接频谱分析与 EQ 调整。
+
+        Returns
+        -------
+        dict
+            ``{track_idx, eq_bands, resonance_count, applied}``
+        """
+        api = self._bridge.api
+        track_ptr = api.GetTrack(0, track_idx)
+        if not track_ptr:
+            return {"track_idx": track_idx, "error": "Track not found",
+                    "eq_bands": [], "applied": False}
+
+        # 1. 获取轨道上的音频文件路径
+        #    尝试从已有的 stems_cache 或通过渲染临时片段获取
+        stem_file = ""
+        for s in getattr(self, "_stems_cache", []):
+            if s.get("track_index") == track_idx and s.get("success"):
+                stem_file = s.get("file_path", "")
+                break
+
+        if not stem_file or not os.path.exists(stem_file):
+            log.warning("auto_corrective_eq: no audio source for track %d", track_idx)
+            return {"track_idx": track_idx, "error": "No audio source",
+                    "eq_bands": [], "applied": False}
+
+        # 2. 频谱分析 → 共振检测
+        try:
+            report = SpectrumAnalyzer.analyze(stem_file)
+        except Exception as exc:
+            log.warning("auto_corrective_eq: spectrum analysis failed — %s", exc)
+            return {"track_idx": track_idx,
+                    "error": f"Spectrum analysis failed: {exc}",
+                    "eq_bands": [], "applied": False}
+
+        # 3. 仅对非谐波共振（Q > 15）生成衰减频段
+        eq_bands: list[dict] = []
+        for resonance in report.resonances:
+            if resonance.is_harmonic:
+                continue  # 跳过音乐性的谐波
+            if resonance.q_factor < 15.0:
+                continue  # Q 太低不是真正共振
+            cut_db = -min(resonance.prominence_db, 6.0)
+            eq_bands.append({
+                "freq": resonance.freq_hz,
+                "gain": cut_db,
+                "q": min(resonance.q_factor * 0.5, 10.0),
+                "type": "bell",
+                "reason": f"{resonance.freq_hz}Hz room mode "
+                          f"Q={resonance.q_factor:.0f} "
+                          f"prominence={resonance.prominence_db:.1f}dB",
+            })
+
+        if not eq_bands:
+            log.info("auto_corrective_eq: no resonances detected on track %d",
+                     track_idx)
+            return {"track_idx": track_idx,
+                    "resonance_count": len(report.resonances),
+                    "eq_bands": [], "applied": False}
+
+        # 4. 查找轨道上第一个可用的 EQ 插件并应用频段
+        n_fx = api.TrackFX_GetCount(track_ptr)
+        eq_fx_idx = -1
+        for f in range(n_fx):
+            ret, name_buf = api.TrackFX_GetFXName(track_ptr, f, "", 256)
+            if isinstance(ret, (list, tuple)):
+                name = ret[4] if len(ret) > 4 else ""
+            else:
+                name = name_buf or ""
+            if "pro-q" in name.lower() or "reaeq" in name.lower():
+                eq_fx_idx = f
+                break
+
+        if eq_fx_idx < 0:
+            # 没有 EQ 插件 — 添加一个 ReaEQ
+            eq_fx_idx = self._fx.add(track_idx, "ReaEQ (Cockos)")
+            if eq_fx_idx < 0:
+                log.warning("auto_corrective_eq: cannot add EQ plugin to track %d",
+                            track_idx)
+                return {"track_idx": track_idx,
+                        "eq_bands": eq_bands,
+                        "resonance_count": len(report.resonances),
+                        "applied": False}
+
+        # 5. 构建 EqIntent 并应用
+        from hermes_core.loudness_optimizer import EqIntent, EqBandIntent
+        band_intents = []
+        for b in eq_bands[:8]:  # 最多 8 个频段
+            band_intents.append(EqBandIntent(
+                band_type=b["type"],
+                freq_hz=b["freq"],
+                gain_db=b["gain"],
+                q=b["q"],
+                reason=b.get("reason", f"corrective:{b['freq']:.0f}Hz"),
+            ))
+
+        eq_intent = EqIntent(
+            bands=band_intents,
+            spectral_tilt="neutral",
+            mud_detected=report.mud_ratio_db > 3.0,
+        )
+        normalized = _apply_proq3_eq(eq_intent)
+        for pname, pval in normalized.items():
+            self._fx.set_param(track_idx, eq_fx_idx, pname, pval)
+
+        log.info(
+            "auto_corrective_eq: track %d — %d corrective bands applied "
+            "(out of %d detected resonances)",
+            track_idx, len(eq_bands), len(report.resonances),
+        )
+        return {
+            "track_idx": track_idx,
+            "eq_bands": eq_bands,
+            "resonance_count": len(report.resonances),
+            "applied": True,
+            "eq_fx_idx": eq_fx_idx,
+        }
+
     # ── Scene 1: Connection & health ─────────────────────
 
     def health_check(self) -> dict:
@@ -2080,8 +1084,8 @@ class MixingEngine:
         tmp_dir = tempfile.mkdtemp(prefix="hermes_proj_")
         tmp_path = os.path.join(tmp_dir, os.path.basename(safe_path))
         api.Main_SaveProjectEx(0, tmp_path, 0)
-        # Main_SaveProject 清除 REAPER 内部 dirty flag（避免退出弹窗）
-        api.Main_SaveProject(0, 0)
+        # 清除 REAPER 内部 dirty flag（避免退出弹窗）
+        api.Main_SaveProjectEx(0, "", 0)
         try:
             shutil.copy2(tmp_path, safe_path)
             log.info("Project copied %s → %s", tmp_path, safe_path)
@@ -2135,7 +1139,7 @@ class MixingEngine:
         tmp_dir = tempfile.mkdtemp(prefix="hermes_save_")
         tmp_path = os.path.join(tmp_dir, os.path.basename(target_path))
         self._bridge.api.Main_SaveProjectEx(0, tmp_path, 0)
-        self._bridge.api.Main_SaveProject(0, 0)  # 清除 dirty flag
+        self._bridge.api.Main_SaveProjectEx(0, "", 0)  # 清除 dirty flag
         try:
             shutil.copy2(tmp_path, target_path)
         except OSError:
@@ -2245,6 +1249,148 @@ class MixingEngine:
         self._dirty = False
         return {"path": actual, "original_path": self._project_path,
                 "saved_at": datetime.now().isoformat()}
+
+    def archive_project(self, output_path: str | None = None) -> str:
+        """将工程打包为可交付的 ZIP 归档文件。
+
+        包含：
+        - ProjectName.rpp（工程文件）
+        - Audio/（工程目录下的所有音频文件）
+        - Renders/（渲染输出目录，如果存在）
+        - .hermes_meta.json（元数据）
+        - mix_report.json（混音报告）
+
+        Parameters
+        ----------
+        output_path : str | None
+            输出 ZIP 路径，默认在工程目录下以 ``{project_name}_archive.zip`` 命名。
+
+        Returns
+        -------
+        str
+            ZIP 归档文件的绝对路径。
+        """
+        import json
+        import zipfile
+
+        if not self._project_path:
+            raise RuntimeError(
+                "No project path — call create_project(name, output_dir) first"
+            )
+
+        proj_dir = os.path.dirname(self._project_path)
+        proj_name = os.path.splitext(os.path.basename(self._project_path))[0]
+
+        if output_path is None:
+            output_path = os.path.join(proj_dir, f"{proj_name}_archive.zip")
+
+        # 保存当前工程状态
+        self._sync_meta()
+        self.save_project()
+
+        # ── 收集归档文件 ──
+        archive_files: list[tuple[str, str]] = []  # (absolute_path, arcname)
+
+        # 1. 工程文件 (.rpp)
+        archive_files.append((self._project_path, f"{proj_name}.rpp"))
+
+        # 2. 元数据
+        meta_path = os.path.join(proj_dir, ".hermes_meta.json")
+        if os.path.exists(meta_path):
+            archive_files.append((meta_path, ".hermes_meta.json"))
+
+        # 3. Audio/ 目录
+        audio_dir = os.path.join(proj_dir, "Audio")
+        if os.path.isdir(audio_dir):
+            for root, _dirs, files in os.walk(audio_dir):
+                for fname in files:
+                    fpath = os.path.join(root, fname)
+                    arcname = os.path.join("Audio", os.path.relpath(fpath, audio_dir))
+                    archive_files.append((fpath, arcname))
+
+        # 4. Renders/ 目录
+        renders_dir = os.path.join(proj_dir, "Renders")
+        if os.path.isdir(renders_dir):
+            for root, _dirs, files in os.walk(renders_dir):
+                for fname in files:
+                    fpath = os.path.join(root, fname)
+                    arcname = os.path.join("Renders", os.path.relpath(fpath, renders_dir))
+                    archive_files.append((fpath, arcname))
+
+        # 5. 混音报告
+        report_path = os.path.join(proj_dir, "mix_report.json")
+        report_data = self._build_mix_report()
+        with open(report_path, "w", encoding="utf-8") as f:
+            json.dump(report_data, f, indent=2, ensure_ascii=False)
+        archive_files.append((report_path, "mix_report.json"))
+
+        # ── 创建 ZIP ──
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for abs_path, arcname in archive_files:
+                if os.path.exists(abs_path):
+                    zf.write(abs_path, arcname)
+
+        count = len([p for p, _ in archive_files if os.path.exists(p)])
+        log.info(
+            "Project archived: %s (%d files, %s bytes)",
+            output_path, count,
+            os.path.getsize(output_path) if os.path.exists(output_path) else 0,
+        )
+        return output_path
+
+    def _build_mix_report(self) -> dict:
+        """生成混音报告字典，用于 archive_project。
+
+        报告包含工程元数据、轨道信息、FX 链、LUFS 数据等摘要。
+        """
+        report: dict = {
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "project": {},
+            "tracks": [],
+            "mastering": {},
+        }
+
+        # 工程信息
+        try:
+            info = self.get_project_info()
+            report["project"] = {
+                "name": info.get("name", ""),
+                "sample_rate": info.get("sample_rate", 0),
+                "track_count": info.get("track_count", 0),
+            }
+        except Exception:
+            pass
+
+        # 元数据
+        if self._meta:
+            report["project"]["genre"] = self._meta.genre
+            report["project"]["category"] = self._meta.category
+            report["project"]["producer"] = self._meta.producer
+            report["project"]["stages"] = self._meta.stages
+
+        # 轨道信息
+        try:
+            for t in self.list_tracks():
+                chain = self.get_fx_chain(t.index)
+                report["tracks"].append({
+                    "index": t.index,
+                    "name": t.name,
+                    "volume_db": round(t.volume_db, 1) if t.volume_db else 0.0,
+                    "fx_count": len(chain) if chain else 0,
+                    "fx_names": [fx["name"] for fx in chain] if chain else [],
+                })
+        except Exception:
+            pass
+
+        # 母带信息
+        report["mastering"]["pipeline_state"] = self._pipeline_state.value
+        if hasattr(self, "_reverb_send_node") and self._reverb_send_node:
+            report["mastering"]["reverb"] = {
+                "level_db": self._reverb_send_node.params.get("level_db"),
+            }
+
+        return report
 
     def save_checkpoint(self, label: str = "") -> dict:
         """Save a timestamped copy without touching the main project file.
@@ -2416,18 +1562,7 @@ class MixingEngine:
 
         Returns list of {name, track_index, file_path, success}.
         """
-        results = []
-        for path in file_paths:
-            name = os.path.splitext(os.path.basename(path))[0]
-            idx = self._tracks.create(name=name)
-            ok = self._tracks.import_media(idx, path, position)
-            results.append({
-                "name": name,
-                "track_index": idx,
-                "file_path": path,
-                "success": ok,
-            })
-        return results
+        return self._gain_staging.import_stems(file_paths, position)
 
     def list_tracks(self) -> list[TrackInfo]:
         """Return TrackInfo for all tracks in the project."""
@@ -2441,16 +1576,7 @@ class MixingEngine:
 
         target: "track_fader" | "clip_gain" | "master_fader"
         """
-        if target == "track_fader":
-            self._tracks.set_volume(track_index, gain_db)
-        elif target == "clip_gain":
-            self._tracks.set_item_volume(track_index, gain_db)
-        elif target in ("master_fader",):
-            raise NotImplementedError(
-                f"Gain target '{target}' not yet implemented"
-            )
-        else:
-            raise ValueError(f"Unknown gain target: {target}")
+        self._gain_staging.apply_gain(track_index, gain_db, target)
 
     def get_gain_structure(self) -> dict:
         """Return gain overview for all tracks."""
@@ -2492,6 +1618,7 @@ class MixingEngine:
                 "Stems already gain-staged. Call reset() to start a new mix, "
                 "or create a new project with create_project()."
             )
+        self._require_state(PipelineState.CREATED)
         self._ensure_project_match()
 
         # Store BPM for downstream use (apply_profile / _build_audio_chain).
@@ -2506,6 +1633,8 @@ class MixingEngine:
         result = self._undo_block("Prepare Stems", _do_prepare)
         self._stems_gain_staged = True
         self._stems_cache = result.get("stems", [])
+        self._transition_to(PipelineState.STEMS_PREPARED)
+        self._auto_save()
         self._mark_stage("prepare_stems")
         return result
 
@@ -2533,7 +1662,7 @@ class MixingEngine:
             if not imp["success"]:
                 stems_out.append({
                     "file_path": stem_paths[i],
-                    "role": self._classify_role(i, vocal_indices, backing_indices),
+                    "role": GainStagingEngine.classify_role(i, vocal_indices, backing_indices),
                     "track_index": imp["track_index"],
                     "track_name": imp["name"],
                     "raw_rms_db": None,
@@ -2579,7 +1708,7 @@ class MixingEngine:
 
             stems_out.append({
                 "file_path": stem_paths[i],
-                "role": self._classify_role(i, vocal_indices, backing_indices),
+                "role": GainStagingEngine.classify_role(i, vocal_indices, backing_indices),
                 "track_index": imp["track_index"],
                 "track_name": imp["name"],
                 "raw_rms_db": raw_rms_db,
@@ -2603,15 +1732,6 @@ class MixingEngine:
             "vocal_indices": vocal_indices,
             "backing_indices": backing_indices,
         }
-
-    @staticmethod
-    def _classify_role(idx: int, vocal_indices: list[int],
-                       backing_indices: list[int]) -> str:  # noqa: D401
-        if idx in vocal_indices:
-            return "vocal"
-        if idx in backing_indices:
-            return "backing"
-        return "other"
 
     # ── Post-FX fader balancing ──────────────────────────
 
@@ -2698,7 +1818,7 @@ class MixingEngine:
                 api.SetMediaTrackInfo_Value(tr, "I_SOLO", 1.0 if i in indices else 0.0)
 
         try:
-            result = self.render_mix(output_dir, verify=False)
+            result = self.render_mix(output_dir, verify=False, _internal=True)
         finally:
             # Restore original solo state
             for i in range(n):
@@ -2912,7 +2032,7 @@ class MixingEngine:
 
         # ── 1. Probe render — measure what hits the master bus ──
         tmp_dir = tempfile.mkdtemp(prefix="hermes_bus_probe_")
-        probe = self.render_mix(tmp_dir, verify=True)
+        probe = self.render_mix(tmp_dir, verify=True, _internal=True)
         signal = probe.get("signal_check", {})
         peak_db = signal.get("peak_db", -6.0)
         if signal.get("error"):
@@ -2989,7 +2109,15 @@ class MixingEngine:
 
     def add_fx(self, track_index: int, fx_name: str) -> int:
         """Add an effect plugin to a track. Returns FX index."""
-        return self._fx.add(track_index, fx_name)
+        self._require_state(PipelineState.CREATED, PipelineState.STEMS_PREPARED,
+                            PipelineState.FX_APPLIED)
+        result = self._fx.add(track_index, fx_name)
+        if self._pipeline_state not in (PipelineState.FX_APPLIED, PipelineState.SPATIAL_APPLIED,
+                                         PipelineState.MASTERED, PipelineState.RENDERED):
+            self._transition_to(PipelineState.FX_APPLIED)
+        self._auto_save()
+        self._dirty = True
+        return result
 
     def get_fx_chain(self, track_index: int) -> list[dict]:
         """Return all FX on a track."""
@@ -2998,6 +2126,132 @@ class MixingEngine:
     def add_master_fx(self, fx_name: str) -> int:
         """Add an effect plugin to the master track. Returns FX index."""
         return self._fx.add_master(fx_name)
+
+    def _check_cache_validity(self, track_idx: int, fx_idx: int) -> bool:
+        """检查缓存的 FX 参数是否仍然有效。
+
+        通过比较 REAPER 中实际的参数值与缓存值来检测外部修改。
+        当用户在 REAPER 界面中手动调整了参数时，缓存将变为过时。
+
+        使用 :meth:`hermes_core.fx.FxManager.get_param_list` 读取 REAPER
+        当前的归一化参数值，与引擎中最后一次写入的缓存值逐项比对。
+
+        Args:
+            track_idx: 轨道索引（-1 表示 Master 轨道）
+            fx_idx: FX 插件索引
+
+        Returns:
+            True 表示缓存仍然有效，False 表示检测到外部修改
+        """
+        # 1. 读取 REAPER 中当前的实际参数值
+        try:
+            actual_params = self._fx.get_param_list(track_idx, fx_idx)
+        except Exception as exc:
+            log.debug("_check_cache_validity: failed to read params — %s", exc)
+            return False
+
+        if not actual_params:
+            # 无参数可读，视为有效（插件可能没有暴露参数）
+            return True
+
+        # 2. 获取缓存的参数值
+        # 优先从 DAG 节点中查找匹配的缓存
+        cached_params: dict[str, float] | None = None
+        all_nodes = self._vocal_chain_nodes + self._backing_chain_nodes
+        for node in all_nodes:
+            node_track = node.params.get("_track_idx") if isinstance(node.params, dict) else None
+            node_fx = node.params.get("_fx_idx") if isinstance(node.params, dict) else None
+            if node_track == track_idx and node_fx == fx_idx:
+                cached_params = {k: v for k, v in node.params.items()
+                                if not k.startswith("_")}
+                break
+
+        if cached_params is None:
+            # 尝试 _last_eq_params（EQ 专用缓存）
+            cached_params = getattr(self, "_last_eq_params", None)
+
+        if not cached_params:
+            log.debug(
+                "_check_cache_validity: no cached params for track %d fx %d",
+                track_idx, fx_idx,
+            )
+            return True  # 无缓存则无比较基准，视为有效
+
+        # 3. 构建 REAPER 实际值查找表（按参数名索引）
+        actual_by_name: dict[str, float] = {}
+        for p in actual_params:
+            name = p.get("name", "")
+            if name:
+                actual_by_name[name.lower()] = float(p.get("value", 0.0))
+
+        # 4. 逐项比对缓存值与 REAPER 实际值
+        mismatch_count = 0
+        compared_count = 0
+        for param_name, cached_value in cached_params.items():
+            if param_name.startswith("_"):
+                continue  # 跳过元数据字段
+            actual_value = actual_by_name.get(param_name.lower())
+            if actual_value is None:
+                continue  # REAPER 中没有对应名称的参数，跳过
+            compared_count += 1
+            # 浮点比较，容差 0.005（归一化值域 0.0–1.0，约 0.5% 差异）
+            if abs(actual_value - float(cached_value)) > 0.005:
+                mismatch_count += 1
+                log.debug(
+                    "_check_cache_validity: mismatch on '%s' — "
+                    "cached=%.4f actual=%.4f (delta=%.4f)",
+                    param_name, float(cached_value), actual_value,
+                    abs(actual_value - float(cached_value)),
+                )
+
+        if mismatch_count > 0:
+            log.warning(
+                "_check_cache_validity: track %d fx %d — %d/%d params mismatch "
+                "(external modification detected)",
+                track_idx, fx_idx, mismatch_count, compared_count,
+            )
+            return False
+
+        return True
+
+    def check_all_fx_cache(self) -> dict[str, bool]:
+        """检查所有轨道的所有 FX 缓存有效性。
+
+        遍历所有已缓存的 FX 参数，逐一与 REAPER 实际值比对，
+        返回每个 FX 位置的缓存状态字典。
+
+        Returns:
+            ``{"track{N}_fx{M}": True/False, ...}`` 字典，
+            True 表示缓存有效，False 表示检测到外部修改
+        """
+        result: dict[str, bool] = {}
+        api = self._bridge.api
+        n_tracks = api.CountTracks(0)
+
+        # 检查 Master 轨道 (index=-1)
+        master_ptr = api.GetMasterTrack(0)
+        if master_ptr:
+            n_fx = api.TrackFX_GetCount(master_ptr)
+            for fx_idx in range(n_fx):
+                key = f"track-1_fx{fx_idx}"
+                result[key] = self._check_cache_validity(-1, fx_idx)
+
+        for track_idx in range(n_tracks):
+            track_ptr = api.GetTrack(0, track_idx)
+            if not track_ptr:
+                continue
+            n_fx = api.TrackFX_GetCount(track_ptr)
+            for fx_idx in range(n_fx):
+                key = f"track{track_idx}_fx{fx_idx}"
+                result[key] = self._check_cache_validity(track_idx, fx_idx)
+
+        total = len(result)
+        valid = sum(1 for v in result.values() if v)
+        log.info(
+            "check_all_fx_cache: %d/%d FX positions valid",
+            valid, total,
+        )
+        return result
 
     # ── Scene 5: Bus & sends ─────────────────────────────
 
@@ -3018,6 +2272,9 @@ class MixingEngine:
 
         Returns {aux_index, send, fx_index, abbey_eq_index}.
         """
+        self._require_state(PipelineState.CREATED, PipelineState.FX_APPLIED,
+                            PipelineState.SPATIAL_APPLIED)
+
         aux_idx = self._tracks.create(name="Verb Return")
 
         # Abbey Road safety EQ — de-mud + de-ess the reverb input
@@ -3031,6 +2288,8 @@ class MixingEngine:
             src=src_track, dest=aux_idx, level_db=level_db, mode=mode
         )
 
+        self._transition_to(PipelineState.SPATIAL_APPLIED)
+        self._dirty = True
         return {
             "aux_index": aux_idx,
             "send": send_info,
@@ -3038,8 +2297,7 @@ class MixingEngine:
             "abbey_eq_index": abbey_eq_idx,
         }
 
-    @staticmethod
-    def _apply_abbey_road_eq(aux_track: int, eq_fx_idx: int) -> None:
+    def _apply_abbey_road_eq(self, aux_track: int, eq_fx_idx: int) -> None:
         """Configure ReaEQ as an Abbey Road safety filter.
 
         Band 1: HPF @ 600 Hz (removes low-end mud from reverb).
@@ -3048,16 +2306,46 @@ class MixingEngine:
         These parameters are **not exposed to the Agent** — they are
         an engine-level safeguard applied automatically to every
         reverb send.
+
+        ReaEQ 参数（来自 PLUGIN_REGISTRY 的 normalize.py 条目）：
+        - Band n Freq:   20–20000 Hz, linear
+        - Band n Gain:   -24–24 dB, linear
+        - Band n Q:      0.01–10, linear
+        - Band n Type:   0=HP, 1=Low Shelf, 2=Bell, 3=High Shelf, 4=LP
+        - Band n Enabled: 0=off, 1=on
         """
-        # ReaEQ band types: 0=low-shelf, 1=band, 2=high-shelf, 3=LPF, 4=HPF, …
-        # We set these via normalised values.  Without a registered param
-        # map for ReaEQ, we use raw parameter indices discovered at runtime.
-        # For now the intent is captured; full mapping requires ReaEQ
-        # parameter discovery (see _apply_eq_baseline note).
-        log.debug(
-            "Abbey Road EQ intent: HPF@600Hz + LPF@10kHz on aux %d slot %d",
-            aux_track, eq_fx_idx,
-        )
+        # 使用 normalize_params 写入归一化的 ReaEQ 参数
+        physical = {
+            # Band 1: HPF @ 600 Hz
+            "Band 1 Type":    0.0,       # HPF
+            "Band 1 Freq":    600.0,     # Hz
+            "Band 1 Gain":    0.0,       # 不适用（HPF 无增益）
+            "Band 1 Q":       0.7,       # 标准 12dB/oct 斜率
+            "Band 1 Enabled": 1.0,
+            # Band 2: LPF @ 10 kHz
+            "Band 2 Type":    4.0,       # LPF
+            "Band 2 Freq":    10000.0,   # Hz
+            "Band 2 Gain":    0.0,
+            "Band 2 Q":       0.7,
+            "Band 2 Enabled": 1.0,
+            # Band 3-4: 不启用
+            "Band 3 Enabled": 0.0,
+            "Band 4 Enabled": 0.0,
+        }
+        try:
+            normalized = normalize_params("ReaEQ (Cockos)", physical)
+            for pname, pval in normalized.items():
+                self._fx.set_param(aux_track, eq_fx_idx, pname, pval)
+            log.debug(
+                "Abbey Road EQ applied: HPF@600Hz + LPF@10kHz on aux %d slot %d",
+                aux_track, eq_fx_idx,
+            )
+        except Exception as exc:
+            log.warning(
+                "Abbey Road EQ failed on aux %d slot %d: %s — "
+                "reverb may have excess mud/sibilance",
+                aux_track, eq_fx_idx, exc,
+            )
 
     # ── 空间效果器链 ──────────────────────────────────────────
 
@@ -3403,7 +2691,7 @@ class MixingEngine:
                                "gain_db": 0.0, "q": 0.71, "reason": "CLA HPF 200Hz"}],
                     "spectral_tilt": "neutral", "mud_detected": False,
                 }
-                from hermes_core.engine import _apply_proq3_eq  # noqa: F811
+                from hermes_core.eq_engine import _apply_proq3_eq  # noqa: F811
                 try:
                     normed = _apply_proq3_eq(hpf_intent)
                     for pn, pv in normed.items():
@@ -3452,7 +2740,7 @@ class MixingEngine:
             # Pro-Q 3 HPF 250Hz
             eq_idx = self._fx.add(aux, "FabFilter Pro-Q 3")
             if eq_idx >= 0:
-                from hermes_core.engine import _apply_proq3_eq
+                from hermes_core.eq_engine import _apply_proq3_eq
                 try:
                     hpf_intent = {
                         "bands": [{"band_type": "hp", "freq_hz": 250,
@@ -3531,7 +2819,7 @@ class MixingEngine:
             eq_idx = self._fx.add(aux, "FabFilter Pro-Q 3")
             hpf_hz = 180 if "plate_1" in ps["key"] or "plate_3" in ps["key"] else 250
             if eq_idx >= 0:
-                from hermes_core.engine import _apply_proq3_eq
+                from hermes_core.eq_engine import _apply_proq3_eq
                 try:
                     hpf_intent = {
                         "bands": [{"band_type": "hp", "freq_hz": hpf_hz,
@@ -3667,7 +2955,7 @@ class MixingEngine:
         l_aux = self._tracks.create(name="DT L Delay")
         l_eq = self._fx.add(l_aux, "FabFilter Pro-Q 3")
         if l_eq >= 0:
-            from hermes_core.engine import _apply_proq3_eq
+            from hermes_core.eq_engine import _apply_proq3_eq
             try:
                 intent = {
                     "bands": [{"band_type": "hp", "freq_hz": 400,
@@ -3697,7 +2985,7 @@ class MixingEngine:
         r_aux = self._tracks.create(name="DT R Delay")
         r_eq = self._fx.add(r_aux, "FabFilter Pro-Q 3")
         if r_eq >= 0:
-            from hermes_core.engine import _apply_proq3_eq
+            from hermes_core.eq_engine import _apply_proq3_eq
             try:
                 intent = {
                     "bands": [{"band_type": "hp", "freq_hz": 400,
@@ -3726,7 +3014,7 @@ class MixingEngine:
         g_aux = self._tracks.create(name="DT Glue Verb")
         g_eq = self._fx.add(g_aux, "FabFilter Pro-Q 3")
         if g_eq >= 0:
-            from hermes_core.engine import _apply_proq3_eq
+            from hermes_core.eq_engine import _apply_proq3_eq
             try:
                 intent = {
                     "bands": [{"band_type": "hp", "freq_hz": 400,
@@ -3786,11 +3074,17 @@ class MixingEngine:
                    fmt: str = "wav",
                    sample_rate: int = 0,
                    verify: bool = True,
-                   timeout: float = 120.0) -> dict:
+                   timeout: float = 120.0,
+                   _internal: bool = False) -> dict:
         """Render project and optionally run signal analysis.
 
         Returns {output_path, signal_check, ...}.
         """
+        # 仅公开调用时执行状态检查（内部探测渲染跳过）
+        if not _internal:
+            self._require_state(PipelineState.CREATED, PipelineState.MASTERED,
+                                PipelineState.RENDERED)
+
         result = self._render.render_mix(
             output_dir=output_dir,
             bounds=bounds,
@@ -3798,6 +3092,9 @@ class MixingEngine:
             sample_rate=sample_rate,
             timeout=timeout,
         )
+
+        if not _internal and result.get("output_path"):
+            self._transition_to(PipelineState.RENDERED)
 
         if verify and result.get("output_path"):
             try:
@@ -3919,16 +3216,21 @@ class MixingEngine:
             )
         self._ensure_project_match()
 
-        def _do_finalize():
-            return self._finalize_master_impl(
-                target_lufs, limiter_fx=limiter_fx, ceiling_db=ceiling_db,
-                tolerance=tolerance, tmp_dir=tmp_dir,
-                on_progress=on_progress,
-            )
-
-        result = self._undo_block("Finalize Master", _do_finalize)
+        # 委托给 MasteringEngine
+        self._mastering._on_progress = on_progress
+        result = self._undo_block(
+            "Finalize Master",
+            lambda: self._mastering.finalize(
+                target_lufs,
+                limiter_fx=limiter_fx,
+                ceiling_db=ceiling_db,
+                tolerance=tolerance,
+                tmp_dir=tmp_dir,
+            ),
+        )
         if result.get("passed"):
             self._master_finalized = True
+        self._transition_to(PipelineState.MASTERED)
         self._mark_stage("finalize_master")
         return result
 
@@ -3977,7 +3279,7 @@ class MixingEngine:
 
         # 2. Probe render
         _progress("probe_render", 0.15)
-        probe_result = self.render_mix(probe_dir, verify=True)
+        probe_result = self.render_mix(probe_dir, verify=True, _internal=True)
         probe_sc = probe_result.get("signal_check", {})
         pre_peak = probe_sc.get("peak_db", 0.0)
         if probe_result.get("output_path") is None:
@@ -4011,7 +3313,7 @@ class MixingEngine:
                 target_lufs, ceiling_db,
                 "Pro-L 2 Gain param not found during final render",
             )
-        final_result = self.render_mix(final_dir, verify=True)
+        final_result = self.render_mix(final_dir, verify=True, _internal=True)
         output_path = final_result.get("output_path")
 
         # 5. Verify
@@ -4152,7 +3454,7 @@ class MixingEngine:
 
         try:
             dry_result = self.render_mix(
-                os.path.join(tmp, "dry"), verify=False,
+                os.path.join(tmp, "dry"), verify=False, _internal=True,
             )
         finally:
             for idx, mute_val in saved_mute.items():

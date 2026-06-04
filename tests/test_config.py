@@ -17,7 +17,7 @@ class TestHermesConfig:
     def test_default_values(self):
         """默认值符合预期。"""
         cfg = HermesConfig()
-        assert cfg.project_root == "~/REAPER 工程文件"
+        assert cfg.project_root == "~/REAPER_Projects"
         assert cfg.default_sample_rate == 48000
         assert cfg.default_genre == "pop"
         assert cfg.auto_save_prompt is True
@@ -86,6 +86,6 @@ class TestHermesConfig:
             fake_path = fake_dir / "config.json"
             with patch("hermes_core.config._config_path", return_value=fake_path):
                 cfg = HermesConfig.load()
-                assert cfg.project_root == "~/REAPER 工程文件"
+                assert cfg.project_root == "~/REAPER_Projects"
                 # 验证自动创建了目录和默认文件
                 assert fake_path.exists()

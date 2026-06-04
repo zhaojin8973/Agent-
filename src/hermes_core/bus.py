@@ -48,6 +48,9 @@ class BusManager:
         The bus is inserted just before the first child. Returns the bus track index.
         Children must be adjacent and in order — this method sets folder depth flags
         but does NOT reorder tracks.
+
+        同时设置 VCA 分组：bus track 为 VCA Master，子轨道为 VCA Slave，
+        使用 ReaScript API ``GetSetTrackGroupMembership`` 配置。
         """
         api = self._bridge.api
         num = api.CountTracks(0)
@@ -86,6 +89,55 @@ class BusManager:
         last_tr = api.GetTrack(0, last_idx)
         if last_tr:
             api.SetMediaTrackInfo_Value(last_tr, "I_FOLDERDEPTH", -1)
+
+        # ── VCA 分组 ──────────────────────────────────────────
+        # 使用 GetSetTrackGroupMembership 设置 VCA Master/Slave 关系。
+        # group_low 是 32 位位掩码，bit 0 = group 1, bit 31 = group 32。
+        # group_high 对应 group 33-64。
+        # 组号使用 insert_at + 1（1-indexed），限制在 1-64 范围内。
+        vca_group = min(insert_at + 1, 64)
+        try:
+            if hasattr(api, "GetSetTrackGroupMembership"):
+                # 计算位掩码：group_low 对应 group 1-32
+                if vca_group <= 32:
+                    group_mask_low = 1 << (vca_group - 1)
+                    group_mask_high = 0
+                else:
+                    group_mask_low = 0
+                    group_mask_high = 1 << (vca_group - 33)
+
+                # Bus track = VCA Master
+                api.GetSetTrackGroupMembership(
+                    bus_tr, "VOLUME_VCA_MASTER",
+                    group_mask_high, group_mask_low,
+                    group_mask_high, group_mask_low,
+                )
+
+                # 子轨道 = VCA Slave
+                for child_idx in shifted:
+                    child_tr = api.GetTrack(0, child_idx)
+                    if child_tr:
+                        api.GetSetTrackGroupMembership(
+                            child_tr, "VOLUME_VCA_SLAVE",
+                            group_mask_high, group_mask_low,
+                            group_mask_high, group_mask_low,
+                        )
+
+                log.info(
+                    "VCA group %d: bus '%s' (master) + %d children (slaves)",
+                    vca_group, name, len(shifted),
+                )
+            else:
+                log.debug(
+                    "VCA API not available (GetSetTrackGroupMembership missing) "
+                    "— folder bus '%s' created without VCA grouping", name,
+                )
+        except Exception as exc:
+            log.debug(
+                "VCA group setup failed for bus '%s': %s — "
+                "folder bus works without VCA grouping",
+                name, exc,
+            )
 
         log.info("Bus '%s' created at %d with %d children", name, insert_at, len(shifted))
         return insert_at

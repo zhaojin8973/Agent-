@@ -278,12 +278,12 @@ def generate_report(
 ) -> str:
     """Human-readable mastering loudness report."""
     lines = [
-        "═" * 50,
+        "=" * 50,
         "  Mastering Loudness Report",
-        "═" * 50,
+        "=" * 50,
         f"  Probe LUFS       : {result.probe_lufs} LUFS",
         f"  Target LUFS      : -12.0 LUFS",
-        f"  ─" * 25,
+        f"  " + chr(0x2500) * 25,
         f"  Optimal Gain     : {result.gain_db:+.2f} dB",
         f"  Predicted LUFS   : {result.predicted_lufs} LUFS",
         f"  Search iters     : {result.iterations}",
@@ -292,7 +292,7 @@ def generate_report(
     ]
     if verify:
         lines += [
-            f"  ─" * 25,
+            f"  " + chr(0x2500) * 25,
             f"  Actual LUFS      : {verify.actual_lufs} LUFS",
             f"  Deviation        : {verify.deviation:+.2f} LUFS",
             f"  Status           : {'PASS' if verify.passed else 'NEEDS CORRECTION'}",
@@ -301,5 +301,44 @@ def generate_report(
             lines.append(
                 f"  Suggested fix    : {verify.suggested_correction:+.2f} dB",
             )
-    lines.append("═" * 50)
+    lines.append("=" * 50)
     return "\n".join(lines)
+
+
+# ── ITU-R BS.1770-4 集成响度计算（完整实现）───────────────────
+
+
+def calculate_lufs_bs1770_4(
+    pcm: np.ndarray,
+    sample_rate: int,
+    channel_weights: list[float] | None = None,
+) -> float:
+    """ITU-R BS.1770-4 集成响度计算。
+
+    与 ``pyloudnorm`` 的 K-weighting（一阶近似）不同，此函数实现了
+    完整的 ITU-R BS.1770-4 规范：
+
+    1. **K-weighting 滤波器**：二阶 RLB 高通 + 一阶预加重高通
+    2. **声道加权求和**：前置声道权重 1.0，环绕声道权重 1.41 (+1.5 dB)
+    3. **门限均值**：-70 LKFS 绝对门限 + -10 LU 相对门限
+
+    Args:
+        pcm: 音频数据，shape (samples, channels) 或 (samples,)
+        sample_rate: 采样率 (Hz)
+        channel_weights: 每声道权重列表。为 None 时自动分配
+            （前 3 声道为前置权重 1.0，之后为环绕权重 1.41）
+
+    Returns:
+        集成 LUFS 值（float）
+
+    Examples:
+        >>> import numpy as np
+        >>> sr = 48000
+        >>> pcm = np.random.normal(0, 0.1, (sr * 2, 2))  # 2 秒立体声
+        >>> lufs = calculate_lufs_bs1770_4(pcm, sr)
+        >>> print(f"{lufs:.1f} LUFS")
+    """
+    from hermes_core.signal import SignalAnalyzer
+    return SignalAnalyzer._compute_lufs_bs1770_4(
+        pcm, sample_rate, channel_weights=channel_weights,
+    )
