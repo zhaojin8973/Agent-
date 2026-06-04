@@ -253,3 +253,49 @@ def _register_pcm_temp(path: str | Path) -> Path:
             _pcm_temp_files.append(path_str)
             log.debug("注册 PCM 临时文件: %s", path_str)
     return Path(path_str)
+
+
+# ════════════════════════════════════════════════════════════════
+# numpy 干/湿混音
+# ════════════════════════════════════════════════════════════════
+
+
+def numpy_mix(dry_path: str, wet_path: str,
+              wet_level_db: float, output_path: str) -> str | None:
+    """用 numpy 混合干声和湿声 WAV 文件，对湿声施加 *wet_level_db* dB 增益。
+
+    纯 Python / numpy 实现 — 不依赖 REAPER。返回 *output_path* 或 None（出错时）。
+    """
+    try:
+        dry, sr = sf.read(dry_path, dtype="float64")
+        wet, sr_w = sf.read(wet_path, dtype="float64")
+    except Exception as exc:
+        log.warning("[numpy-mix] 读取错误: %s", exc)
+        return None
+
+    # 匹配采样率和长度
+    if sr != sr_w:
+        log.warning("[numpy-mix] 采样率不匹配 dry=%d wet=%d", sr, sr_w)
+        return None
+
+    min_len = min(len(dry), len(wet))
+    dry = dry[:min_len]
+    wet = wet[:min_len]
+
+    # 确保 2-D
+    if dry.ndim == 1:
+        dry = dry.reshape(-1, 1)
+    if wet.ndim == 1:
+        wet = wet.reshape(-1, 1)
+
+    # 广播到相同声道数
+    if dry.shape[1] != wet.shape[1]:
+        nch = min(dry.shape[1], wet.shape[1])
+        dry = dry[:, :nch]
+        wet = wet[:, :nch]
+
+    wet_gain = 10.0 ** (wet_level_db / 20.0)
+    mix = dry + wet * wet_gain
+
+    sf.write(output_path, mix, sr, subtype="FLOAT")
+    return output_path

@@ -59,6 +59,8 @@ from hermes_core.gain_staging import GainStagingEngine
 from hermes_core.mastering import MasteringEngine, _get_genre_target_lufs
 from hermes_core.backing import BackingProcessor
 from hermes_core.reference import ReferenceMatcher, ReferenceProfile
+from hermes_core.master_templates import apply_master_template, AVAILABLE_TEMPLATES
+from hermes_core.chain_renderer import execute_chain, _make_chain_executor
 
 # ── 预览与进度 ─────────────────────────────────────────────────
 from hermes_core.preview import PreviewRenderer, PreviewResult  # noqa: F811
@@ -160,6 +162,10 @@ __all__ = [
     "BackingProcessor",
     "ReferenceMatcher",
     "ReferenceProfile",
+    "apply_master_template",
+    "AVAILABLE_TEMPLATES",
+    "execute_chain",
+    "_make_chain_executor",
     # Preview & Progress
     "PreviewRenderer",
     "PreviewResult",
