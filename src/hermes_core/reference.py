@@ -54,15 +54,14 @@ class ReferenceMatcher:
     def analyze(self, path: str) -> ReferenceProfile:
         """分析参考曲目，提取频谱和响度特征。
 
-        在完整实现中，此方法会读取音频文件并计算所有频谱和响度
-        指标。当前框架版本为不支持真实音频分析的场景提供占位实现。
+        使用 pyloudnorm 计算集成/短时 LUFS，numpy FFT 分析频谱倾斜、
+        低频平衡和临场感频段，scipy 4x 过采样估算真峰值。
 
         Args:
-            path: 参考曲目的文件路径。
+            path: 参考曲目的文件路径（WAV/FLAC/MP3）。
 
         Returns:
-            ReferenceProfile: 包含分析结果的数据对象。
-            对于无法读取的文件返回 duration_sec=0 的默认 profile。
+            ReferenceProfile: 包含完整频谱和响度分析的数据对象。
 
         Raises:
             FileNotFoundError: 当文件路径不存在时。
@@ -72,25 +71,127 @@ class ReferenceMatcher:
             raise FileNotFoundError(f"参考曲目文件不存在: {path}")
 
         profile = ReferenceProfile(path=path)
-        try:
-            # 尝试用 wave 模块获取基础信息
-            import wave
-            with wave.open(path, "rb") as wf:
-                n_frames = wf.getnframes()
-                sample_rate = wf.getframerate()
-                if sample_rate > 0:
-                    profile.duration_sec = n_frames / sample_rate
-                n_channels = wf.getnchannels()
-                log.debug(
-                    "参考曲目 %s: %d 声道, %d Hz, %.1f 秒",
-                    path, n_channels, sample_rate, profile.duration_sec,
-                )
-        except (wave.Error, EOFError, OSError):
-            # 不是标准 WAV 文件，使用占位值
-            log.debug("无法用 wave 模块解析 %s，使用占位数据", path)
-            profile.duration_sec = 0.0
 
-        # 占位频谱特征（完整实现中由 pyloudnorm + numpy 计算）
+        # 尝试读取音频数据
+        try:
+            import soundfile as sf
+            data, sample_rate = sf.read(path, dtype="float64")
+            if data.ndim == 1:
+                data = data.reshape(-1, 1)
+            n_channels = data.shape[1]
+            profile.duration_sec = len(data) / sample_rate
+            log.debug("参考曲目 %s: %d声道 %dHz %.1fs", path, n_channels, sample_rate, profile.duration_sec)
+        except Exception as exc:
+            log.warning("无法读取音频文件 %s: %s，使用占位数据", path, exc)
+            profile.duration_sec = 0.0
+            self._fill_placeholder(profile, path)
+            return profile
+
+        # ── 响度分析（pyloudnorm）───────────────────────────
+        try:
+            import pyloudnorm as pyln
+            import numpy as np
+
+            # 下混到单声道用于 LUFS 测量
+            mono = np.mean(data, axis=1)
+
+            # 集成 LUFS
+            meter = pyln.Meter(sample_rate)
+            profile.integrated_lufs = float(meter.integrated_loudness(mono))
+
+            # 短时 LUFS（取最后 3 秒，模拟曲尾响度）
+            st_window = int(sample_rate * 3.0)
+            if len(mono) > st_window:
+                st = mono[-st_window:]
+                profile.short_term_lufs = float(meter.integrated_loudness(st))
+            else:
+                profile.short_term_lufs = profile.integrated_lufs
+        except Exception as exc:
+            log.warning("LUFS 分析失败: %s", exc)
+            profile.integrated_lufs = -14.0
+            profile.short_term_lufs = -12.0
+
+        # ── 真峰值（scipy 4x 过采样）─────────────────────────
+        try:
+            from scipy import signal
+            peak_linear = 0.0
+            for ch in range(n_channels):
+                ch_data = data[:, ch]
+                upsampled = signal.resample_poly(ch_data, 4, 1)
+                ch_peak = np.max(np.abs(upsampled))
+                peak_linear = max(peak_linear, ch_peak)
+            profile.true_peak_db = float(20.0 * np.log10(max(peak_linear, 1e-12)))
+        except Exception:
+            # scipy 不可用，回退到采样峰值
+            profile.true_peak_db = float(20.0 * np.log10(max(np.max(np.abs(data)), 1e-12)))
+
+        # ── 频谱分析（numpy FFT）────────────────────────────
+        try:
+            # 对每个声道做 FFT，取平均幅度谱
+            n_fft = 8192
+            hop = n_fft // 2
+            n_frames = (len(data) - n_fft) // hop + 1
+            if n_frames < 1:
+                n_frames = 1
+
+            avg_mag = np.zeros(n_fft // 2 + 1)
+            for ch in range(n_channels):
+                ch_data = data[:, ch]
+                for f in range(min(n_frames, 50)):  # 采样前 50 帧
+                    start = f * hop
+                    frame = ch_data[start:start + n_fft] * np.hanning(n_fft)
+                    mag = np.abs(np.fft.rfft(frame))
+                    avg_mag += mag
+            avg_mag /= max(n_channels * min(n_frames, 50), 1)
+
+            freqs = np.fft.rfftfreq(n_fft, 1.0 / sample_rate)
+            mag_db = 20.0 * np.log10(np.maximum(avg_mag, 1e-12))
+
+            # 频谱倾斜: 100Hz-10kHz 范围内 dB/octave 线性拟合
+            tilt_mask = (freqs >= 100) & (freqs <= 10000)
+            if np.sum(tilt_mask) > 10:
+                log_freqs = np.log2(np.maximum(freqs[tilt_mask], 1.0))
+                tilt_db = mag_db[tilt_mask]
+                slope, _ = np.polyfit(log_freqs, tilt_db, 1)
+                profile.spectral_tilt_db = float(slope)
+            else:
+                profile.spectral_tilt_db = -2.0
+
+            # 低频/中频平衡: 100-500Hz vs 500-2000Hz
+            low_mask = (freqs >= 100) & (freqs < 500)
+            mid_mask = (freqs >= 500) & (freqs < 2000)
+            low_db = float(np.mean(mag_db[low_mask])) if np.any(low_mask) else -40.0
+            mid_db = float(np.mean(mag_db[mid_mask])) if np.any(mid_mask) else -40.0
+            profile.low_mid_balance_db = float(round(low_db - mid_db, 1))
+
+            # 临场感频段: 2kHz-5kHz 平均值相对于全频段均值的偏差
+            presence_mask = (freqs >= 2000) & (freqs <= 5000)
+            all_mask = (freqs >= 100) & (freqs <= 15000)
+            presence_db = float(np.mean(mag_db[presence_mask])) if np.any(presence_mask) else -40.0
+            all_db = float(np.mean(mag_db[all_mask])) if np.any(all_mask) else -40.0
+            profile.presence_band_db = float(round(presence_db - all_db, 1))
+        except Exception as exc:
+            log.warning("频谱分析失败: %s", exc)
+            profile.spectral_tilt_db = -2.0
+            profile.low_mid_balance_db = 0.0
+            profile.presence_band_db = -3.0
+
+        # ── 动态范围（PLR: Peak-to-Loudness Ratio）───────────
+        if profile.integrated_lufs is not None:
+            peak_db = float(20.0 * np.log10(max(np.max(np.abs(data)), 1e-12)))
+            profile.dynamic_range_db = float(round(peak_db - profile.integrated_lufs, 1))
+        else:
+            profile.dynamic_range_db = 10.0
+
+        self._references[path] = profile
+        log.info(
+            "已分析参考曲目: %s LUFS=%.1f Tilt=%.1fdB DR=%.1fdB",
+            path, profile.integrated_lufs, profile.spectral_tilt_db, profile.dynamic_range_db,
+        )
+        return profile
+
+    def _fill_placeholder(self, profile: ReferenceProfile, path: str) -> None:
+        """无法读取音频文件时填充占位值。"""
         profile.integrated_lufs = -14.0
         profile.short_term_lufs = -12.0
         profile.true_peak_db = -1.0
@@ -98,10 +199,7 @@ class ReferenceMatcher:
         profile.low_mid_balance_db = 0.0
         profile.presence_band_db = -3.0
         profile.dynamic_range_db = 10.0
-
         self._references[path] = profile
-        log.info("已分析参考曲目: %s (LUFS: %.1f)", path, profile.integrated_lufs)
-        return profile
 
     # ── 匹配参数生成 ──────────────────────────────────────────
 

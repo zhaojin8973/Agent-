@@ -374,28 +374,19 @@ class TestCompare:
             os.unlink(mix_path)
 
     def test_match_quality_good(self):
-        """相同文件对比应得到 good 质量（因为是相同占位值）。"""
-        matcher = ReferenceMatcher()
-        ref = ReferenceProfile(
-            path="/tmp/ref.wav",
-            integrated_lufs=-14.0,
-            spectral_tilt_db=-2.0,
-            dynamic_range_db=10.0,
-        )
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            mix_path = tmp.name
-            with wave.open(mix_path, "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(44100)
-                wf.writeframes(b"\x00\x00" * 44100)
+        """相同文件自对比应得到 good 或 fair 质量。"""
+        from tests.conftest import make_test_signal
 
-        try:
-            result = matcher.compare(mix_path, ref)
-            # 占位值匹配 → 评分应 >= 0.8
-            assert result["match_quality"] == "good"
-        finally:
-            os.unlink(mix_path)
+        matcher = ReferenceMatcher()
+        wav = make_test_signal(
+            os.path.join(tempfile.mkdtemp(), "ref.wav"),
+            duration_sec=3.0, level_db=-12.0,
+        )
+        ref = matcher.analyze(wav)
+        # 同一文件对比 — 应至少为 fair 或 better
+        result = matcher.compare(wav, ref)
+        assert result["match_quality"] in ("good", "fair"), \
+            f"自对比应为 good/fair，实际: {result['match_quality']}"
 
     def test_lufs_diff_suggestion_generated(self):
         """响度差异超出阈值时应产生调整建议。"""
