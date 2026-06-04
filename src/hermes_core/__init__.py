@@ -61,6 +61,10 @@ from hermes_core.backing import BackingProcessor
 from hermes_core.reference import ReferenceMatcher, ReferenceProfile
 from hermes_core.master_templates import apply_master_template, AVAILABLE_TEMPLATES
 from hermes_core.chain_renderer import execute_chain, _make_chain_executor
+from hermes_core.automation import (
+    SectionDef, AutomationIntent, TrackAutomation,
+    AutomationManager, make_pop_song_structure,
+)
 
 # ── 预览与进度 ─────────────────────────────────────────────────
 from hermes_core.preview import PreviewRenderer, PreviewResult  # noqa: F811
@@ -186,4 +190,10 @@ __all__ = [
     "WindowsDialogHandler",
     "LinuxDialogHandler",
     "create_dialog_handler",
+    # Automation
+    "SectionDef",
+    "AutomationIntent",
+    "TrackAutomation",
+    "AutomationManager",
+    "make_pop_song_structure",
 ]

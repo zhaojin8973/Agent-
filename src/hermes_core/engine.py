@@ -2960,3 +2960,44 @@ class MixingEngine:
         log.info("Generated calibration signal: %s (%.1fs, -18 dBFS RMS)",
                  out_path, duration)
         return out_path
+
+    # ── 段落自动化 ────────────────────────────────────────────
+
+    def apply_section_automation(
+        self,
+        sections: list,
+        intents: list,
+        use_presets: bool = False,
+        param_kinds: list[str] | None = None,
+    ) -> dict:
+        """应用段落差异化参数自动化。
+
+        为不同歌曲段落（主歌/副歌/桥段等）设置差异化的混音参数，
+        通过 REAPER 自动化包络写入。
+
+        Parameters
+        ----------
+        sections : list[SectionDef]
+            歌曲段落结构（按时间顺序）。
+        intents : list[AutomationIntent]
+            显式参数自动化意图。与 *use_presets* 互斥。
+        use_presets : bool
+            是否使用内置段落参数预设。为 True 时忽略 *intents*。
+        param_kinds : list[str] | None
+            使用预设时的参数类型列表。
+            None 表示全部：comp_ratio, eq_presence, reverb_level, threshold。
+
+        Returns
+        -------
+        dict
+            ``{written: int, skipped: int, errors: list[str]}``
+        """
+        from hermes_core.automation import AutomationManager
+        mgr = AutomationManager(self)
+
+        if use_presets:
+            # 使用第一个 intent 的 track_idx，或默认 0
+            track_idx = intents[0].track_idx if intents else 0
+            return mgr.apply_preset(sections, track_idx, param_kinds)
+
+        return mgr.apply(sections, intents)
