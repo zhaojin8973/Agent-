@@ -110,10 +110,10 @@ _AS_INSPECT = """
 tell application "System Events"
     tell process "REAPER"
         set output to ""
+        -- 检查独立窗口
         repeat with w in windows
             set winName to name of w
             if (winName does not contain "REAPER v") and (winName is not "") then
-                -- Skip REAPER floating tool windows (not modal dialogs)
                 if (winName does not start with "FX:") and ¬
                    (winName does not start with "Routing") and ¬
                    (winName does not contain "Track Manager") and ¬
@@ -138,6 +138,24 @@ tell application "System Events"
                     set output to output & winName & ":::" & buttonList & ";;;"
                 end if
             end if
+            -- 检查该窗口上的 Sheet（模态面板）
+            try
+                repeat with s in sheets of w
+                    set sheetName to name of s
+                    if sheetName is not "" then
+                        set buttonList to ""
+                        try
+                            repeat with b in buttons of s
+                                set btnName to name of b
+                                if btnName is not "" then
+                                    set buttonList to buttonList & btnName & "|"
+                                end if
+                            end repeat
+                        end try
+                        set output to output & sheetName & ":::" & buttonList & ";;;"
+                    end if
+                end repeat
+            end try
         end repeat
         return output
     end tell
@@ -147,6 +165,7 @@ end tell
 _AS_CLICK_BUTTON = """
 tell application "System Events"
     tell process "REAPER"
+        -- 先搜独立窗口
         repeat with w in windows
             set winTitle to name of w
             if (winTitle contains "{title_fragment}") then
@@ -157,6 +176,20 @@ tell application "System Events"
                     end if
                 end repeat
             end if
+            -- 再搜该窗口的 Sheet
+            try
+                repeat with s in sheets of w
+                    set sheetTitle to name of s
+                    if (sheetTitle contains "{title_fragment}") then
+                        repeat with b in buttons of s
+                            if (name of b contains "{button_match}") then
+                                click b
+                                return "clicked:" & name of b
+                            end if
+                        end repeat
+                    end if
+                end repeat
+            end try
         end repeat
     end tell
 end tell
