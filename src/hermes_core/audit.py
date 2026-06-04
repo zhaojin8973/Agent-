@@ -97,6 +97,11 @@ class AuditLogger:
         """工程目录路径。"""
         return self._project_dir
 
+    @project_dir.setter
+    def project_dir(self, value: str | Path | None) -> None:
+        """设置工程目录路径（允许运行时切换）。"""
+        self._project_dir = Path(value) if value else None
+
     @property
     def elapsed_seconds(self) -> float:
         """从 logger 创建到现在的总耗时（秒）。"""

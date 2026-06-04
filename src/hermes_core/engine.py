@@ -156,7 +156,7 @@ class MixingEngine:
         result = eng.render_mix("/tmp/output")
     """
 
-    def __init__(self, watchdog: bool = False):
+    def __init__(self, watchdog: bool = False, audit_logger=None):
         self._bridge = ReaperBridge(dialog_killer=watchdog)
         self._tracks = TrackManager(self._bridge)
         self._bus = BusManager(self._bridge)
@@ -170,6 +170,8 @@ class MixingEngine:
         self._dirty: bool = False              # 自上次保存以来是否有修改
         self._snapshot_project_path: str | None = None  # from GetProjectPath at init
         self._snapshot_project_name: str | None = None  # from GetProjectName at init
+        self._audit = audit_logger             # 可选 AuditLogger，记录管线操作
+        self._stage_t0: float = 0.0            # 当前阶段开始时间戳（monotonic）
         # Idempotency guards — prevent double-execution of destructive ops.
         self._stems_gain_staged: bool = False
         self._master_finalized: bool = False
@@ -406,6 +408,11 @@ class MixingEngine:
                          self._reverb_send_node.name, last_vocal.name)
 
         self._mark_stage("apply_profile")
+        self._record_audit(
+            "apply_profile", {"genre": genre, "vocal_track": vocal_track},
+            f"vocal_fx={len(self._vocal_chain_nodes)} backing_fx={len(self._backing_chain_nodes)} "
+            f"reverb={self._reverb_send_node is not None}",
+        )
 
     def _build_audio_chain(
         self, track_index: int, fx_list: list,
@@ -1118,6 +1125,17 @@ class MixingEngine:
         except Exception as exc:
             log.debug("Failed to update project index: %s", exc)
 
+        # 设置审计日志的工程目录
+        if self._audit is not None:
+            self._audit.project_dir = output_dir
+
+        self._record_audit(
+            "create_project",
+            {"name": name, "sample_rate": sample_rate, "genre": genre,
+             "category": category, "producer": producer},
+            f"path={safe_path} renamed={conflict_renamed}",
+        )
+
         return {
             "name": name,
             "path": safe_path,
@@ -1154,9 +1172,43 @@ class MixingEngine:
         同时自动更新生命周期状态（规范 §二）。
         """
         self._dirty = True
+        self._stage_t0 = time.monotonic()  # 为下一阶段重置计时
         if self._meta is not None:
             self._meta.mark_stage(stage)
             self._meta.update_lifecycle()
+
+    def _record_audit(self, operation: str, params: dict,
+                      result_summary: str, duration_ms: float = 0.0,
+                      success: bool = True) -> None:
+        """记录审计条目（当 AuditLogger 已配置时）。
+
+        Parameters
+        ----------
+        operation : str
+            操作名称，如 ``"create_project"``。
+        params : dict
+            操作参数（会被防御性拷贝）。
+        result_summary : str
+            结果摘要文本。
+        duration_ms : float
+            操作耗时（毫秒）。为 0 时自动从 _stage_t0 计算。
+        success : bool
+            操作是否成功。
+        """
+        if self._audit is None:
+            return
+        if duration_ms <= 0 and self._stage_t0 > 0:
+            duration_ms = (time.monotonic() - self._stage_t0) * 1000.0
+        try:
+            self._audit.record(
+                operation=operation,
+                params=params,
+                result_summary=result_summary,
+                duration_ms=round(duration_ms, 1),
+                success=success,
+            )
+        except Exception as exc:
+            log.debug("审计记录失败（非致命）: %s", exc)
 
     @property
     def is_dirty(self) -> bool:
@@ -1635,6 +1687,14 @@ class MixingEngine:
         self._transition_to(PipelineState.STEMS_PREPARED)
         self._auto_save()
         self._mark_stage("prepare_stems")
+        stems = result.get("stems", [])
+        self._record_audit(
+            "prepare_stems",
+            {"genre": genre, "stem_count": len(stem_paths),
+             "vocal_count": len(vocal_indices) if vocal_indices else 1,
+             "backing_count": len(backing_indices) if backing_indices else 1},
+            f"imported={sum(1 for s in stems if s.get('success'))}/{len(stems)}",
+        )
         return result
 
     def _solo_render(
@@ -1843,6 +1903,12 @@ class MixingEngine:
         )
 
         self._mark_stage("post_fx_balance")
+        self._record_audit(
+            "post_fx_balance",
+            {"genre": genre, "ratio_lu": balance_info.get("ratio_lu")},
+            f"vocal={vocal_lufs}LUFS backing={backing_lufs}LUFS "
+            f"combined={combined_lufs}LUFS peak={combined_peak}dB",
+        )
         return {
             **balance_info,
             "vocal_lufs": vocal_lufs,
@@ -2994,6 +3060,19 @@ class MixingEngine:
             except (OSError, ValueError, RuntimeError) as e:
                 result["signal_check"] = {"error": str(e)}
 
+        if not _internal and result.get("output_path"):
+            sc = result.get("signal_check", {})
+            self._record_audit(
+                "render_mix",
+                {"output_dir": output_dir, "format": fmt,
+                 "sample_rate": sample_rate},
+                f"path={result['output_path']} "
+                f"lufs={sc.get('integrated_lufs')} "
+                f"duration={sc.get('duration_sec')}s "
+                f"clips={sc.get('clip_count', 0)}",
+                success=sc.get("clip_passed", True),
+            )
+
         return result
 
     # ── Scene 7: Safety audit ────────────────────────────
@@ -3114,6 +3193,15 @@ class MixingEngine:
             self._master_finalized = True
         self._transition_to(PipelineState.MASTERED)
         self._mark_stage("finalize_master")
+        self._record_audit(
+            "finalize_master",
+            {"target_lufs": target_lufs, "ceiling_db": ceiling_db,
+             "limiter": limiter_fx},
+            f"passed={result.get('passed')} "
+            f"achieved={result.get('achieved_lufs')}LUFS "
+            f"gain={result.get('gain_db')}dB",
+            success=result.get("passed", False),
+        )
         return result
 
     # ── Wet reverb caching ────────────────────────────────
