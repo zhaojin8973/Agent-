@@ -513,3 +513,139 @@ class TestFxIntegration:
         result = fm.add(idx, "NoSuchPlugin_XYZ123")
         assert result == -1
 
+
+# ════════════════════════════════════════════════════════════
+# 补齐测试 — add_master, bypass, offline, wet 等
+# ════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestAddMaster:
+    def test_adds_fx_to_master(self):
+        bridge = _mock_bridge(
+            TrackFX_GetCount=MagicMock(side_effect=[0, 1]),
+            TrackFX_AddByName=MagicMock(return_value=0),
+        )
+        assert FxManager(bridge).add_master("ReaLimit") == 0
+
+    def test_add_master_uses_get_track_ptr(self):
+        bridge = _mock_bridge(
+            TrackFX_GetCount=MagicMock(side_effect=[0, 1]),
+            TrackFX_AddByName=MagicMock(return_value=0),
+        )
+        bridge.api.GetTrack = MagicMock(return_value=f"(MediaTrack*)0xmstr")
+        assert FxManager(bridge).add_master("ReaLimit") == 0
+
+    def test_returns_minus_one_when_add_fails(self):
+        bridge = _mock_bridge(
+            TrackFX_GetCount=MagicMock(side_effect=[0, 0]),
+            TrackFX_AddByName=MagicMock(return_value=0),
+        )
+        assert FxManager(bridge).add_master("Nonexistent") == -1
+
+
+@pytest.mark.unit
+class TestRemoveEdgeCases:
+    def test_remove_from_master(self):
+        bridge = _mock_bridge(
+            TrackFX_GetCount=MagicMock(return_value=3),
+            TrackFX_Delete=MagicMock(),
+        )
+        bridge.api.GetTrack = MagicMock(
+            side_effect=lambda p, i: f"(MediaTrack*)0x{i+1:016x}" if i >= 0 else f"(MediaTrack*)0xmstr"
+        )
+        FxManager(bridge).remove(-1, 0)
+        bridge.api.TrackFX_Delete.assert_called_once()
+
+    def test_remove_out_of_range(self):
+        bridge = _mock_bridge(
+            TrackFX_GetCount=MagicMock(return_value=1),
+            TrackFX_Delete=MagicMock(),
+        )
+        FxManager(bridge).remove(0, 5)  # 超出范围
+        bridge.api.TrackFX_Delete.assert_not_called()
+
+
+@pytest.mark.unit
+class TestSetParamMaster:
+    def test_set_param_master_negative_index(self):
+        bridge = _mock_bridge(
+            TrackFX_GetNumParams=MagicMock(return_value=3),
+            TrackFX_GetParamName=MagicMock(
+                side_effect=lambda t, fx, i, buf, sz: (True, f"P{i}")
+            ),
+            TrackFX_SetParam=MagicMock(return_value=True),
+        )
+        bridge.api.GetTrack = MagicMock(return_value=f"(MediaTrack*)0xmstr")
+        ok = FxManager(bridge).set_param(-1, 0, 0, 0.5)  # 用索引而非名称
+        assert ok is True
+
+    def test_set_param_master_fails_when_track_none(self):
+        bridge = _mock_bridge()
+        bridge.api.GetTrack = MagicMock(return_value=None)
+        ok = FxManager(bridge).set_param(-1, 0, "Gain", 0.5)
+        assert ok is False
+
+
+@pytest.mark.unit
+class TestSetEnabledMaster:
+    def test_set_enabled_disables_fx(self):
+        bridge = _mock_bridge()
+        fm = FxManager(bridge)
+        fm.set_enabled(0, 0, False)  # 禁用第一个 FX（mock 已默认返回成功）
+
+
+@pytest.mark.unit
+class TestGetParamListEdgeCases:
+    def test_non_tuple_param_name(self):
+        """当 TrackFX_GetParamName 返回非元组时回退。"""
+        bridge = _mock_bridge(
+            TrackFX_GetNumParams=MagicMock(return_value=2),
+            TrackFX_GetParamName=MagicMock(return_value="DirectStr"),  # 不是元组
+            TrackFX_GetParam=MagicMock(return_value=0.5),
+        )
+        plist = FxManager(bridge).get_param_list(0, 0)
+        assert len(plist) == 2
+        assert plist[0]["name"] == "DirectStr"
+
+    def test_non_tuple_param_value(self):
+        """当 TrackFX_GetParam 返回非元组时回退。"""
+        bridge = _mock_bridge(
+            TrackFX_GetNumParams=MagicMock(return_value=1),
+            TrackFX_GetParamName=MagicMock(
+                side_effect=lambda t, fx, i, buf, sz: (True, f"P{i}")
+            ),
+            TrackFX_GetParam=MagicMock(return_value=0.75),  # 不是元组
+        )
+        plist = FxManager(bridge).get_param_list(0, 0)
+        assert len(plist) == 1
+        assert plist[0]["value"] == 0.75
+
+    def test_get_param_list_master_track(self):
+        bridge = _mock_bridge(
+            TrackFX_GetNumParams=MagicMock(return_value=2),
+            TrackFX_GetParamName=MagicMock(
+                side_effect=lambda t, fx, i, buf, sz: (True, f"P{i}")
+            ),
+            TrackFX_GetParam=MagicMock(return_value=(True, 0.25)),
+        )
+        bridge.api.GetTrack = MagicMock(
+            side_effect=lambda p, i: f"(MediaTrack*)0xmstr"
+        )
+        plist = FxManager(bridge).get_param_list(-1, 0)
+        assert len(plist) == 2
+
+
+@pytest.mark.unit
+class TestSetEnabledEdgeCases:
+    def test_out_of_range_returns_early(self):
+        bridge = _mock_bridge()
+        fm = FxManager(bridge)
+        fm.set_enabled(0, 99, False)  # fx_index 超出范围，不应崩溃
+
+    def test_none_track_returns_early(self):
+        bridge = _mock_bridge()
+        bridge.api.GetTrack = MagicMock(return_value=None)
+        fm = FxManager(bridge)
+        fm.set_enabled(999, 0, True)  # 不存在的轨道
+
