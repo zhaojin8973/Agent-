@@ -415,3 +415,302 @@ class BackingProcessor:
     def supported_genres() -> list[str]:
         """返回已配置压缩预设的流派列表（不含 "default"）。"""
         return [g for g in _GENRE_COMPRESSION if g != "default"]
+
+
+# ════════════════════════════════════════════════════════════════
+# 多轨分轨伴奏处理
+# ════════════════════════════════════════════════════════════════
+
+# ── 乐器类型识别规则 ──────────────────────────────────────────
+
+_INSTRUMENT_RULES: dict[str, list[str]] = {
+    "drums": ["drums", "drum", "kick", "snare", "hihat", "hi-hat",
+              "tom", "overhead", "oh ", "oh_", "room", "cymbal",
+              "percussion", "perc", "beat", "loop"],
+    "bass": ["bass", "bassline", "sub", "808", "low"],
+    "guitar": ["guitar", "gtr", "gt ", "acoustic", "electric",
+               "lead", "solo", "riff", "distortion", "amp"],
+    "keys": ["keys", "keyboard", "piano", "synth", "pad", "organ",
+             "strings", "string", "brass", "horn", "choir",
+             "vocal sample", "fx", "effect", "atmosphere"],
+}
+
+# ── 乐器特定 EQ 预设 ──────────────────────────────────────────
+
+_INSTRUMENT_EQ: dict[str, dict] = {
+    "drums": {
+        "bands": [
+            {"type": "hp", "freq_hz": 40, "q": 0.71, "reason": "去除次低频"},
+            {"type": "bell", "freq_hz": 8000, "gain_db": -2.0, "q": 0.5,
+             "reason": "削减刺耳镲片"},
+        ],
+    },
+    "bass": {
+        "bands": [
+            {"type": "hp", "freq_hz": 30, "q": 0.71, "reason": "次声波保护"},
+            {"type": "bell", "freq_hz": 700, "gain_db": -1.0, "q": 0.8,
+             "reason": "减少纸盆杂音"},
+            {"type": "bell", "freq_hz": 2000, "gain_db": 1.0, "q": 0.5,
+             "reason": "增加拨弦清晰度"},
+        ],
+    },
+    "guitar": {
+        "bands": [
+            {"type": "hp", "freq_hz": 80, "q": 0.71, "reason": "清除低频混浊"},
+            {"type": "bell", "freq_hz": 2500, "gain_db": 1.5, "q": 1.0,
+             "reason": "提升存在感"},
+            {"type": "lp", "freq_hz": 12000, "q": 0.71, "reason": "抑制嘶声"},
+        ],
+    },
+    "keys": {
+        "bands": [
+            {"type": "hp", "freq_hz": 60, "q": 0.5, "reason": "清除低频堆积"},
+            {"type": "high_shelf", "freq_hz": 8000, "gain_db": -1.0, "q": 0.5,
+             "reason": "柔和空气频段"},
+        ],
+    },
+}
+
+# ── 乐器特定压缩预设 ──────────────────────────────────────────
+
+_INSTRUMENT_COMPRESSION: dict[str, dict] = {
+    "drums": {"threshold_db": -12.0, "ratio": 4.0, "attack_ms": 5.0,
+              "release_ms": 30.0, "knee_db": 2.0, "makeup_db": 2.0},
+    "bass": {"threshold_db": -18.0, "ratio": 4.0, "attack_ms": 10.0,
+             "release_ms": 80.0, "knee_db": 4.0, "makeup_db": 3.0},
+    "guitar": {"threshold_db": -20.0, "ratio": 3.0, "attack_ms": 8.0,
+               "release_ms": 60.0, "knee_db": 5.0, "makeup_db": 2.0},
+    "keys": {"threshold_db": -22.0, "ratio": 2.5, "attack_ms": 15.0,
+             "release_ms": 100.0, "knee_db": 6.0, "makeup_db": 1.5},
+}
+
+
+class MultiTrackBackingProcessor:
+    """多轨分轨伴奏处理器 — 按乐器类型独立处理。
+
+    根据轨道名称自动识别乐器类型（鼓/贝斯/吉他/键盘），
+    对每个乐器组应用类型特定的 EQ 和压缩设置。
+
+    用法::
+
+        from hermes_core.backing import MultiTrackBackingProcessor
+        mtp = MultiTrackBackingProcessor(fx_manager)
+        mtp.classify_tracks(track_names=["kick.wav", "snare.wav",
+                                          "bass.wav", "guitar.wav"])
+        mtp.apply_instrument_processing()
+    """
+
+    def __init__(self, fx_manager):
+        """初始化多轨伴奏处理器。
+
+        Parameters
+        ----------
+        fx_manager : FxManager
+            FX 管理器实例，用于添加和配置插件。
+        """
+        self._fx = fx_manager
+        self._classification: dict[str, list[dict]] = {}
+        self._results: dict[str, dict] = {}
+
+    # ── 乐器识别 ────────────────────────────────────────────
+
+    def classify_tracks(
+        self, track_names: list[str],
+    ) -> dict[str, list[int]]:
+        """根据轨道名称自动识别乐器类型。
+
+        使用关键词匹配规则将轨道分类到鼓/贝斯/吉他/键盘组。
+        未匹配的轨道归入 "other"。
+
+        Parameters
+        ----------
+        track_names : list[str]
+            轨道名称列表（如 ["kick.wav", "bass.wav", ...]）。
+
+        Returns
+        -------
+        dict[str, list[int]]
+            乐器类型 → 轨道索引列表的映射。
+        """
+        self._classification = {
+            "drums": [], "bass": [], "guitar": [], "keys": [], "other": [],
+        }
+        for idx, name in enumerate(track_names):
+            name_lower = name.lower()
+            classified = False
+            for instr_type, keywords in _INSTRUMENT_RULES.items():
+                if any(kw in name_lower for kw in keywords):
+                    self._classification[instr_type].append({
+                        "index": idx, "name": name,
+                    })
+                    classified = True
+                    break
+            if not classified:
+                self._classification["other"].append({
+                    "index": idx, "name": name,
+                })
+
+        result = {
+            k: [t["index"] for t in v]
+            for k, v in self._classification.items()
+        }
+        log.info(
+            "乐器分类: drums=%d, bass=%d, guitar=%d, keys=%d, other=%d",
+            len(result["drums"]), len(result["bass"]),
+            len(result["guitar"]), len(result["keys"]),
+            len(result["other"]),
+        )
+        return result
+
+    def get_classification(self) -> dict[str, list[dict]]:
+        """获取当前的乐器分类结果。
+
+        Returns
+        -------
+        dict
+            乐器类型 → ``[{index, name}, ...]`` 的映射。
+        """
+        return dict(self._classification)
+
+    # ── 乐器处理 ────────────────────────────────────────────
+
+    def apply_instrument_processing(
+        self, genre: str = "pop",
+    ) -> dict[str, dict]:
+        """对每个识别出的乐器轨道应用类型特定的 EQ 和压缩。
+
+        Parameters
+        ----------
+        genre : str
+            流派键（用于压缩预设回退）。
+
+        Returns
+        -------
+        dict
+            乐器类型 → ``{eq: ..., comp: ...}`` 的结果映射。
+        """
+        self._results = {}
+        for instr_type, tracks in self._classification.items():
+            if not tracks or instr_type == "other":
+                continue
+            type_result = {"eq": [], "comp": []}
+            for track_info in tracks:
+                eq_result = self._apply_instrument_eq(
+                    track_info["index"], instr_type,
+                )
+                comp_result = self._apply_instrument_comp(
+                    track_info["index"], instr_type, genre,
+                )
+                if eq_result:
+                    type_result["eq"].append(eq_result)
+                if comp_result:
+                    type_result["comp"].append(comp_result)
+            self._results[instr_type] = type_result
+
+        total_eq = sum(
+            len(r["eq"]) for r in self._results.values()
+        )
+        total_comp = sum(
+            len(r["comp"]) for r in self._results.values()
+        )
+        log.info(
+            "多轨伴奏处理完成: %d EQ + %d 压缩 (genre=%s)",
+            total_eq, total_comp, genre,
+        )
+        return dict(self._results)
+
+    # ── 内部处理方法 ────────────────────────────────────────
+
+    def _apply_instrument_eq(
+        self, track_idx: int, instr_type: str,
+    ) -> dict | None:
+        """对单轨应用乐器特定 EQ。"""
+        eq_preset = _INSTRUMENT_EQ.get(instr_type)
+        if not eq_preset:
+            return None
+
+        eq_idx = self._fx.add(track_idx, "ReaEQ (Cockos)")
+        if eq_idx < 0:
+            return None
+
+        applied = []
+        for band_num, band in enumerate(eq_preset["bands"]):
+            bp = BackingProcessor._normalize_param
+            band_type = _REAEQ_BAND_TYPES.get(band["type"], 1)
+            base = band_num * 5
+
+            self._fx.set_param(track_idx, eq_idx, base + 0, 1.0)  # enable
+            self._fx.set_param(track_idx, eq_idx, base + 1,
+                              band_type / 4.0)  # type
+
+            freq_norm = BackingProcessor._normalize_freq(band["freq_hz"])
+            self._fx.set_param(track_idx, eq_idx, base + 2, freq_norm)
+
+            gain_db = band.get("gain_db", 0.0)
+            gain_norm = (gain_db + 18.0) / 36.0
+            self._fx.set_param(track_idx, eq_idx, base + 3,
+                              max(0.0, min(1.0, gain_norm)))
+
+            q_norm = (band["q"] - 0.05) / (8.0 - 0.05)
+            self._fx.set_param(track_idx, eq_idx, base + 4,
+                              max(0.0, min(1.0, q_norm)))
+            applied.append(band["reason"])
+
+        log.debug("%s EQ: track %d — %s", instr_type, track_idx,
+                  ", ".join(applied))
+        return {"track_idx": track_idx, "eq_index": eq_idx,
+                "instrument": instr_type, "bands_applied": len(applied)}
+
+    def _apply_instrument_comp(
+        self, track_idx: int, instr_type: str, genre: str,
+    ) -> dict | None:
+        """对单轨应用乐器特定压缩。"""
+        comp_preset = _INSTRUMENT_COMPRESSION.get(instr_type)
+        if not comp_preset:
+            return None
+
+        plugin_name = "ReaComp (Cockos)"
+        fx_idx = self._fx.add(track_idx, plugin_name)
+        if fx_idx < 0:
+            return None
+
+        for param_key, param_idx in _REACOMP_PARAMS.items():
+            if param_key not in comp_preset:
+                continue
+            normalized = BackingProcessor._normalize_param(
+                comp_preset[param_key], param_key,
+            )
+            self._fx.set_param(track_idx, fx_idx, param_idx, normalized)
+
+        log.debug("%s 压缩: track %d — ratio=%.1f:1, thresh=%.1f dB",
+                  instr_type, track_idx,
+                  comp_preset["ratio"], comp_preset["threshold_db"])
+        return {"track_idx": track_idx, "fx_index": fx_idx,
+                "instrument": instr_type, "settings": dict(comp_preset)}
+
+    # ── 查询方法 ────────────────────────────────────────────
+
+    @staticmethod
+    def get_instrument_types() -> list[str]:
+        """返回支持的乐器类型列表。"""
+        return list(_INSTRUMENT_RULES.keys())
+
+    @staticmethod
+    def classify_name(name: str) -> str:
+        """对单个轨道名进行分类。
+
+        Parameters
+        ----------
+        name : str
+            轨道名称。
+
+        Returns
+        -------
+        str
+            乐器类型（"drums"/"bass"/"guitar"/"keys"/"other"）。
+        """
+        name_lower = name.lower()
+        for instr_type, keywords in _INSTRUMENT_RULES.items():
+            if any(kw in name_lower for kw in keywords):
+                return instr_type
+        return "other"

@@ -57,7 +57,7 @@ from hermes_core.project_meta import ProjectMeta, ProjectIndex, make_project_pat
 # ── 工程子系统 ─────────────────────────────────────────────────
 from hermes_core.gain_staging import GainStagingEngine
 from hermes_core.mastering import MasteringEngine, _get_genre_target_lufs
-from hermes_core.backing import BackingProcessor
+from hermes_core.backing import BackingProcessor, MultiTrackBackingProcessor
 from hermes_core.reference import ReferenceMatcher, ReferenceProfile
 from hermes_core.master_templates import apply_master_template, AVAILABLE_TEMPLATES
 from hermes_core.chain_renderer import execute_chain, _make_chain_executor
@@ -168,6 +168,7 @@ __all__ = [
     "MasteringEngine",
     "_get_genre_target_lufs",
     "BackingProcessor",
+    "MultiTrackBackingProcessor",
     "ReferenceMatcher",
     "ReferenceProfile",
     "apply_master_template",
