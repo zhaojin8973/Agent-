@@ -137,7 +137,8 @@ from hermes_core.chain_renderer import (
     _init_translators,
 )
 from hermes_core.fx_builder import (
-    FXBuildContext, build_fx_params, _init_comp_translators,
+    FXBuildContext, build_fx_params, apply_params_to_track,
+    _init_comp_translators,
 )
 
 log = logging.getLogger(__name__)
@@ -487,7 +488,7 @@ class MixingEngine:
                 prev = node
                 continue
 
-            # ── 策略推导 ──
+            # ── 策略推导 → 参数应用到 REAPER ──
             ctx = FXBuildContext(
                 fx_name=fx.name,
                 fx_type=fx_type,
@@ -501,17 +502,9 @@ class MixingEngine:
                 last_eq_params=dict(eq_params),
                 eq_position=fx.eq_position if hasattr(fx, "eq_position") else "solo",
             )
-            physical = build_fx_params(ctx)
-
+            physical = apply_params_to_track(self._fx, track_index, idx, ctx)
             if physical is not None:
-                node.params = dict(physical)
-                try:
-                    normalized = normalize_params(fx.name, physical)
-                    for pname, pval in normalized.items():
-                        self._fx.set_param(track_index, idx, pname, pval)
-                except Exception as exc:
-                    log.debug("%s param application failed (%s), skipping",
-                              fx.name, exc)
+                node.params = physical
             else:
                 # 通用回退：直接使用 fx.params
                 for pname, pval in fx.params.items():

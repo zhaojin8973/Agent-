@@ -317,7 +317,7 @@ def get_fx_builder(fx_type: str) -> FXBuilderFn | None:
     返回 None 表示无注册策略（engine 将使用通用回退逻辑）。
     """
     # 统一 "comp" 类型别名（vca/fet/opto/rvox/cla-76 都归为 comp）
-    if fx_type in ("vca", "fet", "opto"):
+    if fx_type in ("vca", "fet", "opto", "rvox", "cla-76"):
         return _build_compressor_params
     return _FX_BUILDERS.get(fx_type)
 
@@ -332,6 +332,53 @@ def build_fx_params(ctx: FXBuildContext) -> dict | None:
     if builder is not None:
         return builder(ctx)
     # 回退：comp 类型统一处理（rvox/cla-76 也走压缩器路径）
-    if ctx.fx_type in ("vca", "fet", "opto", "comp"):
+    if ctx.fx_type in ("vca", "fet", "opto", "comp", "rvox", "cla-76"):
         return _build_compressor_params(ctx)
+    return None
+
+
+# ════════════════════════════════════════════════════════════════
+# 参数应用到 REAPER 轨道
+# ════════════════════════════════════════════════════════════════
+
+
+def apply_params_to_track(
+    fx_mgr,
+    track_index: int,
+    fx_idx: int,
+    ctx: FXBuildContext,
+) -> dict | None:
+    """推导并应用 FX 参数到 REAPER 轨道插槽。
+
+    策略推导 → normalize → set_param。所有 REAPER 交互通过 *fx_mgr* 代理。
+
+    Parameters
+    ----------
+    fx_mgr : FxManager
+        REAPER FX 管理器，提供 ``set_param(track, slot, name, value)``。
+    track_index : int
+        目标轨道索引。
+    fx_idx : int
+        轨道上的 FX 插槽索引。
+    ctx : FXBuildContext
+        推导上下文（含 fx_name、fx_type、音频分析数据等）。
+
+    Returns
+    -------
+    dict or None
+        成功时返回归一化前的物理参数字典（用于 node.params 跟踪）。
+        无可用策略时返回 ``None``——调用方应使用通用回退参数。
+    """
+    physical = build_fx_params(ctx)
+    if physical is not None:
+        try:
+            normalized = normalize_params(ctx.fx_name, physical)
+            for pname, pval in normalized.items():
+                fx_mgr.set_param(track_index, fx_idx, pname, pval)
+        except Exception as exc:
+            log.debug(
+                "%s param application failed (%s), skipping",
+                ctx.fx_name, exc,
+            )
+        return dict(physical)
     return None

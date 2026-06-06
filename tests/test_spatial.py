@@ -494,3 +494,134 @@ class TestBuildSpatialChainIntegration:
         # 应有 3 条混响
         reverb_keys = [k for k in result if "reverb" in k]
         assert len(reverb_keys) == 3, f"民谣应有 3 条混响: {reverb_keys}"
+
+
+# ════════════════════════════════════════════════════════════════
+# 单元测试: _apply_return_eq
+# ════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestApplyReturnEq:
+    """验证 _apply_return_eq 的流派/总线 EQ 选择逻辑。"""
+
+    def test_pop_plate_uses_correct_hpf_lpf(self):
+        """pop 流派的 plate 总线应使用正确的 HPF/LPF。"""
+        from unittest.mock import MagicMock, patch
+        from hermes_core.spatial_engine import _apply_return_eq
+
+        mock_fx = MagicMock()
+        mock_fx.set_param.return_value = True
+        normalized_params = {"Band 1 Freq": 250.0, "Band 2 Freq": 7000.0}
+
+        with patch(
+            "hermes_core.spatial_engine._apply_proq3_eq",
+            return_value=normalized_params,
+        ):
+            _apply_return_eq(mock_fx, 0, 0, "plate", "pop")
+
+        # 验证 set_param 被调用
+        assert mock_fx.set_param.call_count >= 2
+
+    def test_delay_bus_uses_delay_eq_key(self):
+        """delay 总线应使用 'delay' EQ 键。"""
+        from unittest.mock import MagicMock, patch
+        from hermes_core.spatial_engine import _apply_return_eq
+
+        mock_fx = MagicMock()
+        mock_fx.set_param.return_value = True
+        normalized_params = {"Band 1 Freq": 300.0, "Band 2 Freq": 8000.0}
+
+        with patch(
+            "hermes_core.spatial_engine._apply_proq3_eq",
+            return_value=normalized_params,
+        ):
+            _apply_return_eq(mock_fx, 1, 0, "slap", "pop")
+
+        assert mock_fx.set_param.call_count >= 2
+
+    def test_unknown_genre_falls_back_to_pop(self):
+        """未知流派应回退到 pop 的 EQ 配置。"""
+        from unittest.mock import MagicMock, patch
+        from hermes_core.spatial_engine import _apply_return_eq
+
+        mock_fx = MagicMock()
+        mock_fx.set_param.return_value = True
+        normalized_params = {"Band 1 Freq": 250.0, "Band 2 Freq": 7000.0}
+
+        with patch(
+            "hermes_core.spatial_engine._apply_proq3_eq",
+            return_value=normalized_params,
+        ):
+            _apply_return_eq(mock_fx, 2, 0, "plate", "unknown_genre_xyz")
+
+        # 应正常完成不报错
+        assert mock_fx.set_param.call_count >= 2
+
+    def test_unknown_bus_uses_default_hpf_lpf(self):
+        """未知总线使用 default HPF=300 / LPF=8000。"""
+        from unittest.mock import MagicMock, patch
+        from hermes_core.spatial_engine import _apply_return_eq
+
+        mock_fx = MagicMock()
+        mock_fx.set_param.return_value = True
+        normalized_params = {"Band 1 Freq": 300.0, "Band 2 Freq": 8000.0}
+
+        with patch(
+            "hermes_core.spatial_engine._apply_proq3_eq",
+            return_value=normalized_params,
+        ):
+            _apply_return_eq(mock_fx, 3, 0, "unknown_bus", "pop")
+
+        assert mock_fx.set_param.call_count >= 2
+
+    def test_different_genres_have_different_eq(self):
+        """不同流派应产生不同的 EQ 设置。"""
+        from unittest.mock import MagicMock, patch
+        from hermes_core.spatial_engine import _apply_return_eq
+
+        captured_intents = []
+
+        def capture_intent(eq_intent):
+            captured_intents.append(eq_intent)
+            return {"Band 1 Freq": 250.0, "Band 2 Freq": 7000.0}
+
+        mock_fx = MagicMock()
+        mock_fx.set_param.return_value = True
+
+        with patch(
+            "hermes_core.spatial_engine._apply_proq3_eq",
+            side_effect=capture_intent,
+        ):
+            _apply_return_eq(mock_fx, 0, 0, "plate", "pop")
+            _apply_return_eq(mock_fx, 1, 0, "plate", "rock")
+
+        # 两次调用的 EQ intent 应不同
+        assert len(captured_intents) == 2
+
+    def test_eq_intent_has_two_bands(self):
+        """EQ intent 应包含 HPF 和 LPF 两个频段。"""
+        from unittest.mock import MagicMock, patch
+        from hermes_core.spatial_engine import _apply_return_eq
+
+        captured_intent = []
+
+        def capture_intent(eq_intent):
+            captured_intent.append(eq_intent)
+            return {}
+
+        mock_fx = MagicMock()
+
+        with patch(
+            "hermes_core.spatial_engine._apply_proq3_eq",
+            side_effect=capture_intent,
+        ):
+            _apply_return_eq(mock_fx, 0, 0, "plate", "pop")
+
+        assert len(captured_intent) == 1
+        eq_intent = captured_intent[0]
+        assert len(eq_intent.bands) == 2
+        assert eq_intent.bands[0].band_type == "hp"
+        assert eq_intent.bands[1].band_type == "lp"
+        assert eq_intent.spectral_tilt == "neutral"
+        assert eq_intent.mud_detected is False

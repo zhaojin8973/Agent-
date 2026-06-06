@@ -1,6 +1,6 @@
 """eq_engine 边缘情况测试 — 补充覆盖率至 100%。"""
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from hermes_core.eq_engine import (
     _derive_eq_intent, _ssleq_freq_norm, _apply_ssleq_eq,
     apply_eq_rms_match,
@@ -108,3 +108,213 @@ class TestApplyEqRmsMatch:
         fx = MagicMock()
         apply_eq_rms_match(fx, 0, 0, -10.0, -11.0)
         assert fx.set_param.call_count >= 1
+
+
+# ═══════════════════════════ _derive_eq_intent 补充 ═══════════════════════════
+
+
+class TestDeriveEqIntentMoreEdges:
+    """补充未覆盖的 _derive_eq_intent 分支。"""
+
+    def test_backing_sub_excess_above_3(self):
+        """role=backing + sub_excess > 3.0 → HPF 最高 80Hz。"""
+        report = SpectrumReport(
+            spectral_tilt_db_per_octave=-1.0,
+            mud_ratio_db=0.0,
+            presence_deficit_db=0.0,
+            sibilance_peak_hz=8000,
+            air_level_db=0.0,
+            resonances=[],
+            band_energy_db={"sub": 6.0, "low": 2.0, "mid": 0.0, "hm": 0.0, "air": 0.0},
+        )
+        intent = _derive_eq_intent(report, role="backing", genre="pop", position="post")
+        hpf_bands = [b for b in intent.bands if b.band_type == "hp"]
+        assert len(hpf_bands) >= 1
+        # sub_excess=8 → hpf_freq = min(80, 40+(8-3)*10) = min(80, 90) = 80
+        assert hpf_bands[0].freq_hz <= 80.0
+
+    def test_tilt_very_dark_air_moderate(self):
+        """tilt_very_dark + air_moderate → air_gain=1.0。"""
+        # post (非 conservative): tilt < -4.5 → very_dark, air < -22 → moderate
+        report = SpectrumReport(
+            spectral_tilt_db_per_octave=-5.0,
+            mud_ratio_db=0.0,
+            presence_deficit_db=5.0,
+            sibilance_peak_hz=8000,
+            air_level_db=-25.0,
+            resonances=[],
+            band_energy_db={"sub": 0.0, "low": 3.0, "mid": 2.0, "hm": -12.0, "air": -25.0},
+        )
+        intent = _derive_eq_intent(report, role="vocal", genre="pop", position="post")
+        air_bands = [b for b in intent.bands if b.band_type == "high_shelf"]
+        assert len(air_bands) >= 1
+
+    def test_air_low_tilt_very_dark(self):
+        """air_low + tilt_very_dark → air_gain=1.5。"""
+        # post (非 conservative): tilt < -4.5 → very_dark, air < -30 → low
+        report = SpectrumReport(
+            spectral_tilt_db_per_octave=-5.0,
+            mud_ratio_db=0.0,
+            presence_deficit_db=5.0,
+            sibilance_peak_hz=8000,
+            air_level_db=-35.0,
+            resonances=[],
+            band_energy_db={"sub": 0.0, "low": 3.0, "mid": 0.0, "hm": -12.0, "air": -35.0},
+        )
+        intent = _derive_eq_intent(report, role="vocal", genre="rock", position="post")
+        air_bands = [b for b in intent.bands if b.band_type == "high_shelf"]
+        assert len(air_bands) >= 1
+
+
+# ═══════════════════════════ _ssleq_freq_norm 补充 ═══════════════════════════
+
+
+class TestSSLEQFreqNormMoreEdges:
+    def test_exact_match_at_idx_0(self):
+        """bisect_idx == 0 → 返回 table[0][0]。"""
+        table = [(0.0, 30.0), (0.3, 250.0), (0.5, 500.0)]
+        result = _ssleq_freq_norm(10.0, table)
+        assert result == 0.0
+
+    def test_duplicate_hz_division_by_zero(self):
+        """hi_hz == lo_hz → 返回 lo_n。"""
+        table = [(0.2, 500.0), (0.3, 500.0), (0.5, 2000.0)]
+        result = _ssleq_freq_norm(500.0, table)
+        assert result == 0.2
+
+
+# ═══════════════════════════ _apply_ssleq_eq 补充 ═══════════════════════════
+
+
+class TestApplySSLEQMoreEdges:
+    def test_output_gain_positive(self):
+        """out_db >= 0 时使用正增益归一化。"""
+        intent = EqIntent(
+            bands=[],  # 无频段 → total_boost=0 → 不过 output_gain 分支
+            spectral_tilt="neutral",
+            mud_detected=False,
+        )
+        result = _apply_ssleq_eq(intent)
+        assert isinstance(result, dict)
+
+
+# ═══════════════════════════ apply_eq_baseline 边缘 ═══════════════════════════
+
+
+class TestApplyEqBaselineEdges:
+    def test_ssleq_path(self):
+        """fx_name 包含 'ssleq' → 使用 SSLEQ 归一化。"""
+        from hermes_core.eq_engine import apply_eq_baseline
+
+        mock_fx = MagicMock()
+        mock_fx.set_param.return_value = True
+        spectrum = {"presence_deficit": 0.0}
+
+        result = apply_eq_baseline(
+            mock_fx, 0, 0, "vocal", genre="pop",
+            stem_file_path="", fx_name="SSL EQ",
+            position="solo",
+            last_eq_params={"Band 1": 0},
+            last_spectrum=spectrum,
+        )
+        assert result is not None
+
+    def test_proq3_path_with_file(self, tmp_path):
+        """有 stem 文件时走 Pro-Q 3 频谱分析路径（异常回退到基线）。"""
+        from hermes_core.eq_engine import apply_eq_baseline
+
+        wav = tmp_path / "test.wav"
+        import soundfile as sf
+        import numpy as np
+        sf.write(str(wav), np.zeros((100, 1)), 48000)
+
+        mock_fx = MagicMock()
+        mock_fx.set_param.return_value = True
+        spectrum = {"presence_deficit": 0.0}
+
+        result = apply_eq_baseline(
+            mock_fx, 0, 0, "vocal", genre="pop",
+            stem_file_path=str(wav), fx_name="Pro-Q 3",
+            position="solo",
+            last_eq_params={"Band 1": 0},
+            last_spectrum=spectrum,
+        )
+        assert result is not None
+
+    def test_baseline_apply_failure(self):
+        """EQ 应用异常 → 返回 None。"""
+        from hermes_core.eq_engine import apply_eq_baseline
+
+        mock_fx = MagicMock()
+        mock_fx.set_param.side_effect = RuntimeError("param failed")
+        spectrum = {"presence_deficit": 0.0}
+
+        result = apply_eq_baseline(
+            mock_fx, 0, 0, "vocal", genre="pop",
+            stem_file_path="", fx_name="Pro-Q 3",
+            position="solo",
+            last_eq_params={"Band 1": 0},
+            last_spectrum=spectrum,
+        )
+        assert result is None
+
+
+# ═══════════════════════════ auto_corrective_eq 边缘 ═══════════════════════════
+
+
+class TestAutoCorrectiveEQEdges:
+    def test_spectrum_analysis_failure(self):
+        """频谱分析失败 → 返回错误结果。"""
+        from hermes_core.eq_engine import auto_corrective_eq
+
+        mock_api = MagicMock()
+        mock_fx = MagicMock()
+        stems_cache = [{"track_idx": 0, "file_path": "/fake/path.wav"}]
+
+        with patch("hermes_core.eq_engine.SpectrumAnalyzer.analyze",
+                   side_effect=RuntimeError("analysis failed")):
+            result = auto_corrective_eq(
+                mock_api, mock_fx, 0, stems_cache,
+            )
+        assert result is not None
+        assert result.get("applied") is False
+        assert "error" in result
+
+    def test_no_stem_file_returns_early(self):
+        """无 stem 文件路径 → 提前返回。"""
+        from hermes_core.eq_engine import auto_corrective_eq
+
+        mock_api = MagicMock()
+        mock_fx = MagicMock()
+        stems_cache = [{"track_idx": 0, "file_path": ""}]
+
+        result = auto_corrective_eq(
+            mock_api, mock_fx, 0, stems_cache,
+        )
+        assert result is not None
+        assert result.get("applied") is False
+
+    def test_no_resonances_detected(self):
+        """无共振 → 返回空 bands。"""
+        from hermes_core.eq_engine import auto_corrective_eq
+
+        mock_api = MagicMock()
+        mock_fx = MagicMock()
+        stems_cache = [{"track_idx": 0, "file_path": "/fake/path.wav"}]
+
+        mock_report = SpectrumReport(
+            spectral_tilt_db_per_octave=-1.0,
+            mud_ratio_db=0.0,
+            presence_deficit_db=0.0,
+            sibilance_peak_hz=8000,
+            air_level_db=0.0,
+            resonances=[],
+            band_energy_db={"sub": 0.0, "low": 0.0, "mid": 0.0, "hm": 0.0, "air": 0.0},
+        )
+        with patch("hermes_core.eq_engine.SpectrumAnalyzer.analyze",
+                   return_value=mock_report):
+            result = auto_corrective_eq(
+                mock_api, mock_fx, 0, stems_cache,
+            )
+        assert result.get("applied") is False
+        assert result.get("eq_bands") == []

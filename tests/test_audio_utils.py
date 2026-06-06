@@ -3,6 +3,7 @@
 import math
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -183,3 +184,132 @@ class TestToMono:
         pcm_int16 = np.array([100, 200, 300], dtype=np.int16)
         mono = to_mono(pcm_int16)
         assert mono.dtype == np.float64
+
+
+# ════════════════════════════════════════════════════════════════
+# PCM 临时文件生命周期测试
+# ════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestCleanupPcmTemps:
+    """测试 _cleanup_pcm_temps 和 _register_pcm_temp 函数。"""
+
+    def teardown_method(self):
+        """每个测试后清理模块级状态。"""
+        import hermes_core.audio_utils as au
+        with au._pcm_temp_lock:
+            au._pcm_temp_files.clear()
+        au._atexit_registered = False
+
+    def test_register_pcm_temp_returns_path(self, tmp_path):
+        """注册后应返回 Path 对象并追踪文件。"""
+        import hermes_core.audio_utils as au
+
+        test_file = tmp_path / "test_pcm.wav"
+        test_file.write_text("dummy")
+
+        result = au._register_pcm_temp(str(test_file))
+        assert isinstance(result, Path)
+        assert str(test_file) in au._pcm_temp_files
+
+    def test_register_pcm_temp_path_object(self, tmp_path):
+        """接受 Path 对象作为输入。"""
+        import hermes_core.audio_utils as au
+
+        test_file = tmp_path / "test_pcm2.wav"
+        test_file.write_text("dummy")
+
+        result = au._register_pcm_temp(test_file)
+        assert result == test_file
+
+    def test_cleanup_removes_registered_file(self, tmp_path):
+        """注册后清理应删除文件。"""
+        import hermes_core.audio_utils as au
+
+        test_file = tmp_path / "to_clean.wav"
+        test_file.write_text("dummy")
+
+        au._register_pcm_temp(str(test_file))
+        assert test_file.exists()
+        assert str(test_file) in au._pcm_temp_files
+
+        au._cleanup_pcm_temps()
+        assert not test_file.exists()
+
+    def test_cleanup_removes_registered_directory(self, tmp_path):
+        """注册目录后清理应删除目录。"""
+        import hermes_core.audio_utils as au
+
+        test_dir = tmp_path / "pcm_cache"
+        test_dir.mkdir()
+
+        au._register_pcm_temp(str(test_dir))
+        assert test_dir.exists()
+
+        au._cleanup_pcm_temps()
+        assert not test_dir.exists()
+
+    def test_cleanup_handles_already_deleted(self, tmp_path):
+        """文件已被手动删除时清理不报错。"""
+        import hermes_core.audio_utils as au
+
+        test_file = tmp_path / "already_gone.wav"
+        test_file.write_text("dummy")
+
+        au._register_pcm_temp(str(test_file))
+        # 手动删除
+        test_file.unlink()
+        # 应不报错
+        au._cleanup_pcm_temps()
+
+    def test_cleanup_clears_registry(self, tmp_path):
+        """清理后注册表应为空。"""
+        import hermes_core.audio_utils as au
+
+        f1 = tmp_path / "f1.wav"
+        f2 = tmp_path / "f2.wav"
+        f1.write_text("x")
+        f2.write_text("y")
+
+        au._register_pcm_temp(str(f1))
+        au._register_pcm_temp(str(f2))
+        assert len(au._pcm_temp_files) >= 2
+
+        au._cleanup_pcm_temps()
+        assert len(au._pcm_temp_files) == 0
+
+    def test_cleanup_empty_list(self):
+        """空注册表时清理不报错。"""
+        import hermes_core.audio_utils as au
+
+        au._cleanup_pcm_temps()  # 应不报错
+
+    def test_cleanup_oserror_swallowed(self, tmp_path):
+        """OSError（如权限问题）应被吞没不传播。"""
+        import hermes_core.audio_utils as au
+
+        test_file = tmp_path / "perm.wav"
+        test_file.write_text("dummy")
+
+        au._register_pcm_temp(str(test_file))
+        # Mock os.unlink 抛出 OSError
+        with patch("os.unlink", side_effect=OSError("Permission denied")):
+            au._cleanup_pcm_temps()  # 应不抛出异常
+
+    def test_cleanup_mixed_files_and_dirs(self, tmp_path):
+        """混合文件和目录的清理。"""
+        import hermes_core.audio_utils as au
+
+        f1 = tmp_path / "audio.wav"
+        f1.write_text("audio")
+        d1 = tmp_path / "cache"
+        d1.mkdir()
+
+        au._register_pcm_temp(str(f1))
+        au._register_pcm_temp(str(d1))
+
+        au._cleanup_pcm_temps()
+        assert not f1.exists()
+        assert not d1.exists()
+        assert len(au._pcm_temp_files) == 0

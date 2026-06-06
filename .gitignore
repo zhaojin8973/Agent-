@@ -7,6 +7,7 @@ __pycache__/
 .claude/
 Hermes 测试/
 .coverage
+*.py,cover
 tests/_test_midi_tmp/
 tests/_test_spectrum_tmp/
 Backups/

@@ -1116,3 +1116,147 @@ class TestApplyAdjustmentDetail:
             AdjustmentType.COMPRESS_MORE,
             intensity=1.0,
         )
+
+    def test_reverb_more_without_nodes(self):
+        """无混响节点时 reverb_more 不应崩溃。"""
+        mock_engine = MagicMock()
+        mock_engine.hasattr.return_value = False
+        mock_engine.get_fx_chain.return_value = []
+
+        api = HermesAgentAPI(engine=mock_engine)
+        api._apply_adjustment(
+            mock_engine,
+            AdjustmentType.REVERB_MORE,
+            intensity=0.5,
+        )
+
+    def test_delay_more_without_nodes(self):
+        """无延迟节点时 delay_more 不应崩溃。"""
+        mock_engine = MagicMock()
+        mock_engine.hasattr.return_value = False
+        mock_engine.get_fx_chain.return_value = []
+
+        api = HermesAgentAPI(engine=mock_engine)
+        api._apply_adjustment(
+            mock_engine,
+            AdjustmentType.DELAY_MORE,
+            intensity=0.5,
+        )
+
+    def test_compress_less_without_nodes(self):
+        """无压缩节点时 compress_less 不应崩溃。"""
+        mock_engine = MagicMock()
+        mock_engine.hasattr.return_value = False
+        mock_engine.get_fx_chain.return_value = []
+
+        api = HermesAgentAPI(engine=mock_engine)
+        api._apply_adjustment(
+            mock_engine,
+            AdjustmentType.COMPRESS_LESS,
+            intensity=1.0,
+        )
+
+
+# ════════════════════════════════════════════════════════════════
+# _to_mix_error 测试
+# ════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestToMixError:
+    """验证 _to_mix_error 的各种异常映射。"""
+
+    def test_value_error(self):
+        from hermes_core.agent_protocol import _to_mix_error
+        err, hint = _to_mix_error(ValueError("无效参数"))
+        assert err is not None
+        assert isinstance(hint, str) or hint is None
+
+    def test_type_error(self):
+        from hermes_core.agent_protocol import _to_mix_error
+        err, hint = _to_mix_error(TypeError("类型不匹配"))
+        assert err is not None
+
+    def test_runtime_error(self):
+        from hermes_core.agent_protocol import _to_mix_error
+        err, hint = _to_mix_error(RuntimeError("运行时异常"))
+        assert err is not None
+
+    def test_generic_exception(self):
+        from hermes_core.agent_protocol import _to_mix_error
+        err, hint = _to_mix_error(Exception("通用异常"))
+        assert err is not None
+
+    def test_exception_with_custom_message(self):
+        from hermes_core.agent_protocol import _to_mix_error
+        err, hint = _to_mix_error(
+            ConnectionError("无法连接到 REAPER")
+        )
+        assert err is not None
+
+
+# ════════════════════════════════════════════════════════════════
+# AuditResult 补充
+# ════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestAuditResult:
+    """AuditResult 数据类测试。"""
+
+    def test_from_audit_dict_with_warnings(self):
+        from hermes_core.agent_protocol import AuditResult
+        data = {
+            "diagnostics": {
+                "integrated_lufs": -14.0,
+                "true_peak_dbtp": -1.0,
+                "rms_db": -18.0,
+                "peak_db": -6.0,
+            },
+            "checks": [
+                {"check_name": "loudness", "message": "LUFS 过低", "severity": "warning"},
+                {"check_name": "peak", "message": "峰值安全", "severity": "info"},
+            ],
+        }
+        result = AuditResult.from_audit_dict(data)
+        assert result.lufs_integrated == -14.0
+        assert "LUFS 过低" in result.warnings
+
+    def test_from_audit_dict_all_clear(self):
+        from hermes_core.agent_protocol import AuditResult
+        data = {
+            "diagnostics": {"integrated_lufs": -16.0},
+            "checks": [
+                {"check_name": "all_clear", "message": "通过", "severity": "info"},
+            ],
+        }
+        result = AuditResult.from_audit_dict(data)
+        assert result.lufs_integrated == -16.0
+        # all_clear 不计入 suggestions
+        assert len(result.suggestions) == 0
+
+
+# ════════════════════════════════════════════════════════════════
+# PreviewResult 补充
+# ════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestPreviewResultExtras:
+    """PreviewResult 额外测试。"""
+
+    def test_fail_with_empty_error(self):
+        from hermes_core.agent_protocol import PreviewResult
+        result = PreviewResult.fail(error="")
+        assert result.success is False
+
+    def test_ok_with_all_fields(self):
+        from hermes_core.agent_protocol import PreviewResult
+        result = PreviewResult.ok(
+            preview_path="/tmp/preview.wav",
+            before_path="/tmp/before.wav",
+            after_path="/tmp/after.wav",
+            format="wav",
+        )
+        assert result.success is True
+        assert result.preview_path == "/tmp/preview.wav"

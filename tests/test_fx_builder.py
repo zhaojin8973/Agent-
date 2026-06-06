@@ -4,6 +4,7 @@ import pytest
 from hermes_core.fx_builder import (
     FXBuildContext,
     _build_eq_params,
+    _build_compressor_params,
     _build_deesser_params,
     _build_saturation_params,
     _build_doubler_params,
@@ -271,3 +272,126 @@ class TestBuildFxParams:
         )
         result = build_fx_params(ctx)
         assert result is None
+
+
+# ═══════════════════════════ RVox 路由 ═══════════════════════════
+
+class TestRVoxRouting:
+    """rvox 类型应正确路由到压缩器参数推导策略。"""
+
+    def setup_method(self):
+        _init_comp_translators()
+
+    def test_get_fx_builder_rvox_returns_compressor(self):
+        """get_fx_builder('rvox') 应返回压缩器 builder。"""
+        builder = get_fx_builder("rvox")
+        assert builder is not None
+        assert callable(builder)
+        assert "compressor" in builder.__name__
+
+    def test_build_fx_params_rvox_type(self):
+        """fx_type='rvox' 通过 build_fx_params 应不返回 None。"""
+        ctx = FXBuildContext(
+            fx_name="VST3: RVox Mono (Waves)", fx_type="rvox",
+            role="vocal", genre="pop",
+            raw_rms_db=-18.0, raw_peak_db=-6.0,
+        )
+        result = build_fx_params(ctx)
+        assert result is not None
+        assert isinstance(result, dict)
+
+    def test_build_compressor_params_rvox_direct(self):
+        """_build_compressor_params 直接调用 rvox 路径。"""
+        ctx = FXBuildContext(
+            fx_name="RVox", fx_type="rvox", role="vocal",
+            genre="pop", raw_rms_db=-18.0, raw_peak_db=-6.0,
+        )
+        result = _build_compressor_params(ctx)
+        assert result is not None
+        assert isinstance(result, dict)
+        # RVox 参数应包含 "Compression" 键
+        assert "Compression" in result
+
+    def test_build_fx_params_rvox_no_rms_returns_none(self):
+        """rvox 类型但无 RMS/Peak → 返回 None。"""
+        ctx = FXBuildContext(
+            fx_name="RVox", fx_type="rvox", role="vocal", genre="pop",
+        )
+        result = build_fx_params(ctx)
+        assert result is None
+
+
+# ═══════════════════════════ 压缩器边界 ═══════════════════════════
+
+class TestCompressorEdges:
+    """压缩器参数推导的边界和异常路径。"""
+
+    def setup_method(self):
+        _init_comp_translators()
+
+    def test_unknown_type_returns_none(self):
+        """非压缩器类型（如 'limiter'）→ _build_compressor_params 返回 None。"""
+        ctx = FXBuildContext(
+            fx_name="Pro-L 2", fx_type="limiter", role="vocal",
+            genre="pop", raw_rms_db=-18.0, raw_peak_db=-6.0,
+        )
+        result = _build_compressor_params(ctx)
+        assert result is None
+
+    def test_cla76_no_bpm_strips_release(self):
+        """CLA-76 无 BPM → Release 键应被移除。"""
+        ctx = FXBuildContext(
+            fx_name="CLA-76", fx_type="fet", role="vocal",
+            genre="pop", bpm=None, raw_rms_db=-18.0, raw_peak_db=-6.0,
+        )
+        result = _build_compressor_params(ctx)
+        assert result is not None
+        assert "Release" not in result
+
+    def test_vca_with_bpm_strips_timing_on_cla76(self):
+        """CLA-76 有 BPM → Release 保留（BPM 驱动）。"""
+        ctx = FXBuildContext(
+            fx_name="CLA-76", fx_type="fet", role="vocal",
+            genre="rock", bpm=120.0, raw_rms_db=-18.0, raw_peak_db=-6.0,
+        )
+        result = _build_compressor_params(ctx)
+        assert result is not None
+        # CLA-76 有 BPM 时 Release 存在
+        assert "Release" in result
+
+
+# ═══════════════════════════ De-Esser 补充 ═══════════════════════════
+
+class TestDeesserEdges:
+    """De-Esser 参数推导的更多边界情况。"""
+
+    def test_high_presence_deficit(self):
+        """高存在感缺失 → 阈值为 0dB。"""
+        ctx = FXBuildContext(
+            fx_name="Pro-DS", fx_type="deesser", role="vocal", genre="pop",
+            presence_deficit=500.0,
+        )
+        result = _build_deesser_params(ctx)
+        assert result["Threshold"] == 0.0
+
+    def test_low_presence_deficit(self):
+        """极低存在感缺失 → 阈值接近 -60dB。"""
+        ctx = FXBuildContext(
+            fx_name="Pro-DS", fx_type="deesser", role="vocal", genre="pop",
+            presence_deficit=-500.0,
+        )
+        result = _build_deesser_params(ctx)
+        assert result["Threshold"] == -60.0
+
+    def test_different_genre_range_values(self):
+        """不同流派应产生不同的 Range 值。"""
+        genres = ["pop", "rock", "electronic", "hip_hop", "folk"]
+        ranges = {}
+        for g in genres:
+            ctx = FXBuildContext(
+                fx_name="Pro-DS", fx_type="deesser", role="vocal", genre=g,
+            )
+            ranges[g] = _build_deesser_params(ctx)["Range"]
+        # 所有 Range 值应在合理范围内
+        for g, r in ranges.items():
+            assert 0.0 < r < 20.0, f"{g} Range={r} 超出范围"

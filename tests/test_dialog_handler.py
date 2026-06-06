@@ -277,3 +277,40 @@ class TestCreateDialogHandler:
         with patch("sys.platform", "linux"):
             handler = create_dialog_handler()
             assert isinstance(handler, LinuxDialogHandler)
+
+    def test_timeout_passed_to_handler(self):
+        """timeout 参数传递到处理器。"""
+        from hermes_core.dialog_handler import create_dialog_handler
+        with patch("sys.platform", "darwin"):
+            handler = create_dialog_handler(timeout=10.0)
+            assert handler._timeout == 10.0
+
+    def test_default_timeout(self):
+        """默认 timeout=3.0。"""
+        from hermes_core.dialog_handler import create_dialog_handler
+        with patch("sys.platform", "darwin"):
+            handler = create_dialog_handler()
+            assert handler._timeout == 3.0
+
+
+# ════════════════════════════════════════════════════════════════
+# Unit: _check_xdotool 路径
+# ════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestCheckXdotool:
+    """验证 _check_xdotool 的不同路径。"""
+
+    def test_xdotool_not_found(self):
+        """xdotool 未安装 → 返回 False。"""
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            result = LinuxDialogHandler._check_xdotool()
+            assert result is False
+
+    def test_xdotool_timeout(self):
+        """xdotool 检测超时 → 返回 False。"""
+        import subprocess
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("which", 2)):
+            result = LinuxDialogHandler._check_xdotool()
+            assert result is False

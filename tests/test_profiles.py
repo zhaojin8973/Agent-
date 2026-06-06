@@ -361,3 +361,91 @@ class TestAllFxNamesBusDelay:
         )
         names = profile.all_fx_names()
         assert "EchoBoy" in names
+
+
+# ════════════════════════════════════════════════════════════
+# get_default_vocal_chain (模块级函数)
+# ════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestGetDefaultVocalChainModule:
+    """测试模块级 get_default_vocal_chain 函数。"""
+
+    def test_returns_nine_stages(self):
+        """应返回 9 个处理阶段。"""
+        from hermes_core.profiles import get_default_vocal_chain
+        chain = get_default_vocal_chain()
+        assert len(chain) == 9
+
+    def test_order_is_hpf_first(self):
+        """第一个应为 HPF EQ。"""
+        from hermes_core.profiles import get_default_vocal_chain
+        chain = get_default_vocal_chain()
+        assert chain[0].fx_type == "eq"
+        assert chain[0].eq_position == "pre"
+
+    def test_contains_all_expected_types(self):
+        """应包含所有 9 种处理类型。"""
+        from hermes_core.profiles import get_default_vocal_chain
+        chain = get_default_vocal_chain()
+        types = [p.fx_type for p in chain]
+        assert "eq" in types
+        assert "saturation" in types
+        assert "fet" in types
+        assert "deesser" in types
+        assert "dynamic_eq" in types
+        assert "rvox" in types
+        assert "doubler" in types
+
+    def test_all_presets_have_name(self):
+        """每个预设都应有名称。"""
+        from hermes_core.profiles import get_default_vocal_chain
+        chain = get_default_vocal_chain()
+        for preset in chain:
+            assert preset.name != ""
+            assert preset.fx_type != ""
+
+
+# ════════════════════════════════════════════════════════════
+# MixingProfile.for_genre (classmethod)
+# ════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestMixingProfileForGenre:
+    """测试 MixingProfile.for_genre 类方法。"""
+
+    def test_pop_genre_loads_from_yaml(self):
+        """pop 流派应从 YAML 加载完整配置。"""
+        profile = MixingProfile.for_genre(genre="pop")
+        assert isinstance(profile, MixingProfile)
+        assert len(profile.vocal_chain) > 0
+
+    def test_rock_genre_loads_from_yaml(self):
+        """rock 流派应从 YAML 加载。"""
+        profile = MixingProfile.for_genre(genre="rock")
+        assert isinstance(profile, MixingProfile)
+        assert len(profile.vocal_chain) > 0
+
+    def test_folk_genre_loads_from_yaml(self):
+        """folk 流派应从 YAML 加载。"""
+        profile = MixingProfile.for_genre(genre="folk")
+        assert isinstance(profile, MixingProfile)
+
+    def test_electronic_genre_loads_from_yaml(self):
+        """electronic 流派加载。"""
+        profile = MixingProfile.for_genre(genre="electronic")
+        assert isinstance(profile, MixingProfile)
+
+    def test_chinese_bel_canto_loads_from_yaml(self):
+        """chinese_folk_bel_canto 流派加载。"""
+        profile = MixingProfile.for_genre(genre="chinese_folk_bel_canto")
+        assert isinstance(profile, MixingProfile)
+
+    def test_unknown_genre_falls_back_to_pop(self):
+        """未知流派 → _GENRE_YAML_MAP 回退到 vocal_pop。"""
+        profile = MixingProfile.for_genre(genre="unknown_xyz")
+        assert isinstance(profile, MixingProfile)
+        # vocal_pop.yaml 存在，所以应该能加载成功
+        assert len(profile.vocal_chain) > 0
