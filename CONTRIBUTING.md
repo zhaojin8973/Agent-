@@ -40,8 +40,14 @@ mypy src/
 See `PROJECT_STATUS.md` for the full architecture description.
 
 Three layers:
-1. **L1** (`bridge.py`) — REAPER connection, UI suppression, dialog killing
-2. **L2** (`track.py`, `bus.py`, `fx.py`, `send.py`, `render.py`, `signal.py`, `loudness_optimizer.py`) — domain managers
+1. **L1** (`bridge.py`) — REAPER connection, UI suppression, cross-platform dialog handling
+2. **L2** — domain managers + support modules:
+   - Managers: `track.py`, `bus.py`, `fx.py`, `send.py`, `render.py`
+   - Analysis: `signal.py`, `spectrum.py`, `reference.py`
+   - Processing: `eq_engine.py`, `comp_engine.py`, `fx_builder.py`, `spatial_engine.py`, `audio_utils.py`
+   - Subsystems: `mastering.py`, `gain_staging.py`, `master_templates.py`, `chain_renderer.py`, `automation.py`
+   - Profiles: `profiles.py`, `genre_tables.py`, `plugin_registry.py`, `normalize.py`
+   - Support: `dialog_handler.py`, `loudness_optimizer.py`, `project_meta.py`, `config.py`, `security.py`
 3. **L3** (`engine.py`) — unified MixingEngine API
 
 ## Commit Convention

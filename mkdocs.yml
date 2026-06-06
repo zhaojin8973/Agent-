@@ -46,6 +46,11 @@ nav:
     - Audit: api/audit.md
     - Exceptions: api/exceptions.md
     - 安全层: api/security.md
+    - 大师模板: api/master_templates.md
+    - 微渲染: api/chain_renderer.md
+    - Automation: api/automation.md
+    - FX Builder: api/fx_builder.md
+    - 弹窗处理: api/dialog_handler.md
   - 混音指南:
     - 流派 Profile: guides/profiles.md
     - 插件注册表: guides/plugins.md

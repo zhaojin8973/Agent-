@@ -273,6 +273,13 @@ class WindowsDialogHandler(DialogHandler):
     """
 
     def __init__(self, timeout: float = 5.0) -> None:
+        """初始化 Windows 弹窗处理器。
+
+        Parameters
+        ----------
+        timeout : float
+            pywinauto 操作超时时间（秒）。
+        """
         self._timeout = timeout
 
     def inspect_windows(self) -> list[tuple[str, list[str]]]:
@@ -372,6 +379,13 @@ class LinuxDialogHandler(DialogHandler):
     """
 
     def __init__(self, timeout: float = 3.0) -> None:
+        """初始化 Linux 弹窗处理器。
+
+        Parameters
+        ----------
+        timeout : float
+            xdotool 子进程超时时间（秒）。
+        """
         self._timeout = timeout
 
     def inspect_windows(self) -> list[tuple[str, list[str]]]:

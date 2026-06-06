@@ -98,13 +98,20 @@ with MixingEngine(watchdog=True) as eng:
 │  L3: MixingEngine (engine.py)        │
 │  组合所有 L2 模块，提供统一 API       │
 ├──────────────────────────────────────┤
-│  L2: 领域管理器                       │
+│  L2: 领域管理器 + 支撑模块            │
 │  track.py  bus.py  fx.py  send.py    │
-│  render.py  signal.py                │
+│  render.py  signal.py  spectrum.py   │
+│  mastering.py  gain_staging.py       │
+│  profiles.py  reference.py           │
+│  master_templates.py                 │
+│  chain_renderer.py  fx_builder.py    │
+│  automation.py  dialog_handler.py    │
 │  loudness_optimizer.py               │
+│  eq_engine.py  comp_engine.py        │
+│  spatial_engine.py  audio_utils.py   │
 ├──────────────────────────────────────┤
 │  L1: REAPER 桥接 (bridge.py)         │
-│  reapy 连接 + UI 抑制 + 弹窗守护      │
+│  reapy 连接 + 跨平台弹窗守护         │
 └──────────────────────────────────────┘
 ```
 
@@ -194,7 +201,7 @@ hermes check --profile profiles/rock.yaml
 
 ## 已知限制
 
-1. **仅 macOS**：DialogKiller 依赖 AppleScript
+1. **跨平台弹窗处理**：macOS (AppleScript)、Windows (pywinauto)、Linux (xdotool) 均已实现，但 Windows/Linux 版本需实机验证
 2. **REAPER 7.73 arm64**：仅在 ARM64 macOS + REAPER 7.73 上测试
 3. **Python 3.14 不兼容**：REAPER 7.73 不支持 Python 3.14
 4. **实时 REAPER 依赖**：单元测试不需要 REAPER（287 tests），但真实混音流程需要 REAPER 运行中
