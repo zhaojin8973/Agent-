@@ -81,3 +81,26 @@ class TestLUFSBS1770:
         sig = np.random.normal(0, 0.001, 48000).astype(np.float64)
         lufs = SignalAnalyzer._compute_lufs(sig, 48000)
         assert lufs < 0
+
+    def test_k_weight_bs1770_stereo(self):
+        sig = np.random.normal(0, 0.01, (48000, 2)).astype(np.float64)
+        result = SignalAnalyzer._k_weight_bs1770_4(sig, 48000)
+        assert result.shape == sig.shape
+
+    def test_compute_lufs_bs1770_stereo(self):
+        t = np.linspace(0, 0.5, 24000)
+        sig = np.column_stack([
+            np.sin(2 * np.pi * 1000 * t) * 0.1,
+            np.sin(2 * np.pi * 1000 * t) * 0.1,
+        ])
+        lufs = SignalAnalyzer._compute_lufs_bs1770_4(sig, 48000)
+        assert lufs < 0
+
+    def test_read_wav_manual_valid(self, tmp_path):
+        import soundfile as sf
+        wav = tmp_path / "test.wav"
+        sf.write(str(wav), np.zeros((100, 1)), 48000)
+        from hermes_core.signal import _read_wav_manual
+        result = _read_wav_manual(str(wav))
+        assert result is not None
+        assert result[1] == 48000  # sr is second element

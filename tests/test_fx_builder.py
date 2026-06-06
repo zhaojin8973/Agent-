@@ -215,3 +215,59 @@ class TestBuildFxParams:
         )
         result = build_fx_params(ctx)
         assert result is None
+
+    def test_compressor_with_rms_peak(self):
+        """压缩器类型 + RMS/Peak → 返回物理参数。"""
+        ctx = FXBuildContext(
+            fx_name="FabFilter Pro-C 2", fx_type="vca", role="vocal",
+            genre="pop", raw_rms_db=-18.0, raw_peak_db=-6.0,
+        )
+        result = build_fx_params(ctx)
+        assert result is not None
+        assert "Ratio" in result or "Thresh" in result or "Threshold" in result
+
+    def test_compressor_cla76_variant(self):
+        """CLA-76 压缩器 → 使用专属参数推导。"""
+        ctx = FXBuildContext(
+            fx_name="CLA-76", fx_type="fet", role="vocal",
+            genre="rock", bpm=120.0, raw_rms_db=-18.0, raw_peak_db=-6.0,
+        )
+        result = build_fx_params(ctx)
+        assert result is not None
+
+    def test_compressor_rvox_via_build_fx_params(self):
+        """RVox 名称 + vca 类型 → 走压缩器路径。"""
+        ctx = FXBuildContext(
+            fx_name="RVox", fx_type="vca", role="vocal",
+            genre="pop", raw_rms_db=-18.0, raw_peak_db=-6.0,
+        )
+        result = build_fx_params(ctx)
+        assert result is not None
+
+    def test_compressor_with_bpm_timing(self):
+        """BPM 感知 → 覆盖 attack/release 替换。"""
+        ctx = FXBuildContext(
+            fx_name="FabFilter Pro-C 2", fx_type="opto", role="vocal",
+            genre="electronic", bpm=140.0, raw_rms_db=-20.0, raw_peak_db=-8.0,
+        )
+        result = build_fx_params(ctx)
+        assert result is not None
+
+    def test_compressor_no_bpm_removes_timing(self):
+        """无 BPM → 应移除 Attack/Release 键。"""
+        ctx = FXBuildContext(
+            fx_name="FabFilter Pro-C 2", fx_type="vca", role="vocal",
+            genre="pop", bpm=None, raw_rms_db=-18.0, raw_peak_db=-6.0,
+        )
+        result = build_fx_params(ctx)
+        assert result is not None
+        assert "Attack" not in result
+
+    def test_compressor_no_rms_returns_none(self):
+        """无 RMS/Peak → 返回 None。"""
+        ctx = FXBuildContext(
+            fx_name="FabFilter Pro-C 2", fx_type="vca", role="vocal",
+            genre="pop",
+        )
+        result = build_fx_params(ctx)
+        assert result is None
