@@ -319,3 +319,45 @@ class TestEQBaseline:
         bands = _EQ_BASELINE["backing"]
         assert len(bands) >= 1
         assert bands[0]["freq_hz"] == 40.0
+
+
+# ═══════════════════════════ get_default_vocal_chain ═══════════════════════════
+
+class TestGetDefaultVocalChain:
+    """测试默认 9 段人声处理链。"""
+
+    def test_returns_nine_stages(self):
+        from hermes_core.profiles import get_default_vocal_chain, FXPreset
+        chain = get_default_vocal_chain()
+        assert len(chain) == 9
+        for fx in chain:
+            assert isinstance(fx, FXPreset)
+
+    def test_order_is_correct(self):
+        from hermes_core.profiles import get_default_vocal_chain
+        chain = get_default_vocal_chain()
+        types = [fx.fx_type for fx in chain]
+        # HPF → Saturation → Surgical EQ → FET Comp → De-Esser
+        # → Dynamic EQ → RMS Comp → Color EQ → Doubler
+        assert "eq" in types[:2]      # HPF + Surgical EQ
+        assert "deesser" in types
+        assert "doubler" in types
+        assert types[-1] == "doubler"
+
+
+# ═══════════════════════════ all_fx_names with bus_delay ═══════════════════════
+
+class TestAllFxNamesBusDelay:
+    """测试 all_fx_names 包含 bus_delay 的情况。"""
+
+    def test_includes_bus_delay(self):
+        from hermes_core.profiles import MixingProfile, FXPreset
+        eb = FXPreset(name="EchoBoy", fx_type="delay")
+        profile = MixingProfile(
+            vocal_chain=[FXPreset(name="EQ", fx_type="eq")],
+            backing_chain=[],
+            bus_reverb=None,
+            bus_delay=eb,
+        )
+        names = profile.all_fx_names()
+        assert "EchoBoy" in names

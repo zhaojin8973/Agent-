@@ -175,3 +175,137 @@ class TestMidiTempoErrors:
         _write_midi(path, tempo_us_per_quarter=500000)
         bpm = read_midi_tempo(path)
         assert bpm == pytest.approx(120.0)
+
+    def test_short_header_length(self):
+        """header_len < 6 应抛出错误。"""
+        path = _TMP / "bad_header_len.mid"
+        data = b"MThd" + struct.pack(">I", 4) + b"\x00" * 20
+        _TMP.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        with pytest.raises(MidiTempoError, match="header length"):
+            read_midi_tempo(str(path))
+
+    def test_unsupported_format(self):
+        """fmt=3 应抛出错误。"""
+        path = _TMP / "fmt3.mid"
+        data = (
+            b"MThd" + struct.pack(">I", 6)
+            + struct.pack(">H", 3) + struct.pack(">H", 1) + struct.pack(">H", 480)
+            + b"MTrk" + struct.pack(">I", 4) + b"\x00\xFF\x2F\x00"
+        )
+        _TMP.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        with pytest.raises(MidiTempoError, match="format"):
+            read_midi_tempo(str(path))
+
+    def test_zero_tracks(self):
+        """num_tracks=0 应抛出错误。"""
+        path = _TMP / "zero_tracks.mid"
+        data = (
+            b"MThd" + struct.pack(">I", 6)
+            + struct.pack(">H", 0) + struct.pack(">H", 0) + struct.pack(">H", 480)
+        )
+        _TMP.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        with pytest.raises(MidiTempoError, match="no tracks"):
+            read_midi_tempo(str(path))
+
+    def test_missing_track_chunk(self):
+        """header 后数据不足应抛出错误。"""
+        path = _TMP / "short.mid"
+        data = (
+            b"MThd" + struct.pack(">I", 6)
+            + struct.pack(">H", 0) + struct.pack(">H", 1) + struct.pack(">H", 480)
+            + b"\x00\x00\x00"
+        )
+        _TMP.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        with pytest.raises(MidiTempoError, match="end of MIDI"):
+            read_midi_tempo(str(path))
+
+    def test_bad_track_header(self):
+        """非 MTrk 的轨道头应抛出错误。"""
+        path = _TMP / "bad_trk.mid"
+        data = (
+            b"MThd" + struct.pack(">I", 6)
+            + struct.pack(">H", 0) + struct.pack(">H", 1) + struct.pack(">H", 480)
+            + b"XXXX" + struct.pack(">I", 4) + b"\x00\xFF\x2F\x00"
+        )
+        _TMP.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        with pytest.raises(MidiTempoError, match="MTrk"):
+            read_midi_tempo(str(path))
+
+    def test_track_len_exceeds_file(self):
+        """轨道长度超过文件大小时应抛出错误。"""
+        path = _TMP / "big_track.mid"
+        data = (
+            b"MThd" + struct.pack(">I", 6)
+            + struct.pack(">H", 0) + struct.pack(">H", 1) + struct.pack(">H", 480)
+            + b"MTrk" + struct.pack(">I", 99999) + b"\x00\xFF\x2F\x00"
+        )
+        _TMP.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        with pytest.raises(MidiTempoError, match="exceeds"):
+            read_midi_tempo(str(path))
+
+    def test_zero_tempo_value(self):
+        """tempo_us <= 0 应抛出错误。"""
+        path = _TMP / "zero_tempo.mid"
+        _write_midi(path, tempo_us_per_quarter=0)
+        with pytest.raises(MidiTempoError, match="tempo"):
+            read_midi_tempo(str(path))
+
+    def test_sysex_event_in_track(self):
+        """包含 SysEx 事件的轨道应能正确跳过。"""
+        path = _TMP / "sysex.mid"
+        tempo_bytes = struct.pack(">I", 500000)[1:]
+        # SysEx event: F0 <len varint> <data bytes>
+        track_events = (
+            bytes([0x00, 0xF0, 0x03, 0x41, 0x42, 0x43])  # SysEx
+            + bytes([0x00, 0xFF, 0x51, 0x03]) + tempo_bytes  # Tempo
+            + bytes([0x00, 0xFF, 0x2F, 0x00])  # End of track
+        )
+        track_header = b"MTrk" + struct.pack(">I", len(track_events))
+        header = (
+            b"MThd" + struct.pack(">I", 6)
+            + struct.pack(">H", 0) + struct.pack(">H", 1) + struct.pack(">H", 480)
+        )
+        _TMP.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(header + track_header + track_events)
+        bpm = read_midi_tempo(str(path))
+        assert bpm == pytest.approx(120.0)
+
+    def test_note_event_in_track(self):
+        """包含 MIDI note 事件的轨道应能正确跳过。"""
+        path = _TMP / "notes.mid"
+        tempo_bytes = struct.pack(">I", 500000)[1:]
+        track_events = (
+            bytes([0x00, 0x90, 0x3C, 0x64])  # Note On C4 vel=100
+            + bytes([0x10, 0x80, 0x3C, 0x00])  # Note Off
+            + bytes([0x00, 0xFF, 0x51, 0x03]) + tempo_bytes  # Tempo
+            + bytes([0x00, 0xFF, 0x2F, 0x00])
+        )
+        track_header = b"MTrk" + struct.pack(">I", len(track_events))
+        header = (
+            b"MThd" + struct.pack(">I", 6)
+            + struct.pack(">H", 0) + struct.pack(">H", 1) + struct.pack(">H", 480)
+        )
+        _TMP.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(header + track_header + track_events)
+        bpm = read_midi_tempo(str(path))
+        assert bpm == pytest.approx(120.0)
+
+    def test_truncated_meta_event(self):
+        """截断的元事件应抛出错误。"""
+        path = _TMP / "trunc_meta.mid"
+        track_events = bytes([0x00, 0xFF, 0x51])  # 不完整
+        track_header = b"MTrk" + struct.pack(">I", len(track_events))
+        header = (
+            b"MThd" + struct.pack(">I", 6)
+            + struct.pack(">H", 0) + struct.pack(">H", 1) + struct.pack(">H", 480)
+        )
+        _TMP.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(header + track_header + track_events)
+        with pytest.raises(MidiTempoError, match="tempo"):
+            read_midi_tempo(str(path))
