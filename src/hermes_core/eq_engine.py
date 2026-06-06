@@ -2,13 +2,19 @@
 EQ 参数引擎 — 从频谱分析推导 EQ 物理参数。
 
 从 engine.py 提取的模块级辅助函数。
+包含 EQ 基线应用、RMS 匹配补偿和校正性 EQ。
 """
 
+from __future__ import annotations
+
 import bisect
+import logging
 import math
+import os
+from typing import TYPE_CHECKING
 
 from hermes_core.loudness_optimizer import EqIntent, EqBandIntent
-from hermes_core.spectrum import SpectrumReport
+from hermes_core.spectrum import SpectrumReport, SpectrumAnalyzer
 from hermes_core.genre_tables import (
     _GENRE_EQ_TWEAKS,
     _MIN_EQ_Q,
@@ -23,6 +29,12 @@ from hermes_core.genre_tables import (
     _SSL_Q_MAX,
     _SSL_Q_RANGE,
 )
+from hermes_core.profiles import _EQ_BASELINE
+
+if TYPE_CHECKING:
+    from hermes_core.fx import FxManager
+
+log = logging.getLogger(__name__)
 
 
 def _derive_eq_intent(
@@ -420,3 +432,345 @@ def _apply_ssleq_eq(eq_intent: EqIntent) -> dict[str, float]:
         params["Gain"] = round(max(0.0, min(1.0, out_norm)), 10)
 
     return params
+
+
+# ════════════════════════════════════════════════════════════════
+# RMS 匹配补偿
+# ════════════════════════════════════════════════════════════════
+
+
+def apply_eq_rms_match(
+    fx: "FxManager",
+    track_index: int,
+    fx_index: int,
+    pre_rms_db: float,
+    post_rms_db: float,
+) -> None:
+    """补偿 EQ 增益变化，使下游节点看到一致的 RMS。
+
+    如果 EQ 导致 RMS 下降了 *Δ* dB，则应用 *+Δ* dB 的输出增益。
+    这可以防止在仅 EQ 频率变化时级联失效下游压缩器。
+
+    在每次 EQ 参数更新后调用。
+    """
+    delta = pre_rms_db - post_rms_db
+    if abs(delta) < 0.2:
+        return  # 不可闻 — 跳过以避免参数抖动
+
+    log.debug(
+        "RMS match: track %d EQ@%d pre=%.1f → post=%.1f (Δ=%.1f dB)",
+        track_index, fx_index, pre_rms_db, post_rms_db, delta,
+    )
+    fx.set_param(track_index, fx_index, "Output Gain", delta)
+    fx.set_param(track_index, fx_index, "Output", delta)
+
+
+# ════════════════════════════════════════════════════════════════
+# EQ 基线应用
+# ════════════════════════════════════════════════════════════════
+
+
+def apply_eq_baseline(
+    fx: "FxManager",
+    track_index: int,
+    fx_index: int,
+    role: str,
+    *,
+    genre: str = "pop",
+    stem_file_path: str = "",
+    position: str = "solo",
+    fx_name: str = "",
+    last_eq_params: dict | None = None,
+    last_spectrum: dict | None = None,
+) -> dict | None:
+    """对指定轨道/FX 应用角色感知的 EQ 基线。
+
+    当 *stem_file_path* 指向可读 WAV 文件时，使用完整的频谱驱动管线::
+
+        SpectrumAnalyzer → EqIntent → 翻译器 → FxManager
+
+    翻译器根据 *fx_name* 选择：
+    - ``SSLEQ`` → :func:`_apply_ssleq_eq`
+    - 其他 → :func:`_apply_proq3_eq`
+
+    否则回退到 :data:`_EQ_BASELINE` 静态基线。
+
+    Parameters
+    ----------
+    fx : FxManager
+        FX 管理器实例。
+    track_index : int
+        REAPER 轨道索引。
+    fx_index : int
+        轨道上的 FX 槽位索引。
+    role : str
+        ``"vocal"`` 或 ``"backing"``。
+    genre : str
+        流派键。
+    stem_file_path : str
+        音频文件路径（可选，用于频谱分析）。
+    position : str
+        ``"pre"`` / ``"post"`` / ``"solo"``。
+    fx_name : str
+        REAPER 插件名称。
+    last_eq_params : dict | None
+        输出字典，填充归一化后的 EQ 参数。
+    last_spectrum : dict | None
+        输出字典，填充频谱分析缓存数据。
+
+    Returns
+    -------
+    dict | None
+        归一化 EQ 参数字典，失败时返回 None。
+    """
+    if last_eq_params is not None:
+        last_eq_params.clear()
+
+    log.debug(
+        "EQ baseline for %s/%s/%s: stem_file_path=%r, exists=%s, "
+        "fx_name=%r, position=%s",
+        role, genre,
+        "spectrum" if (stem_file_path and os.path.exists(stem_file_path)) else "static",
+        stem_file_path or "",
+        os.path.exists(stem_file_path) if stem_file_path else False,
+        fx_name, position,
+    )
+
+    # ── 频谱驱动 EQ（优先路径）─────────────────────────────
+    if stem_file_path and os.path.exists(stem_file_path):
+        try:
+            report = SpectrumAnalyzer.analyze(stem_file_path)
+            if last_spectrum is not None:
+                last_spectrum.update({
+                    "presence_deficit": report.presence_deficit_db,
+                    "air_level_db": report.air_level_db,
+                    "sibilance_peak_hz": report.sibilance_peak_hz,
+                    "mud_ratio": report.mud_ratio_db,
+                })
+            log.info(
+                "Spectrum analysis: tilt=%.1f dB/oct, mud=%.1f dB, "
+                "presence_deficit=%.1f dB, sib_peak=%.0f Hz, air=%.1f dB, "
+                "resonances=%d, bands=%s",
+                report.spectral_tilt_db_per_octave,
+                report.mud_ratio_db,
+                report.presence_deficit_db,
+                report.sibilance_peak_hz,
+                report.air_level_db,
+                len(report.resonances),
+                {k: v for k, v in report.band_energy_db.items()},
+            )
+            eq_intent = _derive_eq_intent(
+                report, role=role, genre=genre, position=position,
+            )
+
+            is_ssl = "ssleq" in fx_name.lower()
+            if is_ssl:
+                normalized = _apply_ssleq_eq(eq_intent)
+            else:
+                normalized = _apply_proq3_eq(eq_intent)
+
+            for pname, pval in normalized.items():
+                fx.set_param(track_index, fx_index, pname, pval)
+
+            if last_eq_params is not None:
+                last_eq_params.update(normalized)
+            log.info(
+                "Auto-EQ (%s/%s/%s): %d bands @%s — %s",
+                role, genre, position, len(eq_intent.bands),
+                "SSLEQ" if is_ssl else "Pro-Q3",
+                ", ".join(b.reason for b in eq_intent.bands),
+            )
+            return dict(normalized)
+        except Exception as exc:
+            log.warning(
+                "Spectrum-driven EQ failed (%s), falling back to baseline",
+                exc,
+            )
+
+    # ── 静态基线回退 ──────────────────────────────────────
+    bands = _EQ_BASELINE.get(role, [])
+    if not bands:
+        log.debug("EQ baseline: no baseline bands for role=%r, skipping", role)
+        return None
+
+    log.info(
+        "EQ baseline fallback (%s/%s/%s): %d bands — %s",
+        role, genre, position, len(bands),
+        [(b.get("type"), b.get("freq_hz"), b.get("gain_db", 0.0))
+         for b in bands],
+    )
+
+    band_intents = []
+    for b in bands:
+        band_intents.append(EqBandIntent(
+            band_type=b.get("type", "bell"),
+            freq_hz=b.get("freq_hz", 1000.0),
+            gain_db=b.get("gain_db", 0.0),
+            q=b.get("q", 1.0),
+            reason=f"baseline:{b.get('type','')}@{b.get('freq_hz',0):.0f}Hz",
+        ))
+    eq_intent = EqIntent(
+        bands=band_intents,
+        spectral_tilt="neutral",
+        mud_detected=False,
+    )
+
+    is_ssl = "ssleq" in fx_name.lower()
+    try:
+        if is_ssl:
+            normalized = _apply_ssleq_eq(eq_intent)
+        else:
+            normalized = _apply_proq3_eq(eq_intent)
+        for pname, pval in normalized.items():
+            fx.set_param(track_index, fx_index, pname, pval)
+        if last_eq_params is not None:
+            last_eq_params.update(normalized)
+    except Exception as exc:
+        log.warning("Baseline EQ apply failed: %s", exc)
+        return None
+
+    log.info(
+        "EQ baseline (%s/%s): %d bands applied",
+        role, genre, len(bands),
+    )
+    return dict(normalized)
+
+
+# ════════════════════════════════════════════════════════════════
+# 校正性 EQ
+# ════════════════════════════════════════════════════════════════
+
+
+def auto_corrective_eq(
+    api,
+    fx: "FxManager",
+    track_idx: int,
+    stems_cache: list[dict],
+) -> dict:
+    """基于频谱分析的共振检测自动生成校正性 EQ。
+
+    分析轨道上的音频，检测共振频率，并自动设置 Pro-Q 3 的
+    衰减频段来削减不需要的共振。
+
+    Parameters
+    ----------
+    api : reapy API
+        REAPER API 对象（bridge.api）。
+    fx : FxManager
+        FX 管理器实例。
+    track_idx : int
+        目标轨道索引。
+    stems_cache : list[dict]
+        prepare_stems 的缓存列表。
+
+    Returns
+    -------
+    dict
+        ``{track_idx, eq_bands, resonance_count, applied}``
+    """
+    track_ptr = api.GetTrack(0, track_idx)
+    if not track_ptr:
+        return {"track_idx": track_idx, "error": "Track not found",
+                "eq_bands": [], "applied": False}
+
+    # 1. 获取轨道上的音频文件路径
+    stem_file = ""
+    for s in stems_cache:
+        if s.get("track_index") == track_idx and s.get("success"):
+            stem_file = s.get("file_path", "")
+            break
+
+    if not stem_file or not os.path.exists(stem_file):
+        log.warning("auto_corrective_eq: no audio source for track %d", track_idx)
+        return {"track_idx": track_idx, "error": "No audio source",
+                "eq_bands": [], "applied": False}
+
+    # 2. 频谱分析 → 共振检测
+    try:
+        report = SpectrumAnalyzer.analyze(stem_file)
+    except Exception as exc:
+        log.warning("auto_corrective_eq: spectrum analysis failed — %s", exc)
+        return {"track_idx": track_idx,
+                "error": f"Spectrum analysis failed: {exc}",
+                "eq_bands": [], "applied": False}
+
+    # 3. 仅对非谐波共振（Q > 15）生成衰减频段
+    eq_bands: list[dict] = []
+    for resonance in report.resonances:
+        if resonance.is_harmonic:
+            continue
+        if resonance.q_factor < 15.0:
+            continue
+        cut_db = -min(resonance.prominence_db, 6.0)
+        eq_bands.append({
+            "freq": resonance.freq_hz,
+            "gain": cut_db,
+            "q": min(resonance.q_factor * 0.5, 10.0),
+            "type": "bell",
+            "reason": f"{resonance.freq_hz}Hz room mode "
+                      f"Q={resonance.q_factor:.0f} "
+                      f"prominence={resonance.prominence_db:.1f}dB",
+        })
+
+    if not eq_bands:
+        log.info("auto_corrective_eq: no resonances detected on track %d",
+                 track_idx)
+        return {"track_idx": track_idx,
+                "resonance_count": len(report.resonances),
+                "eq_bands": [], "applied": False}
+
+    # 4. 查找轨道上第一个可用的 EQ 插件并应用频段
+    n_fx = api.TrackFX_GetCount(track_ptr)
+    eq_fx_idx = -1
+    for f in range(n_fx):
+        ret, name_buf = api.TrackFX_GetFXName(track_ptr, f, "", 256)
+        if isinstance(ret, (list, tuple)):
+            name = ret[4] if len(ret) > 4 else ""
+        else:
+            name = name_buf or ""
+        if "pro-q" in name.lower() or "reaeq" in name.lower():
+            eq_fx_idx = f
+            break
+
+    if eq_fx_idx < 0:
+        eq_fx_idx = fx.add(track_idx, "ReaEQ (Cockos)")
+        if eq_fx_idx < 0:
+            log.warning("auto_corrective_eq: cannot add EQ plugin to track %d",
+                        track_idx)
+            return {"track_idx": track_idx,
+                    "eq_bands": eq_bands,
+                    "resonance_count": len(report.resonances),
+                    "applied": False}
+
+    # 5. 构建 EqIntent 并应用
+    band_intents = []
+    for b in eq_bands[:8]:
+        band_intents.append(EqBandIntent(
+            band_type=b["type"],
+            freq_hz=b["freq"],
+            gain_db=b["gain"],
+            q=b["q"],
+            reason=b.get("reason", f"corrective:{b['freq']:.0f}Hz"),
+        ))
+
+    eq_intent = EqIntent(
+        bands=band_intents,
+        spectral_tilt="neutral",
+        mud_detected=report.mud_ratio_db > 3.0,
+    )
+    normalized = _apply_proq3_eq(eq_intent)
+    for pname, pval in normalized.items():
+        fx.set_param(track_idx, eq_fx_idx, pname, pval)
+
+    log.info(
+        "auto_corrective_eq: track %d — %d corrective bands applied "
+        "(out of %d detected resonances)",
+        track_idx, len(eq_bands), len(report.resonances),
+    )
+    return {
+        "track_idx": track_idx,
+        "eq_bands": eq_bands,
+        "resonance_count": len(report.resonances),
+        "applied": True,
+        "eq_fx_idx": eq_fx_idx,
+    }

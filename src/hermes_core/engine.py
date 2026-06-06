@@ -31,18 +31,15 @@ from hermes_core.loudness_optimizer import (
     generate_report,
     CompressionIntent,
     EqIntent,
-    EqBandIntent,
 )
 from hermes_core.normalize import normalize_params, compute_bus_compressor_params, PLUGIN_REGISTRY
 from hermes_core.audio_utils import note_to_ms, read_pcm, numpy_mix
 from hermes_core.profiles import (
     _resolve_fx_type,
     _get_compressor_preset,
-    _EQ_BASELINE,
     get_bpm_timing,
 )
 from hermes_core.dag import AudioNode, SendNode, ChainExecutor
-from hermes_core.spectrum import SpectrumAnalyzer, SpectrumReport
 from hermes_core.config import HermesConfig
 
 # ── 从提取的子模块重新导出（向后兼容）──────────────────────────
@@ -112,6 +109,9 @@ from hermes_core.eq_engine import (
     _ssleq_freq_norm,
     _ssleq_q_norm,
     _apply_ssleq_eq,
+    apply_eq_rms_match as _apply_eq_rms_match_impl,
+    apply_eq_baseline as _apply_eq_baseline_impl,
+    auto_corrective_eq as _auto_corrective_eq_impl,
 )
 from hermes_core.mastering import MasteringEngine, _get_genre_target_lufs, _master_error, _friendly_hint  # noqa: F401（向后兼容重新导出）
 from hermes_core.gain_staging import GainStagingEngine
@@ -597,258 +597,25 @@ class MixingEngine:
                            stem_file_path: str = "",
                            position: str = "solo",
                            fx_name: str = "") -> None:
-        """Apply EQ to *track_index* / *fx_index* for the given *role*.
-
-        When *stem_file_path* points to a readable WAV file the full
-        spectrum-driven pipeline is used::
-
-            SpectrumAnalyzer → EqIntent → translator → FxManager
-
-        The translator is chosen based on *fx_name*:
-        - ``SSLEQ`` → :func:`_apply_ssleq_eq`
-        - Everything else → :func:`_apply_proq3_eq`
-
-        *position* ("pre" / "post" / "solo") controls which rules fire
-        (see :func:`_derive_eq_intent`).
-
-        Otherwise falls back to the static :data:`_EQ_BASELINE` from
-        :mod:`hermes_core.profiles`.
-        """
+        """Apply EQ to *track_index* / *fx_index* for the given *role*.（委托到 eq_engine）"""
         self._last_eq_params = {}
-
-        log.debug(
-            "EQ baseline for %s/%s/%s: stem_file_path=%r, exists=%s, "
-            "fx_name=%r, position=%s",
-            role, genre, "spectrum" if (stem_file_path and os.path.exists(stem_file_path)) else "static",
-            stem_file_path or "",
-            os.path.exists(stem_file_path) if stem_file_path else False,
-            fx_name, position,
+        self._last_spectrum = getattr(self, "_last_spectrum", {}) or {}
+        normalized = _apply_eq_baseline_impl(
+            self._fx, track_index, fx_index, role,
+            genre=genre, stem_file_path=stem_file_path,
+            position=position, fx_name=fx_name,
+            last_eq_params=self._last_eq_params,
+            last_spectrum=self._last_spectrum,
         )
-
-        # ── Spectrum-driven EQ (happy path) ─────────────────
-        if stem_file_path and os.path.exists(stem_file_path):
-            try:
-                report = SpectrumAnalyzer.analyze(stem_file_path)
-                # Cache spectrum data so downstream FX (de-esser) can use it.
-                self._last_spectrum = {
-                    "presence_deficit": report.presence_deficit_db,
-                    "air_level_db": report.air_level_db,
-                    "sibilance_peak_hz": report.sibilance_peak_hz,
-                    "mud_ratio": report.mud_ratio_db,
-                }
-                log.info(
-                    "Spectrum analysis: tilt=%.1f dB/oct, mud=%.1f dB, "
-                    "presence_deficit=%.1f dB, sib_peak=%.0f Hz, air=%.1f dB, "
-                    "resonances=%d, bands=%s",
-                    report.spectral_tilt_db_per_octave,
-                    report.mud_ratio_db,
-                    report.presence_deficit_db,
-                    report.sibilance_peak_hz,
-                    report.air_level_db,
-                    len(report.resonances),
-                    {k: v for k, v in report.band_energy_db.items()},
-                )
-                eq_intent = _derive_eq_intent(
-                    report, role=role, genre=genre, position=position,
-                )
-
-                # Select translator based on FX
-                is_ssl = "ssleq" in fx_name.lower()
-                if is_ssl:
-                    normalized = _apply_ssleq_eq(eq_intent)
-                else:
-                    normalized = _apply_proq3_eq(eq_intent)
-
-                for pname, pval in normalized.items():
-                    self._fx.set_param(track_index, fx_index, pname, pval)
-
-                self._last_eq_params = normalized
-                log.info(
-                    "Auto-EQ (%s/%s/%s): %d bands @%s — %s",
-                    role, genre, position, len(eq_intent.bands),
-                    "SSLEQ" if is_ssl else "Pro-Q3",
-                    ", ".join(b.reason for b in eq_intent.bands),
-                )
-                return
-            except Exception as exc:
-                log.warning(
-                    "Spectrum-driven EQ failed (%s), falling back to baseline",
-                    exc,
-                )
-
-        # ── Static baseline fallback ─────────────────────────
-        bands = _EQ_BASELINE.get(role, [])
-        if not bands:
-            log.debug("EQ baseline: no baseline bands for role=%r, skipping", role)
-            return
-
-        log.info(
-            "EQ baseline fallback (%s/%s/%s): %d bands — %s",
-            role, genre, position, len(bands),
-            [(b.get("type"), b.get("freq_hz"), b.get("gain_db", 0.0))
-             for b in bands],
-        )
-
-        # Build a synthetic EqIntent so the same translators
-        # (_apply_proq3_eq / _apply_ssleq_eq) handle normalisation.
-        band_intents = []
-        for b in bands:
-            band_intents.append(EqBandIntent(
-                band_type=b.get("type", "bell"),
-                freq_hz=b.get("freq_hz", 1000.0),
-                gain_db=b.get("gain_db", 0.0),
-                q=b.get("q", 1.0),
-                reason=f"baseline:{b.get('type','')}@{b.get('freq_hz',0):.0f}Hz",
-            ))
-        eq_intent = EqIntent(
-            bands=band_intents,
-            spectral_tilt="neutral",
-            mud_detected=False,
-        )
-
-        is_ssl = "ssleq" in fx_name.lower()
-        try:
-            if is_ssl:
-                normalized = _apply_ssleq_eq(eq_intent)
-            else:
-                normalized = _apply_proq3_eq(eq_intent)
-            for pname, pval in normalized.items():
-                self._fx.set_param(track_index, fx_index, pname, pval)
-            self._last_eq_params = normalized
-        except Exception as exc:
-            log.warning("Baseline EQ apply failed: %s", exc)
-            return
-
-        log.info(
-            "EQ baseline (%s/%s): %d bands applied",
-            role, genre, len(bands),
-        )
+        if normalized is not None:
+            self._last_eq_params = dict(normalized)
 
     def auto_corrective_eq(self, track_idx: int) -> dict:
-        """基于频谱分析的共振检测自动生成校正性 EQ。
-
-        分析轨道上的音频，检测共振频率，并自动设置 Pro-Q 3 的
-        衰减频段来削减不需要的共振。
-
-        返回包含应用频段和共振信息的诊断字典。
-
-        spectrum.py 的共振检测结果直接反馈到 EQ 参数设置，
-        闭环连接频谱分析与 EQ 调整。
-
-        Returns
-        -------
-        dict
-            ``{track_idx, eq_bands, resonance_count, applied}``
-        """
-        api = self._bridge.api
-        track_ptr = api.GetTrack(0, track_idx)
-        if not track_ptr:
-            return {"track_idx": track_idx, "error": "Track not found",
-                    "eq_bands": [], "applied": False}
-
-        # 1. 获取轨道上的音频文件路径
-        #    尝试从已有的 stems_cache 或通过渲染临时片段获取
-        stem_file = ""
-        for s in getattr(self, "_stems_cache", []):
-            if s.get("track_index") == track_idx and s.get("success"):
-                stem_file = s.get("file_path", "")
-                break
-
-        if not stem_file or not os.path.exists(stem_file):
-            log.warning("auto_corrective_eq: no audio source for track %d", track_idx)
-            return {"track_idx": track_idx, "error": "No audio source",
-                    "eq_bands": [], "applied": False}
-
-        # 2. 频谱分析 → 共振检测
-        try:
-            report = SpectrumAnalyzer.analyze(stem_file)
-        except Exception as exc:
-            log.warning("auto_corrective_eq: spectrum analysis failed — %s", exc)
-            return {"track_idx": track_idx,
-                    "error": f"Spectrum analysis failed: {exc}",
-                    "eq_bands": [], "applied": False}
-
-        # 3. 仅对非谐波共振（Q > 15）生成衰减频段
-        eq_bands: list[dict] = []
-        for resonance in report.resonances:
-            if resonance.is_harmonic:
-                continue  # 跳过音乐性的谐波
-            if resonance.q_factor < 15.0:
-                continue  # Q 太低不是真正共振
-            cut_db = -min(resonance.prominence_db, 6.0)
-            eq_bands.append({
-                "freq": resonance.freq_hz,
-                "gain": cut_db,
-                "q": min(resonance.q_factor * 0.5, 10.0),
-                "type": "bell",
-                "reason": f"{resonance.freq_hz}Hz room mode "
-                          f"Q={resonance.q_factor:.0f} "
-                          f"prominence={resonance.prominence_db:.1f}dB",
-            })
-
-        if not eq_bands:
-            log.info("auto_corrective_eq: no resonances detected on track %d",
-                     track_idx)
-            return {"track_idx": track_idx,
-                    "resonance_count": len(report.resonances),
-                    "eq_bands": [], "applied": False}
-
-        # 4. 查找轨道上第一个可用的 EQ 插件并应用频段
-        n_fx = api.TrackFX_GetCount(track_ptr)
-        eq_fx_idx = -1
-        for f in range(n_fx):
-            ret, name_buf = api.TrackFX_GetFXName(track_ptr, f, "", 256)
-            if isinstance(ret, (list, tuple)):
-                name = ret[4] if len(ret) > 4 else ""
-            else:
-                name = name_buf or ""
-            if "pro-q" in name.lower() or "reaeq" in name.lower():
-                eq_fx_idx = f
-                break
-
-        if eq_fx_idx < 0:
-            # 没有 EQ 插件 — 添加一个 ReaEQ
-            eq_fx_idx = self._fx.add(track_idx, "ReaEQ (Cockos)")
-            if eq_fx_idx < 0:
-                log.warning("auto_corrective_eq: cannot add EQ plugin to track %d",
-                            track_idx)
-                return {"track_idx": track_idx,
-                        "eq_bands": eq_bands,
-                        "resonance_count": len(report.resonances),
-                        "applied": False}
-
-        # 5. 构建 EqIntent 并应用
-        band_intents = []
-        for b in eq_bands[:8]:  # 最多 8 个频段
-            band_intents.append(EqBandIntent(
-                band_type=b["type"],
-                freq_hz=b["freq"],
-                gain_db=b["gain"],
-                q=b["q"],
-                reason=b.get("reason", f"corrective:{b['freq']:.0f}Hz"),
-            ))
-
-        eq_intent = EqIntent(
-            bands=band_intents,
-            spectral_tilt="neutral",
-            mud_detected=report.mud_ratio_db > 3.0,
+        """基于频谱分析的共振检测自动生成校正性 EQ。（委托到 eq_engine）"""
+        return _auto_corrective_eq_impl(
+            self._bridge.api, self._fx, track_idx,
+            getattr(self, "_stems_cache", []),
         )
-        normalized = _apply_proq3_eq(eq_intent)
-        for pname, pval in normalized.items():
-            self._fx.set_param(track_idx, eq_fx_idx, pname, pval)
-
-        log.info(
-            "auto_corrective_eq: track %d — %d corrective bands applied "
-            "(out of %d detected resonances)",
-            track_idx, len(eq_bands), len(report.resonances),
-        )
-        return {
-            "track_idx": track_idx,
-            "eq_bands": eq_bands,
-            "resonance_count": len(report.resonances),
-            "applied": True,
-            "eq_fx_idx": eq_fx_idx,
-        }
 
     # ── Scene 1: Connection & health ─────────────────────
 
@@ -1619,6 +1386,54 @@ class MixingEngine:
 
         return result
 
+    # ── post_fx_balance 内部辅助 ────────────────────────────
+
+    @staticmethod
+    def _measure_group_lufs(
+        solo_render_fn, tmp_dir: str, label: str,
+        stem_idx_to_track: dict, indices: list[int],
+    ) -> float | None:
+        """独奏渲染一组轨道并测量 LUFS。"""
+        tracks = [
+            stem_idx_to_track[i] for i in indices
+            if i in stem_idx_to_track
+        ]
+        if not tracks:
+            return None
+        result = solo_render_fn(tracks, os.path.join(tmp_dir, f"{label}_solo"), label)
+        if result.get("output_path"):
+            try:
+                ana = SignalAnalyzer.analyze(result["output_path"])
+                return ana.integrated_lufs
+            except (OSError, ValueError, RuntimeError):
+                pass
+        return None
+
+    @staticmethod
+    def _enforce_peak_ceiling(
+        stems: list[dict], combined_peak: float | None,
+        vocal_indices: list[int], backing_indices: list[int],
+        apply_gain_fn, peak_ceiling_db: float,
+    ) -> tuple[float, float | None]:
+        """峰值超限时等比衰减两组轨道，返回 (atten_db, new_peak)。"""
+        atten_db = 0.0
+        if combined_peak is not None and combined_peak > peak_ceiling_db:
+            atten_db = peak_ceiling_db - combined_peak
+            for i, s in enumerate(stems):
+                if not s.get("success") or s.get("track_index") is None:
+                    continue
+                if i in vocal_indices or i in backing_indices:
+                    current_fader = s.get("fader_gain_db", 0.0)
+                    new_fader = current_fader + atten_db
+                    apply_gain_fn(s["track_index"], new_fader)
+                    s["fader_gain_db"] = round(new_fader, 1)
+            combined_peak = peak_ceiling_db
+            log.info(
+                "Peak ceiling: peak=%.1f dB → attenuated %.1f dB to hit %.1f dB",
+                combined_peak - atten_db, atten_db, peak_ceiling_db,
+            )
+        return atten_db, combined_peak
+
     def post_fx_balance(
         self,
         *,
@@ -1659,43 +1474,13 @@ class MixingEngine:
             i: s["track_index"] for i, s in enumerate(stems) if s.get("success")
         }
 
-        # ── Solo-render vocal group ──
-        vocal_tracks = [
-            stem_idx_to_track[i] for i in vocal_indices
-            if i in stem_idx_to_track
-        ]
-        vocal_lufs = None
-        if vocal_tracks:
-            vocal_result = self._solo_render(
-                vocal_tracks,
-                os.path.join(tmp, "vocal_solo"),
-                "vocal",
-            )
-            if vocal_result.get("output_path"):
-                try:
-                    ana = SignalAnalyzer.analyze(vocal_result["output_path"])
-                    vocal_lufs = ana.integrated_lufs
-                except (OSError, ValueError, RuntimeError):
-                    pass
-
-        # ── Solo-render backing group ──
-        backing_tracks = [
-            stem_idx_to_track[i] for i in backing_indices
-            if i in stem_idx_to_track
-        ]
-        backing_lufs = None
-        if backing_tracks:
-            backing_result = self._solo_render(
-                backing_tracks,
-                os.path.join(tmp, "backing_solo"),
-                "backing",
-            )
-            if backing_result.get("output_path"):
-                try:
-                    ana = SignalAnalyzer.analyze(backing_result["output_path"])
-                    backing_lufs = ana.integrated_lufs
-                except (OSError, ValueError, RuntimeError):
-                    pass
+        # ── Solo-render vocal/backing groups ──
+        vocal_lufs = self._measure_group_lufs(
+            self._solo_render, tmp, "vocal", stem_idx_to_track, vocal_indices,
+        )
+        backing_lufs = self._measure_group_lufs(
+            self._solo_render, tmp, "backing", stem_idx_to_track, backing_indices,
+        )
 
         # ── Update cached LUFS ──
         for i, s in enumerate(stems):
@@ -1715,44 +1500,34 @@ class MixingEngine:
         )
 
         # ── Step 2: full-mix render → peak check ──
-        combined_lufs = None
+        full_indices = vocal_indices + backing_indices
+        combined_lufs = self._measure_group_lufs(
+            self._solo_render, tmp, "full", stem_idx_to_track, full_indices,
+        )
         combined_peak = None
-        full_tracks = vocal_tracks + backing_tracks
-        if full_tracks:
-            full_result = self._solo_render(
-                full_tracks,
-                os.path.join(tmp, "full_mix"),
-                "full",
-            )
-            if full_result.get("output_path"):
-                try:
-                    ana = SignalAnalyzer.analyze(full_result["output_path"])
-                    combined_lufs = ana.integrated_lufs
-                    combined_peak = ana.peak_db
-                except (OSError, ValueError, RuntimeError):
-                    pass
+        if combined_lufs is not None:
+            full_tracks = [
+                stem_idx_to_track[i] for i in full_indices
+                if i in stem_idx_to_track
+            ]
+            if full_tracks:
+                full_result = self._solo_render(
+                    full_tracks, os.path.join(tmp, "full_mix"), "full",
+                )
+                if full_result.get("output_path"):
+                    try:
+                        ana = SignalAnalyzer.analyze(full_result["output_path"])
+                        combined_peak = ana.peak_db
+                    except (OSError, ValueError, RuntimeError):
+                        pass
 
-        # ── Step 3: peak ceiling — scale both down if peak > -3 ──
-        atten_db = 0.0
-        if combined_peak is not None and combined_peak > _PEAK_CEILING_DB:
-            atten_db = _PEAK_CEILING_DB - combined_peak  # negative
-            for i, s in enumerate(stems):
-                if not s.get("success") or s.get("track_index") is None:
-                    continue
-                if i in vocal_indices or i in backing_indices:
-                    # Accumulate — ratio faders were already set by _balance_faders.
-                    current_fader = s.get("fader_gain_db", 0.0)
-                    new_fader = current_fader + atten_db
-                    self.apply_gain(s["track_index"], new_fader)
-                    s["fader_gain_db"] = round(new_fader, 1)
-            combined_peak = _PEAK_CEILING_DB
-            if combined_lufs is not None:
-                combined_lufs = combined_lufs + atten_db
-
-            log.info(
-                "Peak ceiling: peak=%.1f dB → attenuated %.1f dB to hit %.1f dB",
-                combined_peak - atten_db, atten_db, _PEAK_CEILING_DB,
-            )
+        # ── Step 3: peak ceiling enforce ──
+        atten_db, combined_peak = self._enforce_peak_ceiling(
+            stems, combined_peak, vocal_indices, backing_indices,
+            self.apply_gain, _PEAK_CEILING_DB,
+        )
+        if combined_lufs is not None:
+            combined_lufs = combined_lufs + atten_db
 
         log.info(
             "Post-FX balance: vocal=%.1f LUFS, backing=%.1f LUFS, "
@@ -2332,27 +2107,8 @@ class MixingEngine:
         self, track_index: int, fx_index: int,
         pre_rms_db: float, post_rms_db: float,
     ) -> None:
-        """Compensate EQ gain change so downstream nodes see consistent RMS.
-
-        If the EQ caused the RMS to drop by *Δ* dB, apply *+Δ* dB of
-        output gain.  This prevents cascade invalidation of downstream
-        compressors when only EQ frequencies changed.
-
-        Called after every EQ parameter update.
-        """
-        delta = pre_rms_db - post_rms_db
-        if abs(delta) < 0.2:
-            return  # inaudible — skip to avoid parameter churn
-
-        log.debug(
-            "RMS match: track %d EQ@%d pre=%.1f → post=%.1f (Δ=%.1f dB)",
-            track_index, fx_index, pre_rms_db, post_rms_db, delta,
-        )
-        # Attempt to set Output Gain on the EQ plugin.
-        # If the param name differs, the call silently fails — the EQ just
-        # won't be gain-compensated, which is acceptable (not critical).
-        self._fx.set_param(track_index, fx_index, "Output Gain", delta)
-        self._fx.set_param(track_index, fx_index, "Output", delta)
+        """Compensate EQ gain change so downstream nodes see consistent RMS.（委托到 eq_engine）"""
+        _apply_eq_rms_match_impl(self._fx, track_index, fx_index, pre_rms_db, post_rms_db)
 
     # ── Scene 6: Render ──────────────────────────────────
 
