@@ -241,3 +241,56 @@ def _lookup_ms_table(ms: float, table: list[tuple[float, float]]) -> float:
     hi_ms, hi_knob = table[idx]
     t = (ms - lo_ms) / (hi_ms - lo_ms)
     return lo_knob + t * (hi_knob - lo_knob)
+
+
+# ════════════════════════════════════════════════════════════════
+# 校准信号生成
+# ════════════════════════════════════════════════════════════════
+
+
+def generate_calibration_signal(output_dir: str,
+                                duration: float = 5.0,
+                                sr: int = 48000) -> str:
+    """Generate a -18 dBFS RMS pink-like noise WAV for calibration.
+
+    生成用于压缩器校准的粉噪测试信号，电平 -18 dBFS RMS。
+
+    Parameters
+    ----------
+    output_dir : str
+        输出目录。
+    duration : float
+        信号时长（秒），默认 5.0。
+    sr : int
+        采样率，默认 48000。
+
+    Returns
+    -------
+    str
+        生成的 WAV 文件路径。
+    """
+    import logging
+    import os
+
+    import numpy as np
+    import soundfile as sf
+
+    log = logging.getLogger(__name__)
+
+    n = int(sr * duration)
+    rng = np.random.default_rng(42)
+    # Approximate pink noise via filtered white noise
+    white = rng.standard_normal(n)
+    # Simple 1/f filter: cumulative sum of white noise
+    pink = np.cumsum(white)
+    pink /= np.max(np.abs(pink)) + 1e-10
+    # Scale to -18 dBFS RMS
+    target_linear = 10.0 ** (-18.0 / 20.0)
+    pink *= target_linear / (np.sqrt(np.mean(pink ** 2)) + 1e-10)
+    stereo = np.column_stack([pink, pink])
+
+    out_path = os.path.join(output_dir, "cal_signal.wav")
+    sf.write(out_path, stereo, sr, subtype="FLOAT")
+    log.info("Generated calibration signal: %s (%.1fs, -18 dBFS RMS)",
+             out_path, duration)
+    return out_path

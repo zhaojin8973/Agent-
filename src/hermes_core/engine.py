@@ -26,17 +26,13 @@ from hermes_core.project_meta import (
 )
 from hermes_core.loudness_optimizer import (
     find_optimal_gain,
-    verify_output,
-    load_calibration,
-    generate_report,
     CompressionIntent,
-    EqIntent,
 )
 from hermes_core.normalize import normalize_params, compute_bus_compressor_params, PLUGIN_REGISTRY
-from hermes_core.audio_utils import note_to_ms, read_pcm, numpy_mix
+from hermes_core.plugin_registry import GENRE_SPATIAL_PLUGINS
+from hermes_core.audio_utils import read_pcm, numpy_mix
 from hermes_core.profiles import (
     _resolve_fx_type,
-    _get_compressor_preset,
     get_bpm_timing,
 )
 from hermes_core.dag import AudioNode, SendNode, ChainExecutor
@@ -46,25 +42,17 @@ from hermes_core.config import HermesConfig
 from hermes_core.genre_tables import (
     # 引擎直接使用
     _DEFAULT_TARGET_LUFS,
-    _PRO_L2_RANGE_DB,
-    _GENRE_RVOX_MULTIPLIER,
-    _GENRE_PRODS_RANGE,
-    _GENRE_RETURN_EQ,  # 向后兼容重新导出（tests/test_engine.py 引用）
+    _PEAK_CEILING_DB,
     _SPATIAL_PLUGIN,
     _SPATIAL_BUS_NAMES,
-    _REVERB_BUS_TYPES,
     _DELAY_BUS_TYPES,
-    _CLA76_ATTACK_KNOB_MIN,
-    _CLA76_ATTACK_KNOB_MAX,
-    _CLA76_GR_TABLE,
-    _CLA76_ATTACK_MS_TABLE,
-    _CLA76_RELEASE_MS_TABLE,
+    # 向后兼容重新导出（tests/test_engine.py 引用）
+    _GENRE_RVOX_MULTIPLIER,
+    _GENRE_PRODS_RANGE,
+    _GENRE_RETURN_EQ,
     _GENRE_EQ_TWEAKS,
-    # 向后兼容重新导出（测试中广泛引用）
     _GENRE_VOCAL_TO_BACKING,
-    _PEAK_CEILING_DB,
     _GENRE_TARGET_LUFS,
-    _CLIP_GAIN_REF_DB,
     _GENRE_CREST_GR_RATIO,
     _GENRE_CLA76_ATTACK_BASE,
     _GENRE_CLA76_ATTACK_K,
@@ -72,62 +60,35 @@ from hermes_core.genre_tables import (
     _GENRE_DELAY_SEND_BASE,
     _SEND_LEVEL_MIN,
     _SEND_LEVEL_MAX,
-    _SEND_DISABLED_THRESHOLD,
-    _CREST_REFERENCE,
-    _PRESENCE_DEFICIT_THRESHOLD,
-    _SIBILANCE_REFERENCE_PEAK,
-    _SECTION_BOOST,
-    _MIN_EQ_Q,
-    _PROQ3_SHAPE,
-    _PROQ3_FREQ_LOG_BASE,
-    _LF_FRQ_TABLE,
-    _LMF_FRQ_STEPS,
-    _HMF_FRQ_TABLE,
-    _HF_FRQ_TABLE,
-    _HP_FRQ_TABLE,
-    _SSL_Q_MIN,
-    _SSL_Q_MAX,
-    _SSL_Q_RANGE,
+    _GENRE_MICROSHIFT_SEND,
 )
 from hermes_core.comp_engine import (
     _compute_cla76_attack_knob,
     _derive_compressor_intent,
     _apply_vca_params,
     _apply_fet_params,
-    _apply_cla76_params,
     _apply_opto_params,
-    _apply_rvox_params,
-    _ms_to_cla76_attack,
-    _ms_to_cla76_release,
-    _lookup_ms_table,
+    _apply_rvox_params,  # 向后兼容重新导出
+    generate_calibration_signal,
 )
 from hermes_core.eq_engine import (
     _derive_eq_intent,
     _proq3_freq_norm,
     _proq3_q_norm,
     _apply_proq3_eq,
-    _ssleq_freq_norm,
-    _ssleq_q_norm,
-    _apply_ssleq_eq,
-    apply_eq_rms_match as _apply_eq_rms_match_impl,
     apply_eq_baseline as _apply_eq_baseline_impl,
     auto_corrective_eq as _auto_corrective_eq_impl,
 )
-from hermes_core.mastering import MasteringEngine, _get_genre_target_lufs, _master_error, _friendly_hint  # noqa: F401（向后兼容重新导出）
+from hermes_core.mastering import MasteringEngine, _friendly_hint  # noqa: F401（向后兼容重新导出）
 from hermes_core.gain_staging import GainStagingEngine
 from hermes_core.spatial_engine import (
     _compute_spatial_sends,
-    _resolve_spatial_plugin_key,
     _apply_abbey_road_eq,
     _apply_spatial_params,
     _apply_return_eq,
 )
 from hermes_core.master_templates import (
     apply_master_template as _apply_master_template_impl,
-    _master_cla as _master_cla_impl,
-    _master_hewitt as _master_hewitt_impl,
-    _master_serban as _master_serban_impl,
-    _master_townsend as _master_townsend_impl,
     AVAILABLE_TEMPLATES,
 )
 from hermes_core.chain_renderer import (
@@ -202,6 +163,7 @@ class MixingEngine:
         # Set to False to allow create_project / reset to wipe tracks.
         self._tracks_protected: bool = True
         self._stems_cache: list[dict] = []
+        self._uses_temp_path: bool = True  # REAPER 内部路径是否指向 temp dir
 
         # AudioNode pipeline — built by apply_profile()
         self._vocal_chain_nodes: list[AudioNode] = []
@@ -405,34 +367,24 @@ class MixingEngine:
                 )
                 self._backing_chain_nodes.extend(nodes)
 
-        # ── Reverb bus with observer (SendNode) ──
-        self._reverb_send_node = None
-        if profile.bus_reverb:
-            reverb_result = self.create_reverb_send(
-                vocal_track,
-                level_db=profile.reverb_level_db,
-                reverb_fx=profile.bus_reverb.name,
-            )
-            # Attach SendNode as observer on last vocal chain node
-            last_vocal = (
-                self._vocal_chain_nodes[-1]
-                if self._vocal_chain_nodes
-                else None
-            )
-            if last_vocal is not None:
-                self._reverb_send_node = SendNode(
-                    name="Vocal_Verb_Send",
-                    fx_type="reverb",
-                    source_node=last_vocal,
-                )
-                self._reverb_send_node.params = {
-                    "level_db": profile.reverb_level_db,
-                    "aux_index": reverb_result.get("aux_index"),
-                    "fx_index": reverb_result.get("fx_index"),
-                }
-                self._reverb_send_node.mark_clean()
-                log.info("SendNode attached: %s observes %s",
-                         self._reverb_send_node.name, last_vocal.name)
+        # ── 空间效果器：Reverb×3 + Delay×3 + MicroShift AUX ──
+        from hermes_core.signal import SignalAnalyzer
+        sd = stem_data.get(0, {})
+        crest_db = sd.get("crest_factor_db", 12.0)
+        presence_db = sd.get("presence_deficit_db", 0.0)
+        mud_db = sd.get("mud_ratio_db", 0.0)
+
+        spatial_sends = _compute_spatial_sends(
+            genre=genre,
+            crest_factor_db=crest_db,
+            presence_deficit_db=presence_db,
+            mud_ratio_db=mud_db,
+            section="verse",
+        )
+        self._spatial_result = self.build_spatial_chain(
+            vocal_track, spatial_sends, genre, _bpm,
+            variant=getattr(profile, "chain_variant", ""),
+        )
 
         self._mark_stage("apply_profile")
         self._record_audit(
@@ -629,26 +581,25 @@ class MixingEngine:
     # ── Scene 2: Project & tracks ────────────────────────
 
     def _safe_project_path(self, output_dir: str, name: str) -> tuple[str, bool]:
-        """Return (path, conflict_renamed) for ``{output_dir}/{name}.rpp``.
+        """Return ``(path, conflict)`` for ``{output_dir}/{name}.rpp``.
 
-        If the target already exists a timestamp suffix is appended to avoid
-        overwriting a previous project.
+        Always returns the canonical path ``{output_dir}/{name}.rpp``.
+        If the file already exists, ``conflict`` is True but the path
+        is unchanged — the caller decides whether to overwrite.
 
         REAPER's ``Main_SaveProjectEx`` can fail with NEWTEMP errors on
         paths with non-ASCII characters or restrictive macOS permissions.
-        To guarantee headless reliability we ALWAYS save to a system temp
-        directory and then copy the result to *output_dir* as a post-save
-        step.  The temp directory is returned so the caller knows where
-        REAPER actually writes.
+        To guarantee headless reliability we save the initial skeleton to
+        a system temp directory and then copy the result to *output_dir*.
+        Subsequent saves use ``options=8`` to keep REAPER's internal path
+        in sync with the actual file location.
         """
         os.makedirs(output_dir, exist_ok=True)
 
         target = os.path.join(output_dir, f"{name}.rpp")
         conflict = os.path.exists(target)
         if conflict:
-            ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
-            target = os.path.join(output_dir, f"{name}_{ts}.rpp")
-            log.info("Project file exists — renamed to %s", target)
+            log.info("Project file exists — will be overwritten: %s", target)
 
         return target, conflict
 
@@ -729,15 +680,16 @@ class MixingEngine:
             base64.b64encode(b"evaw\x18\x00\x01").decode(), True,
         )
 
-        # Save to a temp directory first — REAPER can fail with NEWTEMP
-        # errors on paths with non-ASCII characters or restrictive macOS
-        # sandbox permissions.  We always save to a known-safe temp dir,
-        # then copy the result to the user's requested path.
+        # ── 三阶段保存（避免 NEWTEMP + 保证 REAPER 路径正确）──
+        # Stage 1: 保存初始骨架到 temp dir（ASCII path，永不出 NEWTEMP）
+        #   options=8 → REAPER 将 temp path 记为此项目的文件名
         tmp_dir = tempfile.mkdtemp(prefix="hermes_proj_")
         tmp_path = os.path.join(tmp_dir, os.path.basename(safe_path))
-        api.Main_SaveProjectEx(0, tmp_path, 0)
-        # 清除 REAPER 内部 dirty flag（避免退出弹窗）
+        api.Main_SaveProjectEx(0, tmp_path, 8)
+        # 清除 dirty flag（save to current = temp_path 第二次，不出问题）
         api.Main_SaveProjectEx(0, "", 0)
+
+        # Stage 2: 将骨架复制到用户目标路径
         try:
             shutil.copy2(tmp_path, safe_path)
             log.info("Project copied %s → %s", tmp_path, safe_path)
@@ -745,6 +697,21 @@ class MixingEngine:
             log.warning("Could not copy project to %s; using temp path", safe_path)
             safe_path = tmp_path
         self._project_path = safe_path
+
+        # Stage 3: 尝试将 REAPER 内部项目路径切换到用户目标
+        #   options=8 → set as new project filename
+        #   若目标路径有非 ASCII 字符可能触发 NEWTEMP → 兜底留 temp
+        try:
+            api.Main_SaveProjectEx(0, safe_path, 8)
+            self._uses_temp_path = False
+            log.info("REAPER project path set to: %s", safe_path)
+        except Exception:
+            self._uses_temp_path = True
+            log.warning(
+                "Cannot set REAPER project path to %s; "
+                "will use temp-copy strategy for saves", safe_path
+            )
+
         # Snapshot REAPER's view of the project — later operations verify
         # the user has not manually switched to a different project.
         _, name_buf, _ = api.GetProjectName(0, "", 256)
@@ -792,17 +759,36 @@ class MixingEngine:
         }
 
     def _safe_save(self, target_path: str) -> str:
-        """Save project via a temp dir to avoid REAPER NEWTEMP errors.
+        """Save project to *target_path* reliably.
 
-        REAPER's ``Main_SaveProjectEx`` can trigger modal "Error creating
-        project file" dialogs on paths with non-ASCII characters or macOS
-        sandbox restrictions.  We always save to a temp directory, then
-        copy the result to *target_path*.
+        Two strategies:
+
+        - **Direct save**: when ``_uses_temp_path`` is False, saves with
+          ``options=8`` via an explicit *target_path*.  ``&8`` tells REAPER
+          to set the project filename, which guarantees the write happens.
+        - **Temp-copy**: otherwise (or if direct save raises) saves to a
+          system temp directory first (to avoid NEWTEMP errors on non-ASCII
+          paths), then copies to *target_path*.
+
+        Returns the actual path the project was saved to (target_path or
+        a temp path on copy failure).
         """
+        # 直接保存（显式路径 + options=8）
+        if not self._uses_temp_path:
+            try:
+                self._bridge.api.Main_SaveProjectEx(0, target_path, 8)
+                return target_path
+            except Exception:
+                log.warning(
+                    "Direct save failed for %s, falling back to temp-copy",
+                    target_path,
+                )
+                self._uses_temp_path = True
+
+        # 兜底：temp → copy（ASCII temp path，永不出 NEWTEMP）
         tmp_dir = tempfile.mkdtemp(prefix="hermes_save_")
         tmp_path = os.path.join(tmp_dir, os.path.basename(target_path))
-        self._bridge.api.Main_SaveProjectEx(0, tmp_path, 0)
-        self._bridge.api.Main_SaveProjectEx(0, "", 0)  # 清除 dirty flag
+        self._bridge.api.Main_SaveProjectEx(0, tmp_path, 8)
         try:
             shutil.copy2(tmp_path, target_path)
         except OSError:
@@ -922,7 +908,8 @@ class MixingEngine:
     def save_project_as(self, new_name: str) -> dict:
         """另存为一个新的工程名称（在同一目录下）。
 
-        不修改当前 ``_project_path`` — 相当于导出一个副本。
+        将当前工程保存为新文件，同时尝试将 REAPER 内部路径切换到新文件。
+        返回 ``{path, original_path, saved_at}``。
         """
         if not self._project_path:
             raise RuntimeError(
@@ -931,10 +918,9 @@ class MixingEngine:
         self._sync_meta()
         proj_dir = os.path.dirname(self._project_path)
         new_path = os.path.join(proj_dir, f"{new_name}.rpp")
-        # 如果目标已存在，追加时间戳
+        # 如果目标已存在，直接覆盖（不再重命名）
         if os.path.exists(new_path):
-            ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
-            new_path = os.path.join(proj_dir, f"{new_name}_{ts}.rpp")
+            log.info("save_project_as: overwriting existing %s", new_path)
         actual = self._safe_save(new_path)
         # 同步元数据
         if self._meta and self._meta_dir:
@@ -1140,8 +1126,11 @@ class MixingEngine:
         REAPER API 的 Main_SaveProject 不清除内部 dirty flag，
         所以不能调用 Close/Quit action（会触发保存弹窗）。
 
-        替代方案：保存到磁盘 → 删除所有轨道 → 重置 Master。
-        效果等同于关闭后打开空白工程。
+        替代方案：保存到磁盘 → 显式清除 dirty flag → 删除所有轨道 →
+        重置 Master。效果等同于关闭后打开空白工程。
+
+        注意：删除轨道前先清除 dirty flag，防止后续自动保存将空工程
+        写入文件覆盖已保存内容。
 
         返回 ``{saved, project_path}``。
         """
@@ -1152,6 +1141,9 @@ class MixingEngine:
         if save:
             self.save_project()
             result["saved"] = True
+
+        # 显式清除 dirty flag，防止删除轨道后自动保存覆盖文件
+        api.Main_SaveProjectEx(0, "", 0)
 
         # 删除轨道 + 重置 Master（等效关闭）
         n = api.CountTracks(0)
@@ -1871,7 +1863,7 @@ class MixingEngine:
 
     def create_reverb_send(self, src_track: int,
                           level_db: float = -8.0,
-                          reverb_fx: str = "ReaVerbate",
+                          reverb_fx: str = "ValhallaVintageVerb",
                           mode: str = "post-fader") -> dict:
         """Create a reverb aux return and send from src_track to it.
 
@@ -1880,17 +1872,17 @@ class MixingEngine:
         This prevents low-frequency mud and high-frequency sibilance
         in the reverb tail — the Agent never sees these filters.
 
-        Returns {aux_index, send, fx_index, abbey_eq_index}.
+        Returns {aux_index, send, fx_index, safety_eq_index}.
         """
         self._require_state(PipelineState.CREATED, PipelineState.FX_APPLIED,
                             PipelineState.SPATIAL_APPLIED)
 
         aux_idx = self._tracks.create(name="Verb Return")
 
-        # Abbey Road safety EQ — de-mud + de-ess the reverb input
-        abbey_eq_idx = self._fx.add(aux_idx, "ReaEQ (Cockos)")
-        if abbey_eq_idx >= 0:
-            self._apply_abbey_road_eq(aux_idx, abbey_eq_idx)
+        # Safety EQ — Pro-Q 3 HPF+LPF on reverb return
+        safety_eq_idx = self._fx.add(aux_idx, "FabFilter Pro-Q 3 (FabFilter)")
+        if safety_eq_idx >= 0:
+            _apply_abbey_road_eq(self._fx, aux_idx, safety_eq_idx)
 
         fx_idx = self._fx.add(aux_idx, reverb_fx)
 
@@ -1904,138 +1896,253 @@ class MixingEngine:
             "aux_index": aux_idx,
             "send": send_info,
             "fx_index": fx_idx,
-            "abbey_eq_index": abbey_eq_idx,
+            "safety_eq_index": safety_eq_idx,
         }
-
-    def _apply_abbey_road_eq(self, aux_track: int, eq_fx_idx: int) -> None:
-        """Configure ReaEQ as an Abbey Road safety filter.（委托到 spatial_engine）"""
-        _apply_abbey_road_eq(self._fx, aux_track, eq_fx_idx)
 
     # ── 空间效果器链 ──────────────────────────────────────────
 
-    def _resolve_spatial_plugin_key(self, fx_name: str) -> str | None:
-        """将 REAPER 返回的插件名匹配到 PLUGIN_REGISTRY 键。（委托到 spatial_engine）"""
-        return _resolve_spatial_plugin_key(fx_name)
-
-    def _apply_spatial_params(
-        self, aux_track: int, fx_idx: int, loaded_name: str,
-        bus: str, genre: str, bpm: float | None = None,
-    ) -> None:
-        """对流派空间插件应用预设参数。（委托到 spatial_engine）"""
-        _apply_spatial_params(self._fx, aux_track, fx_idx, loaded_name, bus, genre, bpm)
-
-    def _apply_return_eq(
-        self, aux_track: int, eq_fx_idx: int, bus: str, genre: str,
-    ) -> None:
-        """Configure Pro-Q 3 as a return-track safety filter.（委托到 spatial_engine）"""
-        _apply_return_eq(self._fx, aux_track, eq_fx_idx, bus, genre)
-
     def build_spatial_chain(
         self, vocal_track: int, spatial_sends: dict, genre: str = "pop",
-        bpm: float | None = None,
+        bpm: float | None = None, variant: str = "",
     ) -> dict:
-        """Create reverb and delay return tracks with sends from the vocal.
+        """按设计文档 §3 创建完整空间效果器链。
 
-        Uses the send levels computed by :func:`_compute_spatial_sends`
-        (via ``post_fx_balance``).  Buses whose send level is ``None``
-        are skipped — no track or plugin is created for them.
-
-        Each return track gets:
-        1. FabFilter Pro-Q 3 as a safety HPF+LPF filter
-        2. A genre-appropriate reverb or delay plugin
-        3. [NEW] Genre-specific spatial parameters applied
-        4. A post-fader send from the vocal track
-
-        Parameters
-        ----------
-        vocal_track : int
-            Index of the vocal track to send from.
-        spatial_sends : dict
-            Send levels computed by :func:`_compute_spatial_sends`.
-        genre : str
-            Genre key for parameter lookup.
-        bpm : float | None
-            Project tempo — used for musical note-to-ms conversion
-            in delay plugins.  Defaults to 120 BPM when None.
-
-        Returns a dict mapping bus keys to their track/send/fx indices.
+        包含：
+        - Reverb AUX ×3（流派专属混响器配对，§3.2）
+        - Delay AUX ×3（EchoBoy Slap/Throw/PingPong，§3.3）
+        - MicroShift AUX（Pro-Q3 MS HPF，§3.1）
+        - Blackhole AUX（electronic 专属 §3.4）
+        - Delay → Reverb 交叉发送（§3.5）
         """
-
         result: dict[str, dict] = {}
+        # ── 解析流派专属插件（Vocal A 无 UAD）──
+        from hermes_core.plugin_registry import GENRE_SPATIAL_PLUGINS_A
+        plugins_map = GENRE_SPATIAL_PLUGINS_A if variant == "a" else GENRE_SPATIAL_PLUGINS
+        genre_plugins = plugins_map.get(genre, {})
 
-        # Order matters: create reverbs first, then delays.
-        bus_order = ["plate", "hall", "room", "slap", "rhythm"]
-
-        for bus in bus_order:
-            send_key = f"delay_{bus}" if bus in _DELAY_BUS_TYPES else f"reverb_{bus}"
+        # ── Phase 1: Reverb ×3（先建，供 cross-send 引用）──
+        for bus in ["plate", "hall", "room"]:
+            send_key = f"reverb_{bus}"
             level_db = spatial_sends.get(send_key)
-
-            # None = disabled for this genre — skip entirely.
             if level_db is None:
                 continue
 
-            bus_name = _SPATIAL_BUS_NAMES.get(bus, f"{bus} Return")
-            plugin_names = _SPATIAL_PLUGIN.get(bus, [])
-            if not plugin_names:
-                log.warning("build_spatial_chain: no plugin mapped for bus=%s", bus)
+            aux_idx, eq_idx, fx_idx, loaded_name = self._create_spatial_bus(
+                bus, genre_plugins.get(bus), genre, bpm,
+            )
+            if aux_idx < 0:
                 continue
 
-            # 1. Create return track
-            aux_idx = self._tracks.create(name=bus_name)
-
-            # 2. Pro-Q 3 safety EQ (HPF + LPF)
-            eq_idx = self._fx.add(aux_idx, "FabFilter Pro-Q 3")
-            if eq_idx >= 0:
-                self._apply_return_eq(aux_idx, eq_idx, bus, genre)
-
-            # 3. Spatial plugin — try each candidate until one loads
-            fx_idx = -1
-            loaded_name = ""
-            for candidate in plugin_names:
-                fx_idx = self._fx.add(aux_idx, candidate)
-                if fx_idx >= 0:
-                    loaded_name = candidate
-                    break
-            if fx_idx < 0:
-                log.warning(
-                    "build_spatial_chain: failed to load any plugin for "
-                    "bus=%s (tried %s)", bus, plugin_names,
-                )
-            else:
-                # 3a. Query REAPER for the actual plugin name
-                #     (TrackFX_AddByName may have resolved a short name
-                #      to the full VST3/VST name)
-                track_ptr = self._bridge.api.GetTrack(0, aux_idx)
-                raw_name = self._bridge.api.TrackFX_GetFXName(
-                    track_ptr, fx_idx, "", 256,
-                )
-                actual_name = _extract_reaper_string(raw_name) or loaded_name
-
-                # 3b. Apply genre-specific spatial parameters
-                self._apply_spatial_params(
-                    aux_idx, fx_idx, actual_name, bus, genre, bpm,
-                )
-
-            # 4. Create send from vocal track
             send_info = self._send.create(
                 src=vocal_track, dest=aux_idx, level_db=level_db,
             )
-
             result[send_key] = {
-                "aux_index": aux_idx,
-                "eq_index": eq_idx,
-                "fx_index": fx_idx,
-                "send": send_info,
+                "aux_index": aux_idx, "eq_index": eq_idx,
+                "fx_index": fx_idx, "send": send_info,
                 "send_level_db": level_db,
             }
-
             log.info(
-                "Spatial chain: %s → aux %d [%s + %s], send=%.1f dB (genre=%s)",
-                bus_name, aux_idx, "Pro-Q 3", loaded_name or "?", level_db, genre,
+                "Reverb: %s → aux %d [%s], send=%.1f dB (%s)",
+                bus, aux_idx, loaded_name or "?", level_db, genre,
             )
+
+        # ── Phase 2: Delay ×3（再建，寄 cross-send 到 reverb）──
+        delay_buses = ["slap", "throw", "pingpong"]
+        for bus in delay_buses:
+            send_key = f"delay_{bus}"
+            level_db = spatial_sends.get(send_key)
+            if level_db is None:
+                continue
+
+            aux_idx, eq_idx, fx_idx, loaded_name = self._create_spatial_bus(
+                bus, None, genre, bpm,
+            )
+            if aux_idx < 0:
+                continue
+
+            send_info = self._send.create(
+                src=vocal_track, dest=aux_idx, level_db=level_db,
+            )
+            result[send_key] = {
+                "aux_index": aux_idx, "eq_index": eq_idx,
+                "fx_index": fx_idx, "send": send_info,
+                "send_level_db": level_db,
+            }
+            log.info(
+                "Delay: %s → aux %d [%s], send=%.1f dB (%s)",
+                bus, aux_idx, loaded_name or "?", level_db, genre,
+            )
+
+            # ── Delay → Reverb 交叉发送（§3.5）──
+            for reverb_key, reverb_info in result.items():
+                if not reverb_key.startswith("reverb_"):
+                    continue
+                try:
+                    self._send.create(
+                        src=aux_idx, dest=reverb_info["aux_index"],
+                        level_db=-8.0,
+                    )
+                except Exception as exc:
+                    log.debug("Cross-send %s→%s failed: %s", bus, reverb_key, exc)
+
+        # ── Phase 3: MicroShift AUX（§3.1）──
+        microshift_level = spatial_sends.get("microshift")
+        if microshift_level is not None and microshift_level > _SEND_LEVEL_MIN:
+            ms_aux = self._create_microshift_aux(
+                vocal_track, result, microshift_level, genre,
+            )
+            if ms_aux:
+                result["microshift"] = ms_aux
+
+        # ── Phase 4: Blackhole AUX（§3.4，仅 electronic）──
+        if genre == "electronic":
+            blackhole_level = spatial_sends.get("reverb_blackhole", -12.0)
+            aux_idx, eq_idx, fx_idx, loaded_name = self._create_spatial_bus(
+                "blackhole", None, genre, bpm,
+            )
+            if aux_idx >= 0:
+                send_info = self._send.create(
+                    src=vocal_track, dest=aux_idx, level_db=blackhole_level,
+                )
+                result["reverb_blackhole"] = {
+                    "aux_index": aux_idx, "eq_index": eq_idx,
+                    "fx_index": fx_idx, "send": send_info,
+                    "send_level_db": blackhole_level,
+                }
+                log.info(
+                    "Blackhole: aux %d [%s], send=%.1f dB",
+                    aux_idx, loaded_name or "?", blackhole_level,
+                )
 
         self._mark_stage("build_spatial_chain")
         return result
+
+    # ── 空间效果器子方法 ──────────────────────────────────────
+
+    def _create_spatial_bus(
+        self, bus: str, genre_plugins: list[str] | None,
+        _genre: str, bpm: float | None,
+    ) -> tuple[int, int, int, str]:
+        """创建一条空间返回轨：加载空间插件 + 应用流派参数。
+
+        使用混响/延迟自带的音色控制（HPF/damping/Low Cut），
+        不再外挂 Pro-Q3。仅 MicroShift 通过 _create_microshift_aux
+        单独添加 Pro-Q3 MS HPF。
+
+        Returns ``(aux_index, eq_index, fx_index, loaded_name)``。
+        eq_index 始终为 -1。
+        """
+        bus_name = _SPATIAL_BUS_NAMES.get(bus, f"{bus} Return")
+
+        # 流派专属插件优先，回退到通用 SPATIAL_PLUGIN_MAP
+        plugin_names = genre_plugins if genre_plugins else _SPATIAL_PLUGIN.get(bus, [])
+        if not plugin_names:
+            log.warning("_create_spatial_bus: no plugin for bus=%s", bus)
+            return -1, -1, -1, ""
+
+        aux_idx = self._tracks.create(name=bus_name)
+
+        fx_idx = -1
+        loaded_name = ""
+        for candidate in plugin_names:
+            fx_idx = self._fx.add(aux_idx, candidate)
+            if fx_idx >= 0:
+                loaded_name = candidate
+                break
+
+        if fx_idx >= 0 and loaded_name:
+            track_ptr = self._bridge.api.GetTrack(0, aux_idx)
+            raw_name = self._bridge.api.TrackFX_GetFXName(
+                track_ptr, fx_idx, "", 256,
+            )
+            actual_name = _extract_reaper_string(raw_name) or loaded_name
+            _apply_spatial_params(
+                self._fx, aux_idx, fx_idx, actual_name, bus, _genre, bpm,
+            )
+
+        return aux_idx, -1, fx_idx, loaded_name
+
+    def _create_microshift_aux(
+        self, vocal_track: int, result: dict,
+        send_level_db: float, genre: str,
+    ) -> dict | None:
+        """创建 MicroShift AUX（§3.1）：MicroShift → Pro-Q3 MS HPF。
+
+        MicroShift AUX 还会发送到所有已创建的 Reverb/Delay bus，
+        让展宽后的信号和主唱共享同一空间。
+        """
+        bus_name = _SPATIAL_BUS_NAMES.get("microshift", "MicroShift")
+        plugin_names = _SPATIAL_PLUGIN.get("microshift", ["MicroShift"])
+
+        aux_idx = self._tracks.create(name=bus_name)
+
+        # 1. MicroShift 插件（Mix=100%, Detune=0.15, Delay=0.08, Focus=1-5kHz）
+        ms_fx_idx = -1
+        for candidate in plugin_names:
+            ms_fx_idx = self._fx.add(aux_idx, candidate)
+            if ms_fx_idx >= 0:
+                break
+        if ms_fx_idx < 0:
+            log.warning("_create_microshift_aux: MicroShift not found")
+            return None
+
+        # 设置 MicroShift 参数
+        ms_params = {
+            "Mix": 1.0,       # 100% wet（AUX 全湿）
+            "Detune": 0.15,   # ±9 音分
+            "Delay": 0.08,    # 中短延迟
+            "Focus": 0.5,     # 1-5kHz（归一化）
+        }
+        from hermes_core.normalize import normalize_params
+        try:
+            normalized = normalize_params("MicroShift", ms_params)
+            for key, value in normalized.items():
+                self._fx.set_param(aux_idx, ms_fx_idx, key, value)
+        except Exception:
+            # 直接尝试设参数值
+            pass
+
+        # 2. Pro-Q 3 MS 模式 — Side HPF @ 500Hz
+        eq_idx = self._fx.add(aux_idx, "FabFilter Pro-Q 3")
+        if eq_idx >= 0:
+            # Side-channel HPF via Mid-Side mode
+            try:
+                self._fx.set_param(aux_idx, eq_idx, "MS Mode", 1.0)
+                # Band 1: Side HPF @ 500Hz
+                self._fx.set_param(aux_idx, eq_idx, "Band 1 Type", "High Pass")
+                self._fx.set_param(aux_idx, eq_idx, "Band 1 Freq", 500.0)
+                self._fx.set_param(aux_idx, eq_idx, "Band 1 Q", 0.71)
+                self._fx.set_param(aux_idx, eq_idx, "Band 1 Sidechain", 1.0)  # Side only
+            except Exception:
+                pass
+
+        # 3. 主唱 Send → MicroShift AUX
+        send_info = self._send.create(
+            src=vocal_track, dest=aux_idx, level_db=send_level_db,
+        )
+
+        # 4. MicroShift → 每种 Reverb/Delay bus（共享空间）
+        ms_to_spatial_db = max(send_level_db - 6.0, _SEND_LEVEL_MIN)
+        for key, info in result.items():
+            if not (key.startswith("reverb_") or key.startswith("delay_")):
+                continue
+            try:
+                self._send.create(
+                    src=aux_idx, dest=info["aux_index"],
+                    level_db=ms_to_spatial_db,
+                )
+            except Exception as exc:
+                log.debug("MicroShift→%s send failed: %s", key, exc)
+
+        log.info(
+            "MicroShift: aux %d [%s + Pro-Q3 MS HPF], send=%.1f dB (%s)",
+            aux_idx, "MicroShift", send_level_db, genre,
+        )
+        return {
+            "aux_index": aux_idx, "eq_index": eq_idx,
+            "fx_index": ms_fx_idx, "send": send_info,
+            "send_level_db": send_level_db,
+        }
 
     # ── 大师空间模板 ──────────────────────────────────────────
 
@@ -2059,49 +2166,6 @@ class MixingEngine:
         )
         self._mark_stage("build_spatial_chain")
         return result
-
-    def _master_cla(
-        self, vocal_track: int, genre: str, bpm: float | None,
-    ) -> dict:
-        """Master A: Chris Lord-Alge — 延迟送入混响。（委托到 master_templates）"""
-        return _master_cla_impl(
-            self._bridge, self._tracks, self._fx, self._send,
-            vocal_track, genre, bpm,
-        )
-
-    def _master_hewitt(
-        self, vocal_track: int, genre: str, bpm: float | None,
-    ) -> dict:
-        """Master B: Ryan Hewitt — 三层 EMT 140 板混响。（委托到 master_templates）"""
-        return _master_hewitt_impl(
-            self._bridge, self._tracks, self._fx, self._send,
-            vocal_track, genre, bpm,
-        )
-
-    def _master_serban(
-        self, vocal_track: int, genre: str, bpm: float | None,
-    ) -> dict:
-        """Master C: Serban Ghenea — 干净透明的 Sidechain Ducking 空间。（委托到 master_templates）"""
-        return _master_serban_impl(
-            self._bridge, self._tracks, self._fx, self._send,
-            vocal_track, genre, bpm,
-        )
-
-    def _master_townsend(
-        self, vocal_track: int, genre: str, bpm: float | None,
-    ) -> dict:
-        """Master D: Devin Townsend — 不对称延迟 + 廉价混响粘合。（委托到 master_templates）"""
-        return _master_townsend_impl(
-            self._bridge, self._tracks, self._fx, self._send,
-            vocal_track, genre, bpm,
-        )
-
-    def _apply_eq_rms_match(
-        self, track_index: int, fx_index: int,
-        pre_rms_db: float, post_rms_db: float,
-    ) -> None:
-        """Compensate EQ gain change so downstream nodes see consistent RMS.（委托到 eq_engine）"""
-        _apply_eq_rms_match_impl(self._fx, track_index, fx_index, pre_rms_db, post_rms_db)
 
     # ── Scene 6: Render ──────────────────────────────────
 
@@ -2265,7 +2329,35 @@ class MixingEngine:
             )
         self._ensure_project_match()
 
-        # 委托给 MasteringEngine
+        # ── 母带链：bx_townhouse → bx_2098 → God Particle → Pro-L 2 ──
+
+        # 1. bx_townhouse bus compressor (if not already applied)
+        if not getattr(self, "_bus_comp_applied", False):
+            self.apply_bus_compressor(
+                bpm=getattr(self, "_bpm", None),
+                genre=getattr(self._meta, "genre", "pop") if self._meta else "pop",
+            )
+            self._bus_comp_applied = True
+
+        # 2. bx_2098 EQ — BAX wide mastering EQ
+        bx2098_idx = self.add_master_fx("bx_2098 EQ (Plugin Alliance)")
+        if bx2098_idx >= 0:
+            genre = getattr(self._meta, "genre", "pop") if self._meta else "pop"
+            from hermes_core.genre_tables import _GENRE_BX2098_SHEEN
+            sheen = _GENRE_BX2098_SHEEN.get(genre, True)
+            self._fx.set_param(-1, bx2098_idx, "Low Shelf Freq", 0.0)
+            self._fx.set_param(-1, bx2098_idx, "Low Shelf Gain", 0.5)
+            self._fx.set_param(-1, bx2098_idx, "High Shelf Freq", 0.0)
+            self._fx.set_param(-1, bx2098_idx, "High Shelf Gain", 0.5)
+            self._fx.set_param(-1, bx2098_idx, "Glow", 1.0 if sheen else 0.0)
+            self._fx.set_param(-1, bx2098_idx, "Sheen", 1.0 if sheen else 0.0)
+
+        # 3. The God Particle — Jaycen Joshua mastering chain
+        god_idx = self.add_master_fx("Cradle")
+        if god_idx >= 0:
+            self._fx.set_param(-1, god_idx, "Input", 0.5)  # unity
+
+        # 4. Pro-L 2 final limiter
         self._mastering._on_progress = on_progress
         result = self._undo_block(
             "Finalize Master",
@@ -2506,7 +2598,7 @@ class MixingEngine:
         if test_signal_path and os.path.exists(test_signal_path):
             signal_path = test_signal_path
         else:
-            signal_path = self._gen_calibration_signal(tmp)
+            signal_path = generate_calibration_signal(tmp)
 
         log.info(
             "Calibrating %s.%s over [%.1f, %.1f] in %d steps",
@@ -2546,32 +2638,6 @@ class MixingEngine:
 
         log.info("Calibration complete: %d points", len(table))
         return table
-
-    @staticmethod
-    def _gen_calibration_signal(output_dir: str,
-                                duration: float = 5.0,
-                                sr: int = 48000) -> str:
-        """Generate a -18 dBFS RMS pink-like noise WAV for calibration."""
-        import numpy as np
-        import soundfile as sf
-
-        n = int(sr * duration)
-        rng = np.random.default_rng(42)
-        # Approximate pink noise via filtered white noise
-        white = rng.standard_normal(n)
-        # Simple 1/f filter: cumulative sum of white noise
-        pink = np.cumsum(white)
-        pink /= np.max(np.abs(pink)) + 1e-10
-        # Scale to -18 dBFS RMS
-        target_linear = 10.0 ** (-18.0 / 20.0)
-        pink *= target_linear / (np.sqrt(np.mean(pink ** 2)) + 1e-10)
-        stereo = np.column_stack([pink, pink])
-
-        out_path = os.path.join(output_dir, "cal_signal.wav")
-        sf.write(out_path, stereo, sr, subtype="FLOAT")
-        log.info("Generated calibration signal: %s (%.1fs, -18 dBFS RMS)",
-                 out_path, duration)
-        return out_path
 
     # ── 段落自动化 ────────────────────────────────────────────
 

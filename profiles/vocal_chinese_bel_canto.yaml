@@ -2,6 +2,7 @@
 #
 # Use with:  hermes vocal-mix --profile profiles/vocal_chinese_bel_canto.yaml ...
 
+chain_variant: "b"
 name: "Vocal Chinese Bel Canto"
 description: "中国民族美声人声混音配置 — 宏大气势，长混响尾，保持动态层次"
 
@@ -14,10 +15,14 @@ tolerance_lufs: 0.3
 # ── vocal processing chain ──
 vocal_chain:
   - name: "FabFilter Pro-Q 3 (FabFilter)"
-  - name: "CLA-76 Mono (Waves)"
+  - name: "UAD UA 1176 Rev A"
+  - name: "Decapitator (Soundtoys)"
   - name: "FabFilter Pro-DS (FabFilter)"
-  - name: "SSLEQ Mono (Waves)"
+  - name: "UAD Pultec"
   - name: "RVox Mono (Waves)"
+  - name: "Oxford Inflator (Sonnox)"
+  - name: "UAD Tube-Tech CL 1B"
+  - name: "Maag EQ4 (Plugin Alliance)"
 
 # ── backing (instrumental) processing chain ──
 backing_chain: []

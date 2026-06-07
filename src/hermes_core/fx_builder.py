@@ -122,6 +122,7 @@ def _build_compressor_params(ctx: FXBuildContext) -> dict | None:
     if (
         ctx.bpm is not None and ctx.bpm > 0
         and "cla-76" not in ctx.fx_name.lower()
+        and "1176" not in ctx.fx_name.lower()
         and ctx.fx_type != "rvox"
     ):
         bpm_timing = get_bpm_timing(ctx.bpm)
@@ -133,7 +134,7 @@ def _build_compressor_params(ctx: FXBuildContext) -> dict | None:
             )
 
     # Per-type dispatch
-    if "cla-76" in ctx.fx_name.lower():
+    if "cla-76" in ctx.fx_name.lower() or "1176" in ctx.fx_name.lower():
         attack_knob = _compute_cla76_attack_knob(intent.crest_factor_db, ctx.genre)
         release_knob = None
         if ctx.bpm is not None and ctx.bpm > 0:
@@ -145,7 +146,7 @@ def _build_compressor_params(ctx: FXBuildContext) -> dict | None:
             )
         physical = _apply_cla76_params(intent, attack_knob, release_knob)
         log.info(
-            "CLA-76 attack: crest=%.1f → knob=%.2f (genre=%s)",
+            "1176/CLA-76 attack: crest=%.1f → knob=%.2f (genre=%s)",
             intent.crest_factor_db, attack_knob, ctx.genre,
         )
     elif ctx.fx_type == "rvox":
@@ -158,7 +159,7 @@ def _build_compressor_params(ctx: FXBuildContext) -> dict | None:
 
     # No BPM → strip timing keys (leave at plugin defaults)
     if ctx.bpm is None:
-        if "cla-76" in ctx.fx_name.lower():
+        if "cla-76" in ctx.fx_name.lower() or "1176" in ctx.fx_name.lower():
             physical.pop("Release", None)
         else:
             for timing_key in ("Attack", "Release"):
@@ -294,20 +295,212 @@ def _build_doubler_params(ctx: FXBuildContext) -> dict:
 
 
 # ════════════════════════════════════════════════════════════════
+# Decapitator 饱和策略
+# ════════════════════════════════════════════════════════════════
+
+
+def _build_decapitator_params(ctx: FXBuildContext) -> dict:
+    """Decapitator 谐波饱和 — crest 反比驱动 Drive。
+
+    Style=E (EMI)、Tone=0.5、Mix 流派查表。
+    放在压缩后——clip gain 峰值已受控，避免过载失真。
+    """
+    from hermes_core.genre_tables import _GENRE_DECAP_MIX, _DECAP_DRIVE_BASE
+
+    crest_db = 12.0
+    if ctx.raw_rms_db is not None and ctx.raw_peak_db is not None:
+        crest_db = ctx.raw_peak_db - ctx.raw_rms_db
+
+    base_drive = _DECAP_DRIVE_BASE.get(ctx.genre, 2.0)
+    # crest 大 → 少给 Drive, crest 小 → 多给 Drive
+    drive_adj = max(-1.0, min(1.0, (12.0 - crest_db) * 0.2))
+    drive = round(max(1.0, min(4.0, base_drive + drive_adj)), 1)
+
+    mix = _GENRE_DECAP_MIX.get(ctx.genre, 0.4)
+
+    physical = {
+        "Style":  0.25,  # E (EMI) — 最平滑人声模式
+        "Drive":  drive,
+        "Tone":   0.5,   # 中位
+        "Mix":    mix,
+        "High Cut": 0.0,  # OFF
+        "Low Cut":  0.0,  # OFF
+    }
+    log.info(
+        "Auto-Decapitator: crest=%.1fdB → Drive=%.1f Mix=%.0f%% (genre=%s)",
+        crest_db, drive, mix * 100, ctx.genre,
+    )
+    return physical
+
+
+# ════════════════════════════════════════════════════════════════
+# Pultec EQP-1A 电子管染色策略
+# ════════════════════════════════════════════════════════════════
+
+
+def _build_pultec_params(ctx: FXBuildContext) -> dict:
+    """Pultec EQP-1A — 经典同时推拉 Trick。
+
+    60Hz Boost+Atten 低频塑形, 8-12kHz High Boost 补亮,
+    20kHz Atten 压齿音高段。即使参数为0，电子管级也会加微妙染色。
+    """
+    mud = ctx.presence_deficit  # 用 presence_deficit 作 mud proxy
+    # 更准确：从 spectrum 获取
+    sibilance = 0.0  # 需从 last_spectrum 获取
+
+    # Low: 60Hz 经典 Trick
+    low_boost = 3.5
+    if mud > 3.0:
+        low_atten = 2.5
+    elif mud > 0:
+        low_atten = 1.5
+    else:
+        low_atten = 0.5
+
+    # High: presence 驱动
+    deficit = ctx.presence_deficit
+    high_freq = 12000.0 if deficit > 0 else 8000.0
+    high_boost = round(max(0.0, min(5.0, deficit * 0.4)), 1)
+    high_atten = 2.0 if sibilance > -30.0 else 0.0
+
+    physical = {
+        "Low Freq":    60.0,
+        "Low Boost":   low_boost,
+        "Low Atten":   low_atten,
+        "High Freq":   high_freq,
+        "High Boost":  high_boost,
+        "High Atten":  high_atten,
+        "High BW":     5.0,
+    }
+    log.info(
+        "Auto-Pultec: 60Hz boost=%.1f atten=%.1f | %.0fHz boost=%.1f (deficit=%.1f)",
+        low_boost, low_atten, high_freq, high_boost, deficit,
+    )
+    return physical
+
+
+# ════════════════════════════════════════════════════════════════
+# Oxford Inflator 谐波密度策略
+# ════════════════════════════════════════════════════════════════
+
+
+def _build_inflator_params(ctx: FXBuildContext) -> dict:
+    """Oxford Inflator — 流派差异化谐波密度。
+
+    Effect 20-40%, Curve 负值(透明), Clip 0dB OFF。
+    人声保守使用，不超 50% 防失真。
+    """
+    from hermes_core.genre_tables import _GENRE_INFLATOR_EFFECT
+
+    effect = _GENRE_INFLATOR_EFFECT.get(ctx.genre, 0.30)
+
+    physical = {
+        "Effect":     effect,
+        "Curve":      0.0,     # 负曲线 = 最透明人声模式
+        "Clip 0dB":   0.0,     # OFF — 不削波
+        "Input":      0.0,     # unity
+        "Output":     -0.5,    # 微退防推大
+    }
+    log.info(
+        "Auto-Inflator: effect=%.0f%% curve=0 (genre=%s)",
+        effect * 100, ctx.genre,
+    )
+    return physical
+
+
+# ════════════════════════════════════════════════════════════════
+# CL 1B 光电压缩策略
+# ════════════════════════════════════════════════════════════════
+
+
+def _build_cl1b_params(ctx: FXBuildContext) -> dict:
+    """UAD CL 1B — 光电体压缩 + tube 温暖塑形。
+
+    Ratio 2:1-4:1, Attack 5ms 慢起振, Release BPM驱动,
+    Threshold 基于 post-RVox RMS。
+    """
+    from hermes_core.genre_tables import _GENRE_CL1B_RATIO
+
+    ratio = _GENRE_CL1B_RATIO.get(ctx.genre, 3.0)
+
+    rms = ctx.raw_rms_db
+    threshold = (rms + 4.0) if rms is not None else -12.0
+
+    release_s = 0.3
+    if ctx.bpm is not None and ctx.bpm > 0:
+        release_s = (60000.0 / ctx.bpm) * 0.25 / 1000.0
+
+    physical = {
+        "Ratio":       ratio,
+        "Threshold":   round(threshold, 1),
+        "Attack":      5.0,    # ms — 慢起振保自然
+        "Release":     round(release_s, 3),
+        "Gain":        0.0,    # 稍后自动补偿
+        "Sidechain HPF": 80.0,
+    }
+    log.info(
+        "Auto-CL1B: ratio=%.0f:1 thresh=%.1fdB attack=5ms release=%.3fs (genre=%s)",
+        ratio, threshold, release_s, ctx.genre,
+    )
+    return physical
+
+
+# ════════════════════════════════════════════════════════════════
+# Maag EQ4 Air Band 策略
+# ════════════════════════════════════════════════════════════════
+
+
+def _build_maag_params(ctx: FXBuildContext) -> dict:
+    """Maag EQ4 — Air Band 最终抛光。
+
+    Air 频率流派差异化 (10k/20k), Boost=deficit×0.3+|air|×0.2,
+    160Hz 补瘦声, 2.5kHz 补亮度。
+    """
+    from hermes_core.genre_tables import _GENRE_MAAG_AIR_FREQ
+
+    air_freq = _GENRE_MAAG_AIR_FREQ.get(ctx.genre, 20000.0)
+    deficit = ctx.presence_deficit
+
+    air_boost = round(max(0.0, min(6.0, deficit * 0.3 + abs(deficit) * 0.1)), 1)
+
+    # mud 代理: presence_deficit 大 → 可能是混 → 不补 160Hz
+    hz160_boost = 1.5 if deficit < -3.0 else 0.0
+    hz2500_boost = 1.5 if deficit > 4.0 else 0.0
+
+    physical = {
+        "Air Freq":   air_freq,
+        "Air Boost":  air_boost,
+        "160Hz Boost": hz160_boost,
+        "2.5kHz Boost": hz2500_boost,
+        "650Hz Boost":  0.0,
+        "Sub 10Hz":     0.0,
+    }
+    log.info(
+        "Auto-Maag: air=%.0fHz +%.1fdB | 160Hz=+%.1f 2.5k=+%.1f (genre=%s)",
+        air_freq, air_boost, hz160_boost, hz2500_boost, ctx.genre,
+    )
+    return physical
+
+
+# ════════════════════════════════════════════════════════════════
 # 策略注册表
 # ════════════════════════════════════════════════════════════════
 
 # FX 类型 → 参数推导函数
 _FX_BUILDERS: dict[str, FXBuilderFn] = {
-    "eq":         _build_eq_params,
-    "comp":       _build_compressor_params,  # vca/fet/opto + rvox + cla-76
-    "vca":        _build_compressor_params,
-    "fet":        _build_compressor_params,
-    "opto":       _build_compressor_params,
-    "deesser":    _build_deesser_params,
-    "saturation": _build_saturation_params,
-    "dynamic_eq": _build_dynamic_eq_params,
-    "doubler":    _build_doubler_params,
+    "eq":          _build_eq_params,
+    "comp":        _build_compressor_params,  # vca/fet/opto + rvox + cla-76 + 1176
+    "vca":         _build_compressor_params,
+    "fet":         _build_compressor_params,
+    "opto":        _build_compressor_params,
+    "deesser":     _build_deesser_params,
+    "saturation":  _build_decapitator_params,
+    "color_eq":    _build_pultec_params,
+    "harmonic":    _build_inflator_params,
+    "tube_opto":   _build_cl1b_params,
+    "air_eq":      _build_maag_params,
+    "dynamic_eq":  _build_dynamic_eq_params,
+    "doubler":     _build_doubler_params,
 }
 
 

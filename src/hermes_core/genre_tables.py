@@ -152,12 +152,23 @@ _GENRE_REVERB_SEND_BASE: dict[str, dict[str, float]] = {
 
 # Delay send level base per genre (dB).  -99.0 = disabled for this genre.
 _GENRE_DELAY_SEND_BASE: dict[str, dict[str, float]] = {
-    "folk":                    {"slap": -99.0, "rhythm": -99.0},
-    "ballad":                  {"slap": -20.0, "rhythm": -22.0},
-    "pop":                     {"slap": -14.0, "rhythm": -16.0},
-    "rock":                    {"slap": -12.0, "rhythm": -18.0},
-    "electronic":              {"slap": -10.0, "rhythm": -12.0},
-    "chinese_folk_bel_canto":  {"slap": -14.0, "rhythm": -16.0},
+    "folk":                    {"slap": -99.0, "throw": -99.0, "pingpong": -99.0},
+    "ballad":                  {"slap": -21.0, "throw": -24.0, "pingpong": -99.0},
+    "pop":                     {"slap": -15.0, "throw": -18.0, "pingpong": -20.0},
+    "rock":                    {"slap": -15.0, "throw": -18.0, "pingpong": -18.0},
+    "electronic":              {"slap": -11.0, "throw": -14.0, "pingpong": -16.0},
+    "chinese_folk_bel_canto":  {"slap": -15.0, "throw": -18.0, "pingpong": -20.0},
+}
+
+# MicroShift AUX send level base per genre (dB, verse 基准, chorus +3dB)
+# 设计文档 §3.1
+_GENRE_MICROSHIFT_SEND: dict[str, float] = {
+    "folk":                    -16.0,
+    "ballad":                  -14.0,
+    "pop":                     -12.0,
+    "rock":                    -12.0,
+    "electronic":              -10.0,
+    "chinese_folk_bel_canto":  -14.0,
 }
 
 # Send level range (dB).  Outside these bounds is impractical.
@@ -530,3 +541,131 @@ _HP_FRQ_TABLE: list[tuple[float, float]] = [
 _SSL_Q_MIN = 0.1
 _SSL_Q_MAX = 3.5
 _SSL_Q_RANGE = _SSL_Q_MAX - _SSL_Q_MIN  # 3.4
+
+# ════════════════════════════════════════════════════════════════
+# 9 段人声链 — 新插件流派参数
+# ════════════════════════════════════════════════════════════════
+
+# UAD 1176 Ratio — 流派差异化
+_GENRE_1176_RATIO: dict[str, int] = {
+    "folk":                    4,
+    "ballad":                  4,
+    "pop":                     8,
+    "rock":                    8,
+    "electronic":              12,
+    "chinese_folk_bel_canto":  4,
+}
+
+# Decapitator Mix — 流派差异化
+_GENRE_DECAP_MIX: dict[str, float] = {
+    "folk":                    0.30,
+    "ballad":                  0.35,
+    "pop":                     0.40,
+    "rock":                    0.40,
+    "electronic":              0.50,
+    "chinese_folk_bel_canto":  0.35,
+}
+
+# Decapitator Drive 范围（crest 反比驱动的基础值）
+_DECAP_DRIVE_BASE: dict[str, float] = {
+    "folk":                    1.5,
+    "ballad":                  1.5,
+    "pop":                     2.0,
+    "rock":                    2.5,
+    "electronic":              3.0,
+    "chinese_folk_bel_canto":  2.0,
+}
+
+# Oxford Inflator Effect — 流派差异化（人声保守）
+_GENRE_INFLATOR_EFFECT: dict[str, float] = {
+    "folk":                    0.20,
+    "ballad":                  0.25,
+    "pop":                     0.30,
+    "rock":                    0.35,
+    "electronic":              0.40,
+    "chinese_folk_bel_canto":  0.25,
+}
+
+# UAD CL 1B Ratio — 流派差异化
+_GENRE_CL1B_RATIO: dict[str, float] = {
+    "folk":                    2.0,
+    "ballad":                  2.0,
+    "pop":                     3.0,
+    "rock":                    3.0,
+    "electronic":              4.0,
+    "chinese_folk_bel_canto":  2.0,
+}
+
+# Maag EQ4 Air Band 频率 — 流派差异化
+_GENRE_MAAG_AIR_FREQ: dict[str, float] = {
+    "folk":                    10000.0,
+    "ballad":                  10000.0,
+    "pop":                     20000.0,
+    "rock":                    20000.0,
+    "electronic":              20000.0,
+    "chinese_folk_bel_canto":  10000.0,
+}
+
+# bx_2098 Sheen — 流派差异化
+_GENRE_BX2098_SHEEN: dict[str, bool] = {
+    "folk":                    False,
+    "ballad":                  False,
+    "pop":                     True,
+    "rock":                    True,
+    "electronic":              True,
+    "chinese_folk_bel_canto":  False,
+}
+
+# Pro-L 2 Style — 流派差异化
+_GENRE_PROL2_STYLE: dict[str, str] = {
+    "folk":                    "Transparent",
+    "ballad":                  "Transparent",
+    "pop":                     "Allround",
+    "rock":                    "Allround",
+    "electronic":              "Aggressive",
+    "chinese_folk_bel_canto":  "Transparent",
+}
+
+# ════════════════════════════════════════════════════════════════
+# 混响器流派配对表
+# ════════════════════════════════════════════════════════════════
+
+# 流派 → {bus → 首选插件名子串}
+_GENRE_REVERB_PREFERENCE: dict[str, dict[str, str]] = {
+    "folk": {
+        "room":  "Seventh Heaven",
+        "plate": "Relab LX480",
+        "hall":  "Cinematic Rooms",
+    },
+    "ballad": {
+        "room":  "Seventh Heaven",
+        "plate": "Relab LX480",
+        "hall":  "Cinematic Rooms",
+    },
+    "pop": {
+        "room":  "UAD EMT 140",
+        "plate": "Relab LX480",
+        "hall":  "Seventh Heaven",
+    },
+    "rock": {
+        "room":  "UAD EMT 140",
+        "plate": "Tai Chi",
+        "hall":  "Relab LX480",
+    },
+    "electronic": {
+        "room":  "Relab LX480",
+        "plate": "Supernova",
+        "hall":  "Blackhole",
+    },
+    "chinese_folk_bel_canto": {
+        "room":  "Seventh Heaven",
+        "plate": "Relab LX480",
+        "hall":  "Cinematic Rooms",
+    },
+}
+
+# Electronic 流派专属 Blackhole 设置
+_BLACKHOLE_GENRES: frozenset = frozenset({"electronic"})
+
+# 混响回退 — 首选不可用时的通用回退
+_FALLBACK_REVERB: str = "ValhallaVintageVerb"

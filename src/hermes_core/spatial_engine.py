@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from hermes_core.genre_tables import (
     _GENRE_REVERB_SEND_BASE,
     _GENRE_DELAY_SEND_BASE,
+    _GENRE_MICROSHIFT_SEND,
     _SEND_LEVEL_MIN,
     _SEND_LEVEL_MAX,
     _SEND_DISABLED_THRESHOLD,
@@ -94,6 +95,13 @@ def _compute_spatial_sends(
             sends[f"delay_{bus_type}"] = round(
                 max(_SEND_LEVEL_MIN, min(_SEND_LEVEL_MAX, base_db + bias)), 1,
             )
+
+    # ── MicroShift AUX（§3.1）──────────────────────────────
+    base_microshift = _GENRE_MICROSHIFT_SEND.get(genre, -12.0)  # 回退到 pop
+    bias = crest_bias + presence_bias + section_bias
+    sends["microshift"] = round(
+        max(_SEND_LEVEL_MIN, min(_SEND_LEVEL_MAX, base_microshift + bias)), 1,
+    )
 
     return sends
 

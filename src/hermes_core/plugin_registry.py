@@ -27,12 +27,24 @@ PLUGIN_REGISTRY: dict[str, dict[str, str | None]] = {
         "fallback": "ReaEQ (Cockos)",
     },
     "eq_color": {
-        "primary": "VST3: SSLEQ Mono (Waves)",
-        "fallback": "ReaEQ (Cockos)",
+        "primary": "VST3: EQP-1A Legacy (Universal Audio)",
+        "fallback": "VST3: SSLEQ Mono (Waves)",
+    },
+    "eq_air": {
+        "primary": "VST3: Maag EQ4 (Plugin Alliance)",
+        "fallback": "VST: FabFilter Pro-Q 3 (FabFilter)",
+    },
+    "eq_mastering": {
+        "primary": "VST3: bx_2098 EQ (Plugin Alliance)",
+        "fallback": "VST: FabFilter Pro-Q 3 (FabFilter)",
     },
     "compressor_peak": {
-        "primary": "VST3: CLA-76 Mono (Waves)",
-        "fallback": "FabFilter Pro-C 2 (FabFilter)",
+        "primary": "VST3: 1176 Rev A Compressor (Universal Audio)",
+        "fallback": "VST3: CLA-76 Mono (Waves)",
+    },
+    "compressor_opto": {
+        "primary": "VST3: Tube-Tech CL 1B MkII (Universal Audio)",
+        "fallback": "VST3: CLA-2A (Waves)",
     },
     "compressor_rms": {
         "primary": "VST3: RVox Mono (Waves)",
@@ -54,8 +66,16 @@ PLUGIN_REGISTRY: dict[str, dict[str, str | None]] = {
         "primary": "VST3: Decapitator (Soundtoys)",
         "fallback": None,
     },
+    "harmonic_density": {
+        "primary": "VST3: Oxford Inflator (Sonnox)",
+        "fallback": None,
+    },
     "doubler": {
         "primary": "VST3: MicroShift (Soundtoys)",
+        "fallback": None,
+    },
+    "god_particle": {
+        "primary": "VST3: The God Particle (Cradle)",
         "fallback": None,
     },
 }
@@ -67,11 +87,92 @@ PLUGIN_REGISTRY: dict[str, dict[str, str | None]] = {
 # ════════════════════════════════════════════════════════════════
 
 SPATIAL_PLUGIN_MAP: dict[str, list[str]] = {
-    "plate":   ["Little Plate", "UAD EMT 140", "ValhallaPlate"],
-    "hall":    ["LX480", "ValhallaVintageVerb"],
-    "room":    ["ValhallaRoom", "FabFilter Pro-R"],
+    "plate":   [
+        "LX480 v4", "UAD EMT 140", "Tai Chi",
+        "Seventh Heaven", "ValhallaPlate",
+    ],
+    "hall":    [
+        "Cinematic Rooms", "Seventh Heaven", "LX480 v4",
+        "ValhallaVintageVerb",
+    ],
+    "room":    [
+        "Seventh Heaven", "UAD EMT 140", "ValhallaRoom",
+        "FabFilter Pro-R",
+    ],
     "slap":    ["EchoBoy", "ValhallaDelay"],
-    "rhythm":  ["EchoBoy", "ValhallaDelay"],
+    "throw":   ["EchoBoy", "ValhallaDelay"],
+    "pingpong": ["EchoBoy", "ValhallaDelay"],
+    "microshift": ["MicroShift", "Soundtoys MicroShift", "VST3: MicroShift (Soundtoys)"],
+    "blackhole": ["Blackhole", "Supermassive"],
+    "supernova": ["Supernova", "ValhallaVintageVerb"],
+}
+
+# ── 流派专属混响配对（Vocal B: 含 UAD，设计文档 §3.2.1）───
+GENRE_SPATIAL_PLUGINS: dict[str, dict[str, list[str]]] = {
+    "folk": {
+        "room":  ["Seventh Heaven", "ValhallaVintageVerb"],
+        "plate": ["LX480 v4", "ValhallaPlate"],
+        "hall":  ["Cinematic Rooms", "Seventh Heaven", "ValhallaVintageVerb"],
+    },
+    "ballad": {
+        "room":  ["Seventh Heaven", "ValhallaVintageVerb"],
+        "plate": ["LX480 v4", "ValhallaPlate"],
+        "hall":  ["Cinematic Rooms", "Seventh Heaven", "ValhallaVintageVerb"],
+    },
+    "pop": {
+        "room":  ["UAD EMT 140", "Seventh Heaven", "ValhallaVintageVerb"],
+        "plate": ["LX480 v4", "ValhallaPlate"],
+        "hall":  ["Seventh Heaven", "Cinematic Rooms", "ValhallaVintageVerb"],
+    },
+    "rock": {
+        "room":  ["UAD EMT 140", "Seventh Heaven", "ValhallaVintageVerb"],
+        "plate": ["Tai Chi", "LX480 v4", "ValhallaPlate"],
+        "hall":  ["LX480 v4", "Cinematic Rooms", "ValhallaVintageVerb"],
+    },
+    "electronic": {
+        "room":  ["LX480 v4", "ValhallaPlate"],
+        "plate": ["Supernova", "ValhallaVintageVerb"],
+        "hall":  ["ValhallaVintageVerb"],
+    },
+    "chinese_folk_bel_canto": {
+        "room":  ["Seventh Heaven", "ValhallaVintageVerb"],
+        "plate": ["LX480 v4", "ValhallaPlate"],
+        "hall":  ["Cinematic Rooms", "Seventh Heaven", "ValhallaVintageVerb"],
+    },
+}
+
+# ── 流派专属混响配对（Vocal A: 无 UAD，EMT140→ValhallaPlate）──
+GENRE_SPATIAL_PLUGINS_A: dict[str, dict[str, list[str]]] = {
+    "folk": {
+        "room":  ["Seventh Heaven", "ValhallaVintageVerb"],
+        "plate": ["LX480 v4", "ValhallaPlate"],
+        "hall":  ["Cinematic Rooms", "Seventh Heaven", "ValhallaVintageVerb"],
+    },
+    "ballad": {
+        "room":  ["Seventh Heaven", "ValhallaVintageVerb"],
+        "plate": ["LX480 v4", "ValhallaPlate"],
+        "hall":  ["Cinematic Rooms", "Seventh Heaven", "ValhallaVintageVerb"],
+    },
+    "pop": {
+        "room":  ["ValhallaPlate", "Seventh Heaven", "ValhallaVintageVerb"],
+        "plate": ["LX480 v4", "ValhallaPlate"],
+        "hall":  ["Seventh Heaven", "Cinematic Rooms", "ValhallaVintageVerb"],
+    },
+    "rock": {
+        "room":  ["ValhallaPlate", "Seventh Heaven", "ValhallaVintageVerb"],
+        "plate": ["Tai Chi", "LX480 v4", "ValhallaPlate"],
+        "hall":  ["LX480 v4", "Cinematic Rooms", "ValhallaVintageVerb"],
+    },
+    "electronic": {
+        "room":  ["LX480 v4", "ValhallaPlate"],
+        "plate": ["Supernova", "ValhallaVintageVerb"],
+        "hall":  ["ValhallaVintageVerb"],
+    },
+    "chinese_folk_bel_canto": {
+        "room":  ["Seventh Heaven", "ValhallaVintageVerb"],
+        "plate": ["LX480 v4", "ValhallaPlate"],
+        "hall":  ["Cinematic Rooms", "Seventh Heaven", "ValhallaVintageVerb"],
+    },
 }
 
 # 返回轨名称（中文，REAPER 中可读）
@@ -80,12 +181,16 @@ SPATIAL_BUS_NAMES: dict[str, str] = {
     "hall":    "Hall Verb",
     "room":    "Room Verb",
     "slap":    "Slap Delay",
-    "rhythm":  "Rhythm Delay",
+    "throw":   "Throw Delay",
+    "pingpong": "PingPong Delay",
+    "microshift": "MicroShift",
+    "blackhole": "Blackhole Verb",
+    "supernova": "Supernova Verb",
 }
 
 # 空间 bus 类型分类
-_REVERB_BUS_TYPES = frozenset({"plate", "hall", "room"})
-_DELAY_BUS_TYPES = frozenset({"slap", "rhythm"})
+_REVERB_BUS_TYPES = frozenset({"plate", "hall", "room", "blackhole", "supernova"})
+_DELAY_BUS_TYPES = frozenset({"slap", "throw", "pingpong"})
 
 
 # ════════════════════════════════════════════════════════════════

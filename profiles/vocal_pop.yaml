@@ -2,6 +2,7 @@
 #
 # Use with:  hermes vocal-mix --profile profiles/vocal_pop.yaml ...
 
+chain_variant: "b"
 name: "Vocal Pop"
 description: "Standard pop vocal mix — EQ, compression, reverb, limiting"
 
@@ -14,8 +15,14 @@ tolerance_lufs: 0.3
 # ── vocal processing chain ──
 vocal_chain:
   - name: "FabFilter Pro-Q 3 (FabFilter)"
+  - name: "UAD UA 1176 Rev A"
+  - name: "Decapitator (Soundtoys)"
   - name: "FabFilter Pro-DS (FabFilter)"
-  - name: "Waves RVox (Waves)"
+  - name: "UAD Pultec"
+  - name: "RVox Mono (Waves)"
+  - name: "Oxford Inflator (Sonnox)"
+  - name: "UAD Tube-Tech CL 1B"
+  - name: "Maag EQ4 (Plugin Alliance)"
 
 # ── backing (instrumental) processing chain ──
 backing_chain: []

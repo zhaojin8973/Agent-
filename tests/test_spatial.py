@@ -98,7 +98,7 @@ class TestGenreSpatialParams:
         "folk", "ballad", "pop", "rock", "electronic",
         "chinese_folk_bel_canto",
     ]
-    VALID_BUS_KEYS = {"plate", "hall", "room", "slap", "rhythm"}
+    VALID_BUS_KEYS = {"plate", "hall", "room", "slap", "rhythm", "throw", "pingpong"}
 
     def test_all_genres_present(self):
         for genre in self.EXPECTED_GENRES:
@@ -127,9 +127,10 @@ class TestGenreSpatialParams:
         assert "rhythm" not in folk
 
     def test_pop_has_all_buses(self):
-        """流行乐有全部 5 条总线。"""
+        """流行乐有 reverb×3 + delay×2 总线。"""
         pop = _GENRE_SPATIAL_PARAMS["pop"]
-        assert set(pop.keys()) == self.VALID_BUS_KEYS
+        expected = {"plate", "hall", "room", "slap", "rhythm"}
+        assert set(pop.keys()) == expected
 
     def test_mix_is_always_1_for_returns(self):
         """返回轨上的 Mix 应始终为 1.0（全湿）。"""
@@ -252,9 +253,10 @@ class TestComputeSpatialSends:
             presence_deficit_db=2.0, mud_ratio_db=-3.0,
             section="verse",
         )
-        # pop 有全部 5 条总线
+        # pop 有 reverb×3 + delay×3 + microshift
         for key in ["reverb_plate", "reverb_hall", "reverb_room",
-                     "delay_slap", "delay_rhythm"]:
+                     "delay_slap", "delay_throw", "delay_pingpong",
+                     "microshift"]:
             assert key in sends, f"缺失键: {key}"
 
     def test_folk_disables_delays(self):
@@ -265,7 +267,10 @@ class TestComputeSpatialSends:
             section="verse",
         )
         assert sends["delay_slap"] is None
-        assert sends["delay_rhythm"] is None
+        assert sends["delay_throw"] is None
+        assert sends["delay_pingpong"] is None
+        # MicroShift 不是延迟，应仍启用
+        assert sends["microshift"] is not None
 
     def test_values_within_range(self):
         """所有非 None 发送量应在 [_SEND_LEVEL_MIN, _SEND_LEVEL_MAX] 内。"""
@@ -347,14 +352,14 @@ class TestMasterTemplateDispatch:
     def test_dispatcher_exists(self):
         assert hasattr(MixingEngine, "apply_master_template")
 
-    def test_all_four_templates_defined(self):
-        for method_name in [
-            "_master_cla", "_master_hewitt",
-            "_master_serban", "_master_townsend",
-        ]:
-            assert hasattr(MixingEngine, method_name), (
-                f"缺失模板方法: {method_name}"
-            )
+    def test_all_four_templates_available(self):
+        """4 个大师模板名均在 AVAILABLE_TEMPLATES 中。"""
+        from hermes_core.master_templates import AVAILABLE_TEMPLATES
+        assert len(AVAILABLE_TEMPLATES) == 4
+        assert "cla" in AVAILABLE_TEMPLATES
+        assert "hewitt" in AVAILABLE_TEMPLATES
+        assert "serban" in AVAILABLE_TEMPLATES
+        assert "townsend" in AVAILABLE_TEMPLATES
 
     def test_dispatcher_raises_on_unknown(self):
         """未知模板名应抛出 ValueError。"""
@@ -363,14 +368,10 @@ class TestMasterTemplateDispatch:
             eng.apply_master_template("unknown_template", 0)
 
     def test_dispatcher_case_insensitive(self):
-        """调度器应大小写不敏感。"""
+        """调度器应大小写不敏感（验证 dispatch 映射存在）。"""
         eng = MixingEngine.__new__(MixingEngine)
-        # 不能真正调用（无 REAPER），但验证 dispatch 映射存在
-        # 通过检查方法可调用性来验证
-        assert callable(getattr(eng, "_master_cla", None))
-        assert callable(getattr(eng, "_master_hewitt", None))
-        assert callable(getattr(eng, "_master_serban", None))
-        assert callable(getattr(eng, "_master_townsend", None))
+        # apply_master_template 直接委托到 master_templates 模块
+        assert callable(getattr(eng, "apply_master_template", None))
 
 
 # ════════════════════════════════════════════════════════════════
@@ -383,30 +384,29 @@ class TestResolveSpatialPluginKey:
     """验证插件名匹配逻辑。"""
 
     def test_exact_match(self):
-        eng = MixingEngine.__new__(MixingEngine)
-        # 注入 bridge stub
-        key = eng._resolve_spatial_plugin_key(
+        from hermes_core.spatial_engine import _resolve_spatial_plugin_key
+        key = _resolve_spatial_plugin_key(
             "VST: Little Plate (Soundtoys)",
         )
         assert key == "VST: Little Plate (Soundtoys)"
 
     def test_substring_match(self):
         """短名称应通过子串匹配。"""
-        eng = MixingEngine.__new__(MixingEngine)
-        key = eng._resolve_spatial_plugin_key(
+        from hermes_core.spatial_engine import _resolve_spatial_plugin_key
+        key = _resolve_spatial_plugin_key(
             "VST3: EchoBoy (Soundtoys)",
         )
         assert key is not None
 
     def test_fallback_match(self):
         """回退名称应匹配。"""
-        eng = MixingEngine.__new__(MixingEngine)
-        key = eng._resolve_spatial_plugin_key("ValhallaPlate")
+        from hermes_core.spatial_engine import _resolve_spatial_plugin_key
+        key = _resolve_spatial_plugin_key("ValhallaPlate")
         assert key is not None
 
     def test_unknown_returns_none(self):
-        eng = MixingEngine.__new__(MixingEngine)
-        key = eng._resolve_spatial_plugin_key("NonExistentPlugin")
+        from hermes_core.spatial_engine import _resolve_spatial_plugin_key
+        key = _resolve_spatial_plugin_key("NonExistentPlugin")
         assert key is None
 
 
@@ -420,7 +420,7 @@ class TestBuildSpatialChainIntegration:
     """验证 build_spatial_chain 端到端行为（需 REAPER）。"""
 
     def test_build_creates_correct_track_count(self):
-        """pop 流派应创建 5 条返回轨。"""
+        """pop 流派应创建 7 条返回轨（reverb×3 + delay×3 + microshift）。"""
         try:
             from hermes_core.bridge import ReaperBridge
             from hermes_core.track import TrackManager
@@ -447,15 +447,16 @@ class TestBuildSpatialChainIntegration:
         spatial_sends = {
             "reverb_plate": -12.0, "reverb_hall": -14.0,
             "reverb_room": -16.0, "delay_slap": -14.0,
-            "delay_rhythm": -16.0,
+            "delay_throw": -18.0, "delay_pingpong": -20.0,
+            "microshift": -12.0,
         }
         result = eng.build_spatial_chain(vocal_idx, spatial_sends, genre="pop")
         n_after = api.CountTracks(0)
 
-        # 1 人声 + 5 返回轨 = 6 条轨道
-        expected_new = 5
+        # 1 vocal + 7 return = 8 total
+        expected_new = 7
         assert n_after - n_before == expected_new + 1, (
-            f"预期 {expected_new + 1} 条新轨（1 人声 + 5 返回），"
+            f"预期 {expected_new + 1} 条新轨（1 人声 + 7 返回），"
             f"实际 {n_after - n_before}"
         )
         assert len(result) == 5, f"预期 5 条总线，实际 {len(result)}"

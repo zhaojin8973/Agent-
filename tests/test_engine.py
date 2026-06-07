@@ -181,9 +181,8 @@ class TestProjectManagement:
         # Main file path should NOT change after checkpoint
         eng._bridge.api.Main_SaveProjectEx.assert_called()
         assert eng._bridge.api.Main_SaveProjectEx.call_args[0][0] == 0
-        # 验证至少有一次保存调用包含FX完成标签
-        from unittest.mock import call
-        eng._bridge.api.Main_SaveProjectEx.assert_any_call(0, result["checkpoint_path"], 0)
+        # 验证主保存调用使用了 options=8（&8 = set as project filename）
+        assert eng._bridge.api.Main_SaveProjectEx.call_args[0][2] == 8
 
     def test_save_checkpoint_without_label(self):
         eng = MixingEngine()
@@ -347,17 +346,17 @@ class TestCreateReverbSend:
         result = eng.create_reverb_send(src_track=3, level_db=-6.0)
 
         eng._tracks.create.assert_called_once_with(name="Verb Return")
-        # Abbey Road EQ (ReaEQ) is auto-inserted before the reverb
+        # Safety EQ (Pro-Q 3) is auto-inserted before the reverb
         assert eng._fx.add.call_count == 2
-        eng._fx.add.assert_any_call(7, "ReaEQ (Cockos)")
-        eng._fx.add.assert_any_call(7, "ReaVerbate")
+        eng._fx.add.assert_any_call(7, "FabFilter Pro-Q 3 (FabFilter)")
+        eng._fx.add.assert_any_call(7, "ValhallaVintageVerb")
         eng._send.create.assert_called_once_with(
             src=3, dest=7, level_db=-6.0, mode="post-fader"
         )
         assert result["aux_index"] == 7
         assert result["send"]["index"] == 0
         assert result["fx_index"] == 0
-        assert "abbey_eq_index" in result
+        assert "safety_eq_index" in result
 
 
 @pytest.mark.unit
@@ -916,8 +915,9 @@ class TestMicroRender:
     def test_gen_calibration_signal(self):
         """Calibration signal is -18 dBFS RMS, 5s, stereo."""
         import tempfile, os
+        from hermes_core.comp_engine import generate_calibration_signal
         with tempfile.TemporaryDirectory() as td:
-            path = MixingEngine._gen_calibration_signal(td, duration=1.0)
+            path = generate_calibration_signal(td, duration=1.0)
             assert os.path.exists(path)
             from hermes_core.signal import SignalAnalyzer
             report = SignalAnalyzer.analyze(path)
@@ -1862,7 +1862,7 @@ class TestSpatialSendComputation:
         for g in _ALL_GENRES_SPATIAL:
             assert g in _GENRE_DELAY_SEND_BASE, f"流派 {g} 缺失于 _GENRE_DELAY_SEND_BASE"
             entry = _GENRE_DELAY_SEND_BASE[g]
-            for bus in ("slap", "rhythm"):
+            for bus in ("slap", "throw", "pingpong"):
                 assert bus in entry, f"流派 {g} 缺少 {bus} 延迟"
 
     # ── 延迟开关 ──────────────────────────────────────────
@@ -1872,14 +1872,16 @@ class TestSpatialSendComputation:
         from hermes_core.engine import _compute_spatial_sends
         sends = _compute_spatial_sends("folk", 12.0, 2.0, -3.0)
         assert sends["delay_slap"] is None
-        assert sends["delay_rhythm"] is None
+        assert sends["delay_throw"] is None
+        assert sends["delay_pingpong"] is None
 
     def test_pop_delays_enabled(self):
         """流行流派使用所有延迟。"""
         from hermes_core.engine import _compute_spatial_sends
         sends = _compute_spatial_sends("pop", 12.0, 2.0, -3.0)
         assert sends["delay_slap"] is not None
-        assert sends["delay_rhythm"] is not None
+        assert sends["delay_throw"] is not None
+        assert sends["delay_pingpong"] is not None
 
     # ── 修正项验证 ────────────────────────────────────────
 
@@ -1922,7 +1924,7 @@ class TestSpatialSendComputation:
         sends_verse = _compute_spatial_sends("pop", 12.0, 2.0, -3.0, section="verse")
         sends_chorus = _compute_spatial_sends("pop", 12.0, 2.0, -3.0, section="chorus")
         assert sends_chorus["reverb_plate"] > sends_verse["reverb_plate"]
-        assert sends_chorus["delay_rhythm"] > sends_verse["delay_rhythm"]
+        assert sends_chorus["delay_throw"] > sends_verse["delay_throw"]
 
     # ── 范围限制 ──────────────────────────────────────────
 
@@ -1977,8 +1979,10 @@ class TestSpatialSendComputation:
         assert sends["reverb_plate"] == pytest.approx(-14.6, abs=0.3)
         assert sends["reverb_hall"] == pytest.approx(-16.2, abs=0.3)
         assert sends["reverb_room"] == pytest.approx(-18.2, abs=0.3)
-        assert sends["delay_slap"] == pytest.approx(-15.3, abs=0.3)
-        assert sends["delay_rhythm"] == pytest.approx(-17.3, abs=0.3)
+        assert sends["delay_slap"] == pytest.approx(-16.3, abs=0.3)
+        assert sends["delay_throw"] == pytest.approx(-19.3, abs=0.3)
+        assert sends["delay_pingpong"] == pytest.approx(-21.3, abs=0.3)
+        assert sends["microshift"] == pytest.approx(-13.3, abs=0.3)
 
     def test_ballad_wetter_than_folk(self):
         """抒情流派发送量比民谣更湿润。"""
@@ -2017,7 +2021,9 @@ class TestSpatialSendComputation:
         )
         # 延迟已启用
         assert sends["delay_slap"] is not None
-        assert sends["delay_rhythm"] is not None
+        assert sends["delay_throw"] is not None
+        assert sends["delay_pingpong"] is not None
+        assert sends["microshift"] is not None
 
 
 
@@ -2039,7 +2045,8 @@ class TestBuildSpatialChainLogic:
     def test_spatial_plugin_mapping_complete(self):
         """每种总线类型都有对应的插件和名称。"""
         from hermes_core.engine import _SPATIAL_PLUGIN, _SPATIAL_BUS_NAMES
-        expected = {"plate", "hall", "room", "slap", "rhythm"}
+        expected = {"plate", "hall", "room", "slap", "throw", "pingpong",
+                    "microshift", "blackhole", "supernova"}
         assert set(_SPATIAL_PLUGIN.keys()) == expected
         assert set(_SPATIAL_BUS_NAMES.keys()) == expected
 
@@ -2049,17 +2056,20 @@ class TestBuildSpatialChainLogic:
         sends = _compute_spatial_sends("folk", 12.0, 2.0, -3.0)
         # 民谣：延迟为 None
         assert sends["delay_slap"] is None
-        assert sends["delay_rhythm"] is None
-        # 混响仍然存在
+        assert sends["delay_throw"] is None
+        assert sends["delay_pingpong"] is None
+        # 混响 + MicroShift 仍然存在
         assert sends["reverb_plate"] is not None
+        assert sends["microshift"] is not None
 
     def test_send_levels_from_computation(self):
         """_compute_spatial_sends 的输出可直接作为 build_spatial_chain 输入。"""
         from hermes_core.engine import _compute_spatial_sends
         sends = _compute_spatial_sends("pop", 14.0, 3.0, -3.0, -28.0)
-        # 所有非 None 值应在 [-24, -6] 范围，格式为 {bus_key: level_db}
+        # 所有非 None 值应在 [-24, -6] 范围
+        # 接受 reverb_* / delay_* / microshift 键
         for key, val in sends.items():
-            assert key.startswith("reverb_") or key.startswith("delay_"), (
+            assert key.startswith("reverb_") or key.startswith("delay_") or key == "microshift", (
                 f"key={key} 格式不正确"
             )
             if val is not None:
@@ -2243,53 +2253,51 @@ class TestWriteAutomation:
 
 @pytest.mark.unit
 class TestAbbeyRoadEQ:
-    """验证 _apply_abbey_road_eq 方法 —— ReaEQ HPF+LPF 安全滤波。"""
+    """验证 _apply_abbey_road_eq 函数 —— ReaEQ HPF+LPF 安全滤波。"""
 
     def test_configures_hpf_and_lpf_bands(self):
         """HPF@600Hz + LPF@10kHz 被正确写入 ReaEQ。"""
-        eng = MixingEngine()
-        eng._fx.set_param = MagicMock()
+        from hermes_core.spatial_engine import _apply_abbey_road_eq
+        mock_fx = MagicMock()
+        mock_fx.set_param = MagicMock()
 
-        eng._apply_abbey_road_eq(aux_track=3, eq_fx_idx=0)
+        _apply_abbey_road_eq(mock_fx, aux_track=3, eq_fx_idx=0)
 
-        assert eng._fx.set_param.call_count > 0
-        # 调用参数应包含 Band 1 和 Band 2 的设置
+        assert mock_fx.set_param.call_count > 0
         param_names = []
-        for call_args in eng._fx.set_param.call_args_list:
-            # set_param(track_index, fx_index, param_name, normalized_value)
+        for call_args in mock_fx.set_param.call_args_list:
             param_names.append(str(call_args[0][2]))
         assert any("Band 1" in p for p in param_names)
         assert any("Band 2" in p for p in param_names)
 
     def test_band_types_are_correct(self):
         """Band 1 Type=0 (HPF), Band 2 Type=4 (LPF) → 归一化后写入。"""
-        eng = MixingEngine()
-        eng._fx.set_param = MagicMock()
+        from hermes_core.spatial_engine import _apply_abbey_road_eq
+        mock_fx = MagicMock()
+        mock_fx.set_param = MagicMock()
 
-        eng._apply_abbey_road_eq(aux_track=3, eq_fx_idx=0)
+        _apply_abbey_road_eq(mock_fx, aux_track=3, eq_fx_idx=0)
 
-        # 检查 Type 参数的归一化值
         type_calls = {}
-        for call_args in eng._fx.set_param.call_args_list:
+        for call_args in mock_fx.set_param.call_args_list:
             param_name = str(call_args[0][2])
             norm_val = call_args[0][3]
             if "Type" in param_name:
                 type_calls[param_name] = norm_val
 
-        # Band 1 Type = HPF (0) → normalized = 0/5 = 0.0
         assert type_calls.get("Band 1 Type") == pytest.approx(0.0, abs=0.01)
-        # Band 2 Type = LPF (4) → normalized = 4/5 = 0.8
         assert type_calls.get("Band 2 Type") == pytest.approx(0.8, abs=0.01)
 
     def test_bands_3_4_disabled(self):
         """Band 3 和 Band 4 Enabled=0。"""
-        eng = MixingEngine()
-        eng._fx.set_param = MagicMock()
+        from hermes_core.spatial_engine import _apply_abbey_road_eq
+        mock_fx = MagicMock()
+        mock_fx.set_param = MagicMock()
 
-        eng._apply_abbey_road_eq(aux_track=3, eq_fx_idx=0)
+        _apply_abbey_road_eq(mock_fx, aux_track=3, eq_fx_idx=0)
 
         enabled_calls = {}
-        for call_args in eng._fx.set_param.call_args_list:
+        for call_args in mock_fx.set_param.call_args_list:
             param_name = str(call_args[0][2])
             norm_val = call_args[0][3]
             if "Enabled" in param_name:
@@ -2300,11 +2308,12 @@ class TestAbbeyRoadEQ:
 
     def test_raises_no_exception_even_on_failure(self):
         """即使设置失败也不抛异常（优雅降级）。"""
-        eng = MixingEngine()
-        eng._fx.set_param = MagicMock(side_effect=RuntimeError("param failed"))
+        from hermes_core.spatial_engine import _apply_abbey_road_eq
+        mock_fx = MagicMock()
+        mock_fx.set_param = MagicMock(side_effect=RuntimeError("param failed"))
 
         # 不应抛出异常
-        eng._apply_abbey_road_eq(aux_track=3, eq_fx_idx=0)
+        _apply_abbey_road_eq(mock_fx, aux_track=3, eq_fx_idx=0)
 
 
 @pytest.mark.unit

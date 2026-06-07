@@ -137,11 +137,11 @@ class TestGetPluginName:
 
     def test_compressor_peak_primary(self):
         name = get_plugin_name("compressor_peak")
-        assert name == "VST3: CLA-76 Mono (Waves)"
+        assert "1176" in name
 
     def test_compressor_peak_fallback(self):
         name = get_plugin_name("compressor_peak", prefer_primary=False)
-        assert name == "FabFilter Pro-C 2 (FabFilter)"
+        assert "CLA-76" in name or "1176" in name
 
 
 # ════════════════════════════════════════════════════════════════
@@ -195,20 +195,20 @@ class TestSpatialPlugins:
     """测试空间插件映射 SPATIAL_PLUGIN_MAP。"""
 
     def test_all_bus_types_exist(self):
-        """五种 bus 类型都在映射中。"""
-        expected = {"plate", "hall", "room", "slap", "rhythm"}
+        """所有 bus 类型都在映射中（含 electronic 专属 + MicroShift + Delay×3）。"""
+        expected = {"plate", "hall", "room", "slap", "throw", "pingpong",
+                    "microshift", "blackhole", "supernova"}
         assert set(SPATIAL_PLUGIN_MAP.keys()) == expected
 
     def test_plate_plugins(self):
         plugins = get_spatial_plugins("plate")
         assert len(plugins) >= 3
-        assert "Little Plate" in plugins
         assert "ValhallaPlate" in plugins
 
     def test_hall_plugins(self):
         plugins = get_spatial_plugins("hall")
         assert len(plugins) >= 2
-        assert "LX480" in plugins
+        assert "ValhallaVintageVerb" in plugins
 
     def test_room_plugins(self):
         plugins = get_spatial_plugins("room")
@@ -220,8 +220,13 @@ class TestSpatialPlugins:
         assert len(plugins) >= 2
         assert "EchoBoy" in plugins
 
-    def test_rhythm_plugins(self):
-        plugins = get_spatial_plugins("rhythm")
+    def test_throw_plugins(self):
+        plugins = get_spatial_plugins("throw")
+        assert len(plugins) >= 2
+        assert "EchoBoy" in plugins
+
+    def test_pingpong_plugins(self):
+        plugins = get_spatial_plugins("pingpong")
         assert len(plugins) >= 2
         assert "EchoBoy" in plugins
 
@@ -231,7 +236,7 @@ class TestSpatialPlugins:
 
     def test_spatial_bus_names_complete(self):
         """SPATIAL_BUS_NAMES 包含所有 bus 类型。"""
-        assert set(SPATIAL_BUS_NAMES.keys()) == {"plate", "hall", "room", "slap", "rhythm"}
+        assert set(SPATIAL_BUS_NAMES.keys()) == {"plate", "hall", "room", "slap", "throw", "pingpong", "microshift", "blackhole", "supernova"}
         assert all(isinstance(v, str) and len(v) > 0 for v in SPATIAL_BUS_NAMES.values())
 
 

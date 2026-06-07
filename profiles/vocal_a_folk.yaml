@@ -1,10 +1,10 @@
-# Hermes-Core Mixing Profile: Vocal Folk
+# Hermes-Core Mixing Profile: Vocal A folk（无 UAD 快速链）
 #
-# Use with:  hermes vocal-mix --profile profiles/vocal_folk.yaml ...
+# Vocal A = CLA-76 + Bettermaker EQ232D + Shadow Hills（替代 UAD 1176/Pultec/CL 1B）
 
-chain_variant: "b"
-name: "Vocal Folk"
-description: "民谣人声混音配置 — 自然质感优先，最少处理，保留人声原始动态"
+chain_variant: "a"
+name: "Vocal A folk"
+description: "folk人声混音 — Vocal A（无 UAD）：CLA-76→EQ232D→Shadow Hills"
 
 # ── gain staging ──
 clip_gain_ref_db: -18.0
@@ -12,19 +12,19 @@ target_lufs: -13.0
 ceiling_db: -0.5
 tolerance_lufs: 0.3
 
-# ── vocal processing chain ──
+# ── vocal processing chain (Vocal A: no UAD) ──
 vocal_chain:
   - name: "FabFilter Pro-Q 3 (FabFilter)"
-  - name: "UAD UA 1176 Rev A"
+  - name: "CLA-76 Mono (Waves)"
   - name: "Decapitator (Soundtoys)"
   - name: "FabFilter Pro-DS (FabFilter)"
-  - name: "UAD Pultec"
+  - name: "Bettermaker EQ232D (Plugin Alliance)"
   - name: "RVox Mono (Waves)"
   - name: "Oxford Inflator (Sonnox)"
-  - name: "UAD Tube-Tech CL 1B"
+  - name: "Shadow Hills Mastering Compressor (Plugin Alliance)"
   - name: "Maag EQ4 (Plugin Alliance)"
 
-# ── backing (instrumental) processing chain ──
+# ── backing chain ──
 backing_chain: []
 
 # ── reverb bus ──
@@ -40,6 +40,6 @@ master_limiter:
   params:
     "Output Level": -0.5
 
-# ── genre backing reduction (LU range) ──
+# ── genre backing reduction ──
 genre_table:
   folk: [3, 6]

@@ -1,0 +1,45 @@
+# Hermes-Core Mixing Profile: Vocal A rock（无 UAD 快速链）
+#
+# Vocal A = CLA-76 + Bettermaker EQ232D + Shadow Hills（替代 UAD 1176/Pultec/CL 1B）
+
+chain_variant: "a"
+name: "Vocal A rock"
+description: "rock人声混音 — Vocal A（无 UAD）：CLA-76→EQ232D→Shadow Hills"
+
+# ── gain staging ──
+clip_gain_ref_db: -18.0
+target_lufs: -10.0
+ceiling_db: -0.5
+tolerance_lufs: 0.3
+
+# ── vocal processing chain (Vocal A: no UAD) ──
+vocal_chain:
+  - name: "FabFilter Pro-Q 3 (FabFilter)"
+  - name: "CLA-76 Mono (Waves)"
+  - name: "Decapitator (Soundtoys)"
+  - name: "FabFilter Pro-DS (FabFilter)"
+  - name: "Bettermaker EQ232D (Plugin Alliance)"
+  - name: "RVox Mono (Waves)"
+  - name: "Oxford Inflator (Sonnox)"
+  - name: "Shadow Hills Mastering Compressor (Plugin Alliance)"
+  - name: "Maag EQ4 (Plugin Alliance)"
+
+# ── backing chain ──
+backing_chain: []
+
+# ── reverb bus ──
+bus_reverb:
+  name: "ValhallaVintageVerb"
+  params:
+    Mix: 0.20
+reverb_level_db: -14.0
+
+# ── master limiter ──
+master_limiter:
+  name: "FabFilter Pro-L 2 (FabFilter)"
+  params:
+    "Output Level": -0.5
+
+# ── genre backing reduction ──
+genre_table:
+  rock: [6, 10]

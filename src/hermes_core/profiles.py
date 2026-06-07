@@ -21,7 +21,9 @@ log = logging.getLogger(__name__)
 _TYPE_ALIASES: dict[str, str] = {
     "1176":     "fet",
     "LA-2A":    "opto",
-    "CL-1B":    "opto",
+    "CL-1B":    "tube_opto",
+    "CL1B":     "tube_opto",
+    "Tube-Tech": "tube_opto",
     "RVox":     "rvox",
     "RComp":    "vca",
     "API 2500": "vca",
@@ -34,6 +36,16 @@ _TYPE_ALIASES: dict[str, str] = {
     "ReaVerb":  "reverb",
     "Decapitator": "saturation",
     "Saturn":      "saturation",
+    "Pultec":      "color_eq",
+    "EQP-1A":      "color_eq",
+    "EQP1A":       "color_eq",
+    "Bettermaker": "color_eq",
+    "EQ232D":      "color_eq",
+    "Shadow Hills": "tube_opto",
+    "Inflator":    "harmonic",
+    "Oxford Inflator": "harmonic",
+    "Maag":        "air_eq",
+    "Maag EQ4":    "air_eq",
     "MicroShift":  "doubler",
     "Doubler":     "doubler",
 }
@@ -155,6 +167,7 @@ class MixingProfile:
     """
     name: str = "Default"
     description: str = ""
+    chain_variant: str = ""  # "a" = Vocal A (无 UAD), "b" = Vocal B (有 UAD), "" = 默认
 
     # ── gain staging ──
     clip_gain_ref_db: float = -18.0
@@ -181,16 +194,18 @@ class MixingProfile:
     })
 
     @classmethod
-    def for_genre(cls, genre: str) -> "MixingProfile":
+    def for_genre(cls, genre: str, variant: str = "") -> "MixingProfile":
         """根据流派名加载对应的 Profile YAML。
 
-        YAML 文件位于 ``profiles/vocal_{genre}.yaml``。
+        YAML 文件位于 ``profiles/vocal_{variant}_{genre}.yaml``。
         未找到对应文件时返回默认 Profile。
 
         Parameters
         ----------
         genre : str
             流派名称，如 ``"pop"``, ``"rock"``, ``"jazz"`` 等。
+        variant : str
+            链版本，如 ``"a"``（Vocal A 无 UAD）或 ``""``（Vocal B 默认 UAD）。
 
         Returns
         -------
@@ -211,6 +226,8 @@ class MixingProfile:
         }
 
         profile_name = _GENRE_YAML_MAP.get(genre, "vocal_pop")
+        if variant:
+            profile_name = profile_name.replace("vocal_", f"vocal_{variant}_")
         # 从 src/hermes_core/profiles.py 上溯三级到项目根目录
         _project_root = os.path.dirname(
             os.path.dirname(os.path.dirname(__file__))
