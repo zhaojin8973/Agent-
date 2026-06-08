@@ -48,14 +48,11 @@ from hermes_core.genre_tables import (
     _DELAY_BUS_TYPES,
     # 向后兼容重新导出（tests/test_engine.py 引用）
     _GENRE_RVOX_MULTIPLIER,
-    _GENRE_PRODS_RANGE,
     _GENRE_RETURN_EQ,
     _GENRE_EQ_TWEAKS,
     _GENRE_VOCAL_TO_BACKING,
     _GENRE_TARGET_LUFS,
     _GENRE_CREST_GR_RATIO,
-    _GENRE_CLA76_ATTACK_BASE,
-    _GENRE_CLA76_ATTACK_K,
     _GENRE_REVERB_SEND_BASE,
     _GENRE_DELAY_SEND_BASE,
     _SEND_LEVEL_MIN,
@@ -63,7 +60,6 @@ from hermes_core.genre_tables import (
     _GENRE_MICROSHIFT_SEND,
 )
 from hermes_core.comp_engine import (
-    _compute_cla76_attack_knob,
     _derive_compressor_intent,
     _apply_vca_params,
     _apply_fet_params,
@@ -308,7 +304,9 @@ class MixingEngine:
     def apply_profile(self, profile, /, *, vocal_track: int = 0,
                       backing_tracks: list[int] | None = None,
                       genre: str = "pop",
-                      bpm: float | None = None):
+                      bpm: float | None = None,
+                      gender: str = "",
+                      technique: str = ""):
         """Apply a :class:`MixingProfile` — FX chains, sends, and auto-compression.
 
         1. **EQ baseline** — conservative HPF + gentle presence boost.
@@ -322,10 +320,23 @@ class MixingEngine:
         upstream parameter changes (``update_node_param``).
         """
         from hermes_core.profiles import MixingProfile
+        from hermes_core.genre_tables import get_vocal_profile
         if not isinstance(profile, MixingProfile):
             raise TypeError(f"Expected MixingProfile, got {type(profile).__name__}")
 
         self._profile = profile
+
+        # ── 声纹画像：优先用参数，其次用 profile 字段，最后回退 ──
+        _gender = gender or getattr(profile, "gender", "") or "female"
+        _technique = technique or getattr(profile, "technique", "") or genre
+        self._vocal_profile = get_vocal_profile(_gender, _technique)
+        log.info(
+            "VocalProfile: gender=%s technique=%s → hpf=%s–%sHz presence=%s–%sHz boost=%.1fx",
+            _gender, _technique,
+            self._vocal_profile.hpf_min_hz, self._vocal_profile.hpf_max_hz,
+            self._vocal_profile.presence_scan_lo, self._vocal_profile.presence_scan_hi,
+            self._vocal_profile.boost_scale,
+        )
 
         # Resolve BPM: explicit arg takes priority over prepare_stems stash.
         _bpm = bpm if bpm is not None else getattr(self, "_bpm", None)
@@ -335,6 +346,48 @@ class MixingEngine:
         for i, s in enumerate(self._stems_cache):
             if s.get("success"):
                 stem_data[i] = s
+
+        # ── 交叉频谱分析（人声 vs 伴奏） ──
+        self._cross_report = None
+        backing_path = ""
+        if backing_tracks:
+            bt_idx = backing_tracks[0]
+            for s in self._stems_cache:
+                if s.get("track_index") == bt_idx and s.get("file_path"):
+                    backing_path = s["file_path"]
+                    break
+
+        if backing_path:
+            import os
+            from hermes_core.spectrum import SpectrumAnalyzer
+            from hermes_core.cross_spectrum import CrossSpectrumAnalyzer
+            try:
+                backing_report = SpectrumAnalyzer.analyze(
+                    backing_path, vocal_profile=self._vocal_profile,
+                )
+                # 人声频谱报告（从 stem_data 或重新分析）
+                vocal_path = ""
+                for s in self._stems_cache:
+                    if s.get("track_index") == vocal_track and s.get("file_path"):
+                        vocal_path = s["file_path"]
+                        break
+                if vocal_path and os.path.exists(vocal_path):
+                    vocal_report = SpectrumAnalyzer.analyze(
+                        vocal_path, vocal_profile=self._vocal_profile,
+                    )
+                    self._cross_report = CrossSpectrumAnalyzer.analyze(
+                        vocal_report, backing_report,
+                        vocal_profile=self._vocal_profile,
+                    )
+                    log.info(
+                        "Cross-spectrum: %d masking zones, "
+                        "presence_factor=%.2f air_factor=%.2f",
+                        len(self._cross_report.masking_zones),
+                        self._cross_report.vocal_presence_factor,
+                        self._cross_report.vocal_air_factor,
+                    )
+            except Exception as exc:
+                log.debug("Cross-spectrum analysis skipped: %s", exc)
 
         # ── Vocal chain ──
         self._vocal_chain_nodes = self._build_audio_chain(
@@ -347,18 +400,20 @@ class MixingEngine:
             bpm=_bpm,
         )
 
-        # ── Backing chain (one chain per backing track) ──
+        # ── Backing chain（含避让 EQ） ──
         self._backing_chain_nodes.clear()
-        if backing_tracks and profile.backing_chain:
+        if backing_tracks:
             for bt in backing_tracks:
+                bt_chain = list(profile.backing_chain) if profile.backing_chain else []
                 bt_stem_idx = next(
                     (i for i, s in enumerate(self._stems_cache)
                      if s.get("track_index") == bt),
                     None,
                 )
+
                 nodes = self._build_audio_chain(
                     track_index=bt,
-                    fx_list=profile.backing_chain,
+                    fx_list=bt_chain,
                     stem_data=stem_data,
                     stem_idx=bt_stem_idx or 1,
                     genre=genre,
@@ -366,6 +421,38 @@ class MixingEngine:
                     bpm=_bpm,
                 )
                 self._backing_chain_nodes.extend(nodes)
+
+            # ── 交叉频谱避让：在伴奏轨加 Pro-Q 3 避让 EQ ──
+            if self._cross_report and self._cross_report.masking_zones:
+                from hermes_core.eq_engine import derive_backing_eq
+                from hermes_core.loudness_optimizer import EqIntent
+                masking_bands = derive_backing_eq(
+                    backing_report, self._cross_report.masking_zones,
+                )
+                if masking_bands:
+                    intent = EqIntent(
+                        bands=masking_bands,
+                        spectral_tilt="neutral", mud_detected=False,
+                    )
+                    normalized = _apply_proq3_eq(intent)
+                    for bt in backing_tracks:
+                        duck_idx = self._fx.add(
+                            bt, "VST: FabFilter Pro-Q 3 (FabFilter)",
+                        )
+                        if duck_idx >= 0:
+                            try:
+                                for pname, pval in normalized.items():
+                                    self._fx.set_param(bt, duck_idx, pname, pval)
+                                # ── Linear Phase ──
+                                self._fx.set_param(
+                                    bt, duck_idx, "Processing Mode", 1.0,
+                                )
+                                log.info(
+                                    "Backing ducking: %d cuts + linear phase",
+                                    len(self._cross_report.masking_zones),
+                                )
+                            except Exception as exc:
+                                log.debug("Backing ducking failed: %s", exc)
 
         # ── 空间效果器：Reverb×3 + Delay×3 + MicroShift AUX ──
         from hermes_core.signal import SignalAnalyzer
@@ -407,15 +494,25 @@ class MixingEngine:
         nodes: list[AudioNode] = []
         prev: AudioNode | None = None
         sd = stem_data.get(stem_idx, {})
-        spectrum = getattr(self, "_last_spectrum", {}) or {}
         eq_params = getattr(self, "_last_eq_params", {}) or {}
 
         for i, fx in enumerate(fx_list):
             idx = self._fx.add(track_index, fx.name)
             fx_type = _resolve_fx_type(fx.name, fx.fx_type)
 
+            # ── 读取 REAPER 实际插件名（解决 YAML 短名→VST/VST3 前缀不匹配） ──
+            actual_name = fx.name
+            if idx >= 0:
+                track_ptr = self._bridge.api.GetTrack(0, track_index)
+                raw_name = self._bridge.api.TrackFX_GetFXName(
+                    track_ptr, idx, "", 256,
+                )
+                resolved = _extract_reaper_string(raw_name)
+                if resolved:
+                    actual_name = resolved
+
             node = AudioNode(
-                name=f"{role}_{fx_type}_{i}_{fx.name}",
+                name=f"{role}_{fx_type}_{i}_{actual_name}",
                 fx_type=fx_type,
                 params={},
             )
@@ -432,17 +529,19 @@ class MixingEngine:
                 self._apply_eq_baseline(
                     track_index, idx, role,
                     genre=genre, stem_file_path=file_path,
-                    position=eq_position, fx_name=fx.name,
+                    position=eq_position, fx_name=actual_name,
+                    vocal_profile=getattr(self, "_vocal_profile", None),
+                    cross_report=getattr(self, "_cross_report", None),
                 )
                 if hasattr(self, "_last_eq_params"):
                     node.params = dict(self._last_eq_params)
-                log.info("Added %s to track %d [%s]", fx.name, track_index, node.name)
+                log.info("Added %s to track %d [%s]", actual_name, track_index, node.name)
                 prev = node
                 continue
 
             # ── 策略推导 → 参数应用到 REAPER ──
             ctx = FXBuildContext(
-                fx_name=fx.name,
+                fx_name=actual_name,
                 fx_type=fx_type,
                 role=role,
                 genre=genre,
@@ -450,19 +549,55 @@ class MixingEngine:
                 raw_rms_db=sd.get("raw_rms_db"),
                 raw_peak_db=sd.get("raw_peak_db"),
                 stem_file_path=sd.get("file_path", ""),
-                presence_deficit=spectrum.get("presence_deficit", 0.0),
+                presence_deficit=self._last_spectrum.get("presence_deficit", 0.0),
                 last_eq_params=dict(eq_params),
                 eq_position=fx.eq_position if hasattr(fx, "eq_position") else "solo",
             )
-            physical = apply_params_to_track(self._fx, track_index, idx, ctx)
-            if physical is not None:
-                node.params = physical
+            # ── CLA-76 走独立模块（分段线性归一化） ──
+            if "cla-76" in actual_name.lower():
+                from hermes_core.cla76 import build_params as cla76_build
+                from hermes_core.cla76 import normalize_params as cla76_normalize
+                physical = cla76_build(ctx)
+                if physical is not None:
+                    node.params = dict(physical)
+                    normalized = cla76_normalize(physical)
+                    for pname, pval in normalized.items():
+                        self._fx.set_param(track_index, idx, pname, pval)
+            # ── Decapitator 走独立模块 ──
+            elif "decapitator" in actual_name.lower():
+                from hermes_core.decapitator import build_params as decap_build
+                from hermes_core.decapitator import normalize_params as decap_normalize
+                physical = decap_build(ctx)
+                if physical is not None:
+                    node.params = dict(physical)
+                    normalized = decap_normalize(physical)
+                    for pname, pval in normalized.items():
+                        self._fx.set_param(track_index, idx, pname, pval)
+            # ── Pro-DS 走独立模块（mid-chain 频谱重分析） ──
+            elif "pro-ds" in actual_name.lower():
+                # 在 Pro-DS 之前重跑频谱分析——此时信号已过 Q3+压缩+饱和
+                self._mid_chain_reanalyze(track_index)
+                from hermes_core.pro_ds import build_params as prods_build
+                from hermes_core.pro_ds import normalize_params as prods_normalize
+                vp = getattr(self, "_vocal_profile", None)
+                gender = getattr(vp, "gender", "") if vp else ""
+                spectrum_data = getattr(self, "_last_spectrum", None) or None
+                physical = prods_build(ctx, gender=gender, spectrum=spectrum_data)
+                if physical is not None:
+                    node.params = dict(physical)
+                    normalized = prods_normalize(physical)
+                    for pname, pval in normalized.items():
+                        self._fx.set_param(track_index, idx, pname, pval)
             else:
-                # 通用回退：直接使用 fx.params
-                for pname, pval in fx.params.items():
-                    self._fx.set_param(track_index, idx, pname, pval)
+                physical = apply_params_to_track(self._fx, track_index, idx, ctx)
+                if physical is not None:
+                    node.params = physical
+                else:
+                    # 通用回退：直接使用 fx.params
+                    for pname, pval in fx.params.items():
+                        self._fx.set_param(track_index, idx, pname, pval)
 
-            log.info("Added %s to track %d [%s]", fx.name, track_index, node.name)
+            log.info("Added %s to track %d [%s]", actual_name, track_index, node.name)
             prev = node
 
         return nodes
@@ -541,7 +676,9 @@ class MixingEngine:
                            genre: str = "pop",
                            stem_file_path: str = "",
                            position: str = "solo",
-                           fx_name: str = "") -> None:
+                           fx_name: str = "",
+                           vocal_profile: object | None = None,
+                           cross_report: object | None = None) -> None:
         """Apply EQ to *track_index* / *fx_index* for the given *role*.（委托到 eq_engine）"""
         self._last_eq_params = {}
         self._last_spectrum = getattr(self, "_last_spectrum", {}) or {}
@@ -551,9 +688,57 @@ class MixingEngine:
             position=position, fx_name=fx_name,
             last_eq_params=self._last_eq_params,
             last_spectrum=self._last_spectrum,
+            vocal_profile=vocal_profile,
+            cross_report=cross_report,
         )
         if normalized is not None:
             self._last_eq_params = dict(normalized)
+
+    def _mid_chain_reanalyze(self, vocal_track: int) -> None:
+        """mid-chain 频谱重分析 —— 在饱和后、齿音前更新频谱数据。
+
+        独奏人声轨道全曲渲染（约 3–5 秒），
+        重跑 SpectrumAnalyzer，将结果写回 ``self._last_spectrum``，
+        供 Pro-DS 等后续模块使用处理后的真实频谱数据。
+        """
+        import os
+        import tempfile
+        import shutil
+        from hermes_core.spectrum import SpectrumAnalyzer
+
+        tmp_dir = tempfile.mkdtemp(prefix="hermes_midchain_")
+        try:
+            # 清理可能残留的 render.wav（防止 REAPER「文件已存在」弹窗）
+            out_wav = os.path.join(tmp_dir, "render.wav")
+            if os.path.exists(out_wav):
+                os.remove(out_wav)
+
+            result = self._solo_render([vocal_track], tmp_dir, "midchain")
+
+            wav_path = result.get("output_path")
+            if wav_path and os.path.exists(wav_path):
+                report = SpectrumAnalyzer.analyze(
+                    wav_path,
+                    vocal_profile=getattr(self, "_vocal_profile", None),
+                )
+                self._last_spectrum.update({
+                    "presence_deficit": report.presence_deficit_db,
+                    "sibilance_peak_hz": report.sibilance_peak_hz,
+                    "band_energy_db": report.band_energy_db,
+                    "air_level_db": report.air_level_db,
+                    "mud_ratio": report.mud_ratio_db,
+                })
+                log.info(
+                    "Mid-chain reanalyze: presence_deficit=%.1f sib_peak=%.0f "
+                    "band=%s",
+                    report.presence_deficit_db,
+                    report.sibilance_peak_hz,
+                    {k: v for k, v in report.band_energy_db.items()},
+                )
+        except Exception as exc:
+            log.warning("Mid-chain reanalyze failed (%s), using EQ spectrum", exc)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
     def auto_corrective_eq(self, track_idx: int) -> dict:
         """基于频谱分析的共振检测自动生成校正性 EQ。（委托到 eq_engine）"""

@@ -185,7 +185,7 @@ class TestSpatialPluginRegistry:
         ("VST: Little Plate (Soundtoys)", "reverb"),
         ("VST: ValhallaPlate (Valhalla DSP, LLC)", "reverb"),
         ("VST: ValhallaRoom (Valhalla DSP, LLC)", "reverb"),
-        ("VST: LX480 v4 (Relab Development)", "reverb"),
+        ("VST3: LX480 v4 (Relab Development)", "reverb"),
         ("VST: FabFilter Pro-R 2 (FabFilter)", "reverb"),
         ("VST3: EchoBoy (Soundtoys)", "delay"),
         ("VST3: ValhallaDelay (Valhalla DSP, LLC)", "delay"),

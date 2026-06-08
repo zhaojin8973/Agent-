@@ -99,16 +99,18 @@ def _init_comp_translators() -> None:
 def _build_compressor_params(ctx: FXBuildContext) -> dict | None:
     """压缩器参数推导 — crest/peak 分析 → CompressionIntent → 物理参数。
 
-    支持 VCA/FET/Opto（通过 _COMP_TRANSLATORS）、RVox（特殊 multiplier）、
-    CLA-76（crest 驱动 attack + BPM 驱动 release）。
+    VCA/FET/Opto/RVox 通过各翻译器处理。CLA-76 由 cla76.py 模块独立处理。
     """
     from hermes_core.comp_engine import (
-        _derive_compressor_intent, _compute_cla76_attack_knob,
-        _apply_cla76_params, _apply_rvox_params,
-        _ms_to_cla76_release,
+        _derive_compressor_intent, _apply_rvox_params,
     )
     from hermes_core.genre_tables import _GENRE_RVOX_MULTIPLIER
     from hermes_core.profiles import _get_compressor_preset, get_bpm_timing
+
+    # CLA-76 由独立模块处理
+    if "cla-76" in ctx.fx_name.lower():
+        from hermes_core.cla76 import build_params as cla76_build
+        return cla76_build(ctx)
 
     rms = ctx.raw_rms_db
     peak = ctx.raw_peak_db
@@ -121,7 +123,6 @@ def _build_compressor_params(ctx: FXBuildContext) -> dict | None:
     preset = _get_compressor_preset(ctx.role, ctx.genre)
     if (
         ctx.bpm is not None and ctx.bpm > 0
-        and "cla-76" not in ctx.fx_name.lower()
         and "1176" not in ctx.fx_name.lower()
         and ctx.fx_type != "rvox"
     ):
@@ -134,21 +135,8 @@ def _build_compressor_params(ctx: FXBuildContext) -> dict | None:
             )
 
     # Per-type dispatch
-    if "cla-76" in ctx.fx_name.lower() or "1176" in ctx.fx_name.lower():
-        attack_knob = _compute_cla76_attack_knob(intent.crest_factor_db, ctx.genre)
-        release_knob = None
-        if ctx.bpm is not None and ctx.bpm > 0:
-            release_ms = 60000.0 / ctx.bpm
-            release_knob = _ms_to_cla76_release(release_ms)
-            log.info(
-                "BPM-aware timing: %.0f BPM → release=%.0fms (knob %.2f)",
-                ctx.bpm, release_ms, release_knob,
-            )
-        physical = _apply_cla76_params(intent, attack_knob, release_knob)
-        log.info(
-            "1176/CLA-76 attack: crest=%.1f → knob=%.2f (genre=%s)",
-            intent.crest_factor_db, attack_knob, ctx.genre,
-        )
+    if "1176" in ctx.fx_name.lower():
+        physical = _COMP_TRANSLATORS["fet"](intent, preset) if _COMP_TRANSLATORS.get("fet") else None
     elif ctx.fx_type == "rvox":
         rvox_mult = _GENRE_RVOX_MULTIPLIER.get(ctx.genre, 1.0)
         physical = _apply_rvox_params(intent, preset, rvox_mult)
@@ -157,13 +145,10 @@ def _build_compressor_params(ctx: FXBuildContext) -> dict | None:
     else:
         return None
 
-    # No BPM → strip timing keys (leave at plugin defaults)
-    if ctx.bpm is None:
-        if "cla-76" in ctx.fx_name.lower() or "1176" in ctx.fx_name.lower():
-            physical.pop("Release", None)
-        else:
-            for timing_key in ("Attack", "Release"):
-                physical.pop(timing_key, None)
+    # No BPM — strip timing keys (leave at plugin defaults)
+    if ctx.bpm is None and "1176" not in ctx.fx_name.lower():
+        for timing_key in ("Attack", "Release"):
+            physical.pop(timing_key, None)
 
     log.info(
         "Auto-compressor: %s → %s (crest=%.1f dB, gr=%.1f dB)",
@@ -179,65 +164,12 @@ def _build_compressor_params(ctx: FXBuildContext) -> dict | None:
 
 
 def _build_deesser_params(ctx: FXBuildContext) -> dict:
-    """De-Esser 参数推导 — 存在感缺失 → 阈值 + 流派感知 Range。
+    """Pro-DS 齿音消除 — 委托到 :mod:`hermes_core.pro_ds`。
 
-    Pro-DS: 固定检测频段 HPF=5.5kHz / LPF=12kHz，Single Vocal 模式。
+    所有参数逻辑、流派表、公式集中在 pro_ds.py 中。
     """
-    from hermes_core.genre_tables import _GENRE_PRODS_RANGE
-
-    presence_def = ctx.presence_deficit
-
-    threshold_db = -32.0 + presence_def * 0.1
-    threshold_db = max(-60.0, min(0.0, threshold_db))
-
-    range_db = _GENRE_PRODS_RANGE.get(ctx.genre, 8.5)
-
-    hpf_norm = math.log10(5500.0 / 2000.0)
-    lpf_norm = math.log10(12000.0 / 2000.0)
-
-    physical = {
-        "Mode":              0.0,
-        "Band Processing":   0.0,
-        "Threshold":         round(threshold_db, 1),
-        "Range":             range_db,
-        "Lookahead":         10.0,
-        "Lookahead Enabled": 1.0,
-        "High-Pass Frequency": round(hpf_norm, 3),
-        "Low-Pass Frequency":  round(lpf_norm, 3),
-        "Input Level":       0.0,
-        "Output Level":      0.0,
-        "Wet":               1.0,
-    }
-    log.info(
-        "Auto-deesser: band=5.5k–12kHz, presence_def=%.1f → "
-        "threshold=%.1f dB, range=%.1f dB (genre=%s)",
-        presence_def, threshold_db, range_db, ctx.genre,
-    )
-    return physical
-
-
-# ════════════════════════════════════════════════════════════════
-# Saturation 策略
-# ════════════════════════════════════════════════════════════════
-
-
-def _build_saturation_params(ctx: FXBuildContext) -> dict | None:
-    """饱和参数推导 — Crest Factor → Drive 量。
-
-    高波峰 → 保留瞬态，少饱和；低波峰 → 增加谐波密度。
-    """
-    crest_db = 12.0
-    if ctx.raw_rms_db is not None and ctx.raw_peak_db is not None:
-        crest_db = ctx.raw_peak_db - ctx.raw_rms_db
-
-    drive = round(max(0.1, 1.0 - (crest_db - 8.0) * 0.05), 2)
-    drive = max(0.1, min(1.0, drive))
-
-    log.info(
-        "Auto-saturation: crest=%.1fdB → drive=%.2f (plugin=%s)",
-        crest_db, drive, ctx.fx_name,
-    )
-    return {"Drive": drive, "Mix": 0.5}
+    from hermes_core.pro_ds import build_params as prods_build
+    return prods_build(ctx)
 
 
 # ════════════════════════════════════════════════════════════════
@@ -295,42 +227,17 @@ def _build_doubler_params(ctx: FXBuildContext) -> dict:
 
 
 # ════════════════════════════════════════════════════════════════
-# Decapitator 饱和策略
+# Decapitator 饱和策略（委托到独立模块）
 # ════════════════════════════════════════════════════════════════
 
 
-def _build_decapitator_params(ctx: FXBuildContext) -> dict:
-    """Decapitator 谐波饱和 — crest 反比驱动 Drive。
+def _build_decapitator_params(ctx: FXBuildContext) -> dict | None:
+    """Decapitator 谐波饱和 — 委托到 :mod:`hermes_core.decapitator`。
 
-    Style=E (EMI)、Tone=0.5、Mix 流派查表。
-    放在压缩后——clip gain 峰值已受控，避免过载失真。
+    所有参数逻辑、流派表、公式集中在 decapitator.py 中。
     """
-    from hermes_core.genre_tables import _GENRE_DECAP_MIX, _DECAP_DRIVE_BASE
-
-    crest_db = 12.0
-    if ctx.raw_rms_db is not None and ctx.raw_peak_db is not None:
-        crest_db = ctx.raw_peak_db - ctx.raw_rms_db
-
-    base_drive = _DECAP_DRIVE_BASE.get(ctx.genre, 2.0)
-    # crest 大 → 少给 Drive, crest 小 → 多给 Drive
-    drive_adj = max(-1.0, min(1.0, (12.0 - crest_db) * 0.2))
-    drive = round(max(1.0, min(4.0, base_drive + drive_adj)), 1)
-
-    mix = _GENRE_DECAP_MIX.get(ctx.genre, 0.4)
-
-    physical = {
-        "Style":  0.25,  # E (EMI) — 最平滑人声模式
-        "Drive":  drive,
-        "Tone":   0.5,   # 中位
-        "Mix":    mix,
-        "High Cut": 0.0,  # OFF
-        "Low Cut":  0.0,  # OFF
-    }
-    log.info(
-        "Auto-Decapitator: crest=%.1fdB → Drive=%.1f Mix=%.0f%% (genre=%s)",
-        crest_db, drive, mix * 100, ctx.genre,
-    )
-    return physical
+    from hermes_core.decapitator import build_params as decap_build
+    return decap_build(ctx)
 
 
 # ════════════════════════════════════════════════════════════════
@@ -380,6 +287,72 @@ def _build_pultec_params(ctx: FXBuildContext) -> dict:
 
 
 # ════════════════════════════════════════════════════════════════
+# Bettermaker EQ232D 染色策略
+# ════════════════════════════════════════════════════════════════
+
+
+def _build_eq232d_params(ctx: FXBuildContext) -> dict:
+    """Bettermaker EQ232D — 干净固态 Pultec 风格母带级 EQ。
+
+    硬件原型为 EQ232P MKII。人声链策略：
+    - CHANNEL=Dual Mono（人声是单声道）
+    - Channel 1 PEQ 段：Pultec 经典低频推拉 + presence 驱动高频
+    - Channel 2 完全关闭
+    - EQ1/EQ2 参量段关闭（已有 Pro-Q 3 做手术 EQ）
+    - HPF 关闭（Pro-Q 3 已做高通）
+    - KCS 旁路（底鼓/军鼓滤波器，与人声无关）
+    """
+    deficit = ctx.presence_deficit
+    sibilance = 0.0  # 后续可从 spectrum 获取
+
+    # Low: Pultec 经典 60Hz 推拉 Trick
+    # LO CPS — 低频频率选择器（CPS=Cycles Per Second）
+    # 0.33 ≈ 60Hz（经典 Pultec 值）
+    lo_cps = 0.33
+    low_boost = max(0.0, min(1.0, 3.5 / 10.0))
+    if deficit > 3.0:
+        low_atten = 2.5 / 10.0
+    elif deficit > 0:
+        low_atten = 1.5 / 10.0
+    else:
+        low_atten = 0.5 / 10.0
+
+    # High: presence 驱动（大而干净的高频提升）
+    high_boost = max(0.0, min(1.0, deficit * 0.04))
+    high_atten = 0.2 if sibilance > -30.0 else 0.0
+    high_bw = 0.5
+
+    physical = {
+        # ── 通道配置 ──
+        "CHANNEL":    1.0,   # Dual Mono（人声单声道）
+        "MS MATRIX":  0.0,   # M/S 关闭（母带功能，人声不需要）
+        # ── Channel 1: 启用 PEQ ──
+        "ENGAGE 1":   1.0,   # Ch1 ON
+        "HPF IN 1":   0.0,   # HPF 关闭（Pro-Q 3 已做）
+        "EQ1 IN 1":   0.0,   # 参量段关闭（已有手术 EQ）
+        "EQ2 IN 1":   0.0,
+        "PEQ IN 1":   1.0,   # Pultec 被动 EQ ON
+        "LO CPS 1":   lo_cps,
+        "LO BOOST 1": low_boost,
+        "LO ATTEN 1": low_atten,
+        "HI BOOST 1": high_boost,
+        "HI ATTEN 1": high_atten,
+        "HI BW 1":    high_bw,
+        "KCS BST 1":  0.0,   # Kick/Snare Boost 关闭
+        "KCS ATT 1":  0.0,   # Kick/Snare Atten 关闭
+        "LVL OUT 1":  0.5,   # unity
+        # ── Channel 2: 完全关闭 ──
+        "ENGAGE 2":   0.0,   # Ch2 OFF（避免默认直通）
+    }
+    log.info(
+        "Auto-EQ232D: Ch1 PEQ @60Hz boost=%.2f atten=%.2f | "
+        "Hi boost=%.2f bw=%.2f | Ch2=OFF | DualMono (deficit=%.1f)",
+        low_boost, low_atten, high_boost, high_bw, deficit,
+    )
+    return physical
+
+
+# ════════════════════════════════════════════════════════════════
 # Oxford Inflator 谐波密度策略
 # ════════════════════════════════════════════════════════════════
 
@@ -395,11 +368,13 @@ def _build_inflator_params(ctx: FXBuildContext) -> dict:
     effect = _GENRE_INFLATOR_EFFECT.get(ctx.genre, 0.30)
 
     physical = {
-        "Effect":     effect,
-        "Curve":      0.0,     # 负曲线 = 最透明人声模式
-        "Clip 0dB":   0.0,     # OFF — 不削波
-        "Input":      0.0,     # unity
-        "Output":     -0.5,    # 微退防推大
+        "Input Gain":  0.0,     # unity
+        "Effect":      effect,
+        "Curve":       0.0,     # 负曲线 = 最透明人声模式
+        "Output Gain": 0.0,     # unity
+        "In":          1.0,     # ON
+        "Band Split":  0.0,     # OFF（全频段处理）
+        "Clip 0dB":    0.0,     # OFF — 不削波
     }
     log.info(
         "Auto-Inflator: effect=%.0f%% curve=0 (genre=%s)",
@@ -446,6 +421,63 @@ def _build_cl1b_params(ctx: FXBuildContext) -> dict:
 
 
 # ════════════════════════════════════════════════════════════════
+# Shadow Hills Mastering Compressor 策略
+# ════════════════════════════════════════════════════════════════
+
+
+def _build_shadow_hills_params(ctx: FXBuildContext) -> dict:
+    """Shadow Hills Mastering Compressor — 仅光学级 + Iron 变压器染色。
+
+    离散级完全 bypass，用光学级的自然起振/释放曲线做平滑人声控制。
+    """
+    from hermes_core.genre_tables import _GENRE_CL1B_RATIO
+
+    rms = ctx.raw_rms_db
+    # 光学阈值：基于 RMS 推导（0–1 范围）
+    if rms is not None:
+        # RMS 越热越需要压，阈值往低推
+        optical_thresh = max(0.0, min(1.0, (rms + 18.0) / 30.0))
+    else:
+        optical_thresh = 0.3
+
+    # 增益补偿：光学压了多少就补多少
+    optical_gain = max(0.0, min(1.0, optical_thresh * 0.5 + 0.26))
+
+    # 侧链 HPF — 流派映射
+    sidechain_hpf_d = {
+        "pop": 0.15,
+        "rock": 0.12,
+        "electronic": 0.10,
+        "folk": 0.18,
+        "ballad": 0.18,
+        "chinese_folk_bel_canto": 0.20,
+    }
+    sidechain_hpf = sidechain_hpf_d.get(ctx.genre, 0.15)
+
+    physical = {
+        "Hardwire Bypass":      1.0,   # Hardwire 参考路径 ON
+        "Optical Bypass 1":     1.0,   # 光学级 ON（1=engaged, 0=bypassed）
+        "Optical Threshold 1":  round(optical_thresh, 3),
+        "Optical Gain 1":       round(optical_gain, 3),
+        "Discrete Bypass 1":    0.0,   # 离散级 BYPASS
+        "Discrete Ratio 1":     0.4,   # 默认（不使用时无关）
+        "Discrete Attack 1":    1.0,   # 默认
+        "Discrete Recover 1":   0.0,   # 默认
+        "Discrete Gain 1":      0.0,   # unity
+        "Sidechain Filter 1":   0.0,   # 侧链滤波器 OFF（离散级旁路）
+        "Transformer 1":        1.0,   # Iron 变压器 ON（染色）
+        "Sidechain HP Freq":    sidechain_hpf,
+        "Mix":                  1.0,
+    }
+    log.info(
+        "Auto-Shadow Hills: optical thresh=%.3f gain=%.3f | "
+        "discrete=bypass | iron=xfmr (genre=%s)",
+        optical_thresh, optical_gain, ctx.genre,
+    )
+    return physical
+
+
+# ════════════════════════════════════════════════════════════════
 # Maag EQ4 Air Band 策略
 # ════════════════════════════════════════════════════════════════
 
@@ -468,12 +500,15 @@ def _build_maag_params(ctx: FXBuildContext) -> dict:
     hz2500_boost = 1.5 if deficit > 4.0 else 0.0
 
     physical = {
-        "Air Freq":   air_freq,
-        "Air Boost":  air_boost,
-        "160Hz Boost": hz160_boost,
-        "2.5kHz Boost": hz2500_boost,
-        "650Hz Boost":  0.0,
-        "Sub 10Hz":     0.0,
+        "Sub":         0.0,    # OFF（人声不需要 Sub）
+        "40 Hz":       0.0,    # OFF
+        "160 Hz":      hz160_boost,
+        "650 Hz":      0.0,    # OFF
+        "2.5 kHz":     hz2500_boost,
+        "Air Gain":    air_boost,
+        "Air Band":    air_freq,
+        "Level Trim":  1.0,    # unity（输出增益由 Inflator/Shadow Hills 控制）
+        "In/Out":      1.0,    # IN
     }
     log.info(
         "Auto-Maag: air=%.0fHz +%.1fdB | 160Hz=+%.1f 2.5k=+%.1f (genre=%s)",
@@ -496,8 +531,10 @@ _FX_BUILDERS: dict[str, FXBuilderFn] = {
     "deesser":     _build_deesser_params,
     "saturation":  _build_decapitator_params,
     "color_eq":    _build_pultec_params,
+    "color_eq_232d": _build_eq232d_params,
     "harmonic":    _build_inflator_params,
     "tube_opto":   _build_cl1b_params,
+    "tube_opto_sh": _build_shadow_hills_params,
     "air_eq":      _build_maag_params,
     "dynamic_eq":  _build_dynamic_eq_params,
     "doubler":     _build_doubler_params,

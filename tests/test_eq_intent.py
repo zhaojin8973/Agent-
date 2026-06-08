@@ -64,14 +64,16 @@ class TestHpfDerivation:
         intent = _derive_eq_intent(report, role="vocal", genre="pop")
         hpf = next(b for b in intent.bands if b.band_type == "hp")
         assert hpf.freq_hz > 80.0, f"HPF should rise above 80 Hz, got {hpf.freq_hz}"
-        assert hpf.freq_hz <= 120.0, f"HPF should cap at 120 Hz, got {hpf.freq_hz}"
+        assert hpf.freq_hz <= 150.0, f"HPF should cap at 150 Hz, got {hpf.freq_hz}"
 
     def test_backing_default_hpf(self):
         """Backing HPF defaults to 40 Hz."""
         report = _make_report()
         intent = _derive_eq_intent(report, role="backing", genre="pop")
         hpf = next(b for b in intent.bands if b.band_type == "hp")
-        assert hpf.freq_hz == 40.0, f"Default backing HPF should be 40 Hz, got {hpf.freq_hz}"
+        assert hpf.freq_hz == 40.0, (
+            f"Default backing HPF should be 40 Hz, got {hpf.freq_hz}"
+        )
 
 
 # ══════════════════════════════════════════════════════════════

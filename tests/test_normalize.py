@@ -581,3 +581,96 @@ class TestComputeBusCompressorParams:
         params = compute_bus_compressor_params(peak_db=-12.0, genre="pop")
         # Target GR=3.0 → offset=0.6 → thresh = -12.0 + 0.6 = -11.4
         assert params["Thresh"] == pytest.approx(-11.4, abs=0.1)
+
+
+# ════════════════════════════════════════════════════════════
+# 新增插件参数表验证（2026-06-07）
+# ════════════════════════════════════════════════════════════
+
+
+@pytest.mark.unit
+class TestLX480v4ParamTable:
+    """LX480 v4 参数名规范化和注册表存在性。"""
+
+    PLUGIN = "VST3: LX480 v4 (Relab Development)"
+
+    def test_registered(self):
+        assert self.PLUGIN in PLUGIN_REGISTRY
+
+    def test_type_is_reverb(self):
+        assert PLUGIN_REGISTRY[self.PLUGIN]["type"] == "reverb"
+
+    def test_e1_key_params(self):
+        """E1 引擎关键参数可正常 normalize（线性 pass-through 0–1）。"""
+        for pname in ["E1: Reverb Time Mid (RTM)", "E1: Pre Delay (PDL)",
+                       "E1: Size (SIZ)", "E1: Mix (MIX)"]:
+            result = normalize_param(self.PLUGIN, pname, 0.5)
+            assert result == 0.5
+
+    def test_unregistered_param_raises(self):
+        with pytest.raises(UnregisteredParamError):
+            normalize_param(self.PLUGIN, "NonExistent", 0.5)
+
+
+@pytest.mark.unit
+class TestBettermakerEQ232DParamTable:
+    """Bettermaker EQ232D 参数名规范化和注册表存在性。"""
+
+    PLUGIN = "VST3: Bettermaker EQ232D (Plugin Alliance)"
+
+    def test_registered(self):
+        assert self.PLUGIN in PLUGIN_REGISTRY
+
+    def test_channel1_pultec_params(self):
+        """Channel 1 Pultec 段参数正常 pass-through。"""
+        expected = ["ENGAGE 1", "PEQ IN 1", "LO BOOST 1", "LO ATTEN 1",
+                     "LO CPS 1", "HI BOOST 1", "HI ATTEN 1", "HI BW 1"]
+        for pname in expected:
+            result = normalize_param(self.PLUGIN, pname, 0.5)
+            assert result == 0.5
+
+    def test_batch_normalize(self):
+        """批量 normalize 返回正确参数名。"""
+        physical = {"ENGAGE 1": 1.0, "PEQ IN 1": 1.0,
+                     "LO CPS 1": 0.33, "LO BOOST 1": 0.35}
+        result = normalize_params(self.PLUGIN, physical)
+        assert set(result.keys()) == set(physical.keys())
+        assert result["ENGAGE 1"] == pytest.approx(1.0)
+
+    def test_unregistered_param_raises(self):
+        with pytest.raises(UnregisteredParamError):
+            normalize_param(self.PLUGIN, "Low Boost", 0.5)
+
+
+@pytest.mark.unit
+class TestShadowHillsParamTable:
+    """Shadow Hills Mastering Compressor 参数表验证。"""
+
+    PLUGIN = "VST3: Shadow Hills Mastering Compressor (Plugin Alliance)"
+
+    def test_registered(self):
+        assert self.PLUGIN in PLUGIN_REGISTRY
+
+    def test_optical_params(self):
+        """光学级关键参数正常 pass-through。"""
+        expected = ["Optical Bypass 1", "Optical Threshold 1",
+                     "Optical Gain 1", "Discrete Bypass 1"]
+        for pname in expected:
+            result = normalize_param(self.PLUGIN, pname, 0.5)
+            assert result == 0.5
+
+    def test_batch_normalize(self):
+        """批量 normalize — 光学级 ON, 离散级 BYPASS。"""
+        physical = {
+            "Hardwire Bypass": 1.0, "Optical Bypass 1": 1.0,
+            "Optical Threshold 1": 0.35, "Optical Gain 1": 0.4,
+            "Discrete Bypass 1": 0.0, "Transformer 1": 1.0,
+            "Mix": 1.0,
+        }
+        result = normalize_params(self.PLUGIN, physical)
+        assert result["Discrete Bypass 1"] == 0.0
+        assert result["Optical Bypass 1"] == 1.0
+
+    def test_unregistered_param_raises(self):
+        with pytest.raises(UnregisteredParamError):
+            normalize_param(self.PLUGIN, "Threshold", 0.3)

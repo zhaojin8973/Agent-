@@ -29,6 +29,10 @@ def _build_vocal_mix_parser(subparsers) -> None:
     p.add_argument("--watchdog", action="store_true", help="Enable DialogKiller")
     p.add_argument("--bpm", type=float, default=None, help="Project BPM for tempo-synced compression")
     p.add_argument("--midi", type=Path, default=None, help="MIDI file to extract tempo from")
+    p.add_argument("--gender", default="", choices=["", "male", "female"],
+                   help="歌手性别（默认 female）")
+    p.add_argument("--technique", default="",
+                   help="演唱方式（pop/rock/folk/bel_canto/chinese_folk_bel_canto）")
 
 
 def _build_check_parser(subparsers) -> None:
@@ -135,7 +139,9 @@ def cmd_vocal_mix(args) -> int:
 
         # Apply FX chain from profile (EQ baseline + auto-compression + reverb)
         eng.apply_profile(profile, vocal_track=0, backing_tracks=backing_indices,
-                          genre=args.genre, bpm=resolved_bpm)
+                          genre=args.genre, bpm=resolved_bpm,
+                          gender=getattr(args, "gender", ""),
+                          technique=getattr(args, "technique", ""))
 
         # Post-FX fader balance
         log.info("Measuring post-FX loudness and balancing faders...")

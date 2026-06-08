@@ -20,6 +20,7 @@ log = logging.getLogger(__name__)
 
 _TYPE_ALIASES: dict[str, str] = {
     "1176":     "fet",
+    "CLA-76":   "fet",
     "LA-2A":    "opto",
     "CL-1B":    "tube_opto",
     "CL1B":     "tube_opto",
@@ -39,9 +40,9 @@ _TYPE_ALIASES: dict[str, str] = {
     "Pultec":      "color_eq",
     "EQP-1A":      "color_eq",
     "EQP1A":       "color_eq",
-    "Bettermaker": "color_eq",
-    "EQ232D":      "color_eq",
-    "Shadow Hills": "tube_opto",
+    "Bettermaker": "color_eq_232d",
+    "EQ232D":      "color_eq_232d",
+    "Shadow Hills": "tube_opto_sh",
     "Inflator":    "harmonic",
     "Oxford Inflator": "harmonic",
     "Maag":        "air_eq",
@@ -168,6 +169,8 @@ class MixingProfile:
     name: str = "Default"
     description: str = ""
     chain_variant: str = ""  # "a" = Vocal A (无 UAD), "b" = Vocal B (有 UAD), "" = 默认
+    gender: str = ""         # "male" | "female"
+    technique: str = ""      # "pop" | "folk" | "bel_canto" | "rock" | ...
 
     # ── gain staging ──
     clip_gain_ref_db: float = -18.0
@@ -282,6 +285,7 @@ class MixingProfile:
             fx_type=raw.get("type", raw.get("fx_type", "")),
             params=raw.get("params", {}),
             alternatives=raw.get("alternatives", []),
+            eq_position=raw.get("eq_position", "solo"),
         )
 
     @classmethod
@@ -304,6 +308,9 @@ class MixingProfile:
         return cls(
             name=d.get("name", "Custom"),
             description=d.get("description", ""),
+            chain_variant=d.get("chain_variant", ""),
+            gender=d.get("gender", ""),
+            technique=d.get("technique", ""),
             clip_gain_ref_db=float(d.get("clip_gain_ref_db", -18.0)),
             target_lufs=float(d.get("target_lufs", -12.0)),
             ceiling_db=float(d.get("ceiling_db", -0.5)),

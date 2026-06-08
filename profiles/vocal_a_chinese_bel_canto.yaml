@@ -15,6 +15,8 @@ tolerance_lufs: 0.3
 # ── vocal processing chain (Vocal A: no UAD) ──
 vocal_chain:
   - name: "FabFilter Pro-Q 3 (FabFilter)"
+    type: "eq"
+    eq_position: "pre"
   - name: "CLA-76 Mono (Waves)"
   - name: "Decapitator (Soundtoys)"
   - name: "FabFilter Pro-DS (FabFilter)"

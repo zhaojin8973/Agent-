@@ -98,39 +98,6 @@ _GENRE_RVOX_MULTIPLIER: dict[str, float] = {
     "ballad":                  1.2,
 }
 
-# Pro-DS de-esser Range (max gain reduction in dB) per genre.
-# Sparse genres → lower Range (natural vocal, light touch).
-# Dense genres → higher Range (stronger sibilance control).
-_GENRE_PRODS_RANGE: dict[str, float] = {
-    "folk":                    6.0,   # 自然人声，轻触
-    "ballad":                  6.0,   # 柔和，保留呼吸感
-    "chinese_folk_bel_canto":  7.0,   # 中等，兼顾力度
-    "pop":                     8.5,   # 标准商业控制
-    "rock":                    8.5,   # 与 pop 一致
-    "electronic":              10.0,  # 强力控制，密集混音
-}
-
-# CLA-76 attack knob — continuous, crest-driven, genre-aware.
-# Formula: attack_knob = base - (crest - 10) × k, clamped [1, 6.5].
-# Base = genre "normal" attack when crest ≈ 10 dB.
-# k    = how much crest deviates from the attack (higher k = more responsive).
-_GENRE_CLA76_ATTACK_BASE: dict[str, float] = {
-    "electronic":              5.0,
-    "pop":                     4.0,
-    "rock":                    4.0,
-    "chinese_folk_bel_canto":  3.5,
-    "folk":                    3.0,
-    "ballad":                  3.0,
-}
-_GENRE_CLA76_ATTACK_K: dict[str, float] = {
-    "electronic":              0.05,
-    "pop":                     0.10,
-    "rock":                    0.10,
-    "chinese_folk_bel_canto":  0.08,
-    "folk":                    0.05,
-    "ballad":                  0.05,
-}
-
 # ════════════════════════════════════════════════════════════════
 # 空间效果器发送量基准
 # ════════════════════════════════════════════════════════════════
@@ -407,54 +374,6 @@ _SPATIAL_PARAM_FALLBACK_MAP: dict[str, dict[str, str]] = {
 }
 
 # ════════════════════════════════════════════════════════════════
-# CLA-76 参数
-# ════════════════════════════════════════════════════════════════
-
-_CLA76_ATTACK_KNOB_MIN: float = 1.0
-_CLA76_ATTACK_KNOB_MAX: float = 6.5
-
-# CLA-76 Input→GR calibration (pink noise -18 dBFS RMS, 2026-05-31).
-# (input_dB, gr_db) sorted by GR ascending.  GR is negative — the table
-# stores absolute values for readability.
-_CLA76_GR_TABLE: list[tuple[float, float]] = [
-    (-32.0,  0),    # threshold barely touched
-    (-24.0,  3),    # moderate
-    (-20.0,  8),    # heavy
-    (-16.0, 15),    # very heavy
-    (-8.0,  20),    # max
-]
-
-# ════════════════════════════════════════════════════════════════
-# CLA-76 ms → knob 转换表 (CW=fast, range 1−7)
-# ════════════════════════════════════════════════════════════════
-
-# Attack: (ms, knob_position) sorted by ms ascending.
-# Attack ms → knob.  FET compressor attack times saturate below ~800 μs,
-# so engine ms values (3-10 ms from BPM presets) are all "slow" in FET
-# terms.  We compress the upper range so every BPM tier maps to a usable
-# knob position (nothing below 2 — knob 1 is too sluggish for vocals).
-_CLA76_ATTACK_MS_TABLE: list[tuple[float, float]] = [
-    (0.02,  7.0),   # fastest (knob 7 = ~20 μs)
-    (1.0,   6.0),   # knob 6
-    (2.0,   5.0),   # knob 5 — BPM FAST   (3 ms) lands near here
-    (3.0,   4.0),   # knob 4
-    (5.0,   3.0),   # knob 3 — BPM MED    (5 ms) lands here
-    (8.0,   2.5),   # knob 2.5
-    (12.0,  2.0),   # knob 2 — BPM SLOW   (10 ms) lands near here
-]
-
-# Release: (ms, knob_position) sorted by ms ascending.
-_CLA76_RELEASE_MS_TABLE: list[tuple[float, float]] = [
-    (50.0,   7.0),   # fastest
-    (150.0,  6.0),
-    (300.0,  5.0),
-    (500.0,  4.0),
-    (700.0,  3.0),
-    (900.0,  2.0),
-    (1100.0, 1.0),   # slowest
-]
-
-# ════════════════════════════════════════════════════════════════
 # EQ 推导
 # ════════════════════════════════════════════════════════════════
 
@@ -556,26 +475,6 @@ _GENRE_1176_RATIO: dict[str, int] = {
     "chinese_folk_bel_canto":  4,
 }
 
-# Decapitator Mix — 流派差异化
-_GENRE_DECAP_MIX: dict[str, float] = {
-    "folk":                    0.30,
-    "ballad":                  0.35,
-    "pop":                     0.40,
-    "rock":                    0.40,
-    "electronic":              0.50,
-    "chinese_folk_bel_canto":  0.35,
-}
-
-# Decapitator Drive 范围（crest 反比驱动的基础值）
-_DECAP_DRIVE_BASE: dict[str, float] = {
-    "folk":                    1.5,
-    "ballad":                  1.5,
-    "pop":                     2.0,
-    "rock":                    2.5,
-    "electronic":              3.0,
-    "chinese_folk_bel_canto":  2.0,
-}
-
 # Oxford Inflator Effect — 流派差异化（人声保守）
 _GENRE_INFLATOR_EFFECT: dict[str, float] = {
     "folk":                    0.20,
@@ -666,6 +565,245 @@ _GENRE_REVERB_PREFERENCE: dict[str, dict[str, str]] = {
 
 # Electronic 流派专属 Blackhole 设置
 _BLACKHOLE_GENRES: frozenset = frozenset({"electronic"})
+
+
+# ════════════════════════════════════════════════════════════════
+# 人声特征画像 — 业界混音标准数据
+# ════════════════════════════════════════════════════════════════
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class VocalProfile:
+    """人声特征画像 — 不可变，所有参数可追溯到业界标准。
+
+    来源:
+        - Unison Audio Vocal EQ Chart (2024)
+        - ProducerHive Vocal Frequency Ranges
+        - iZotope Vocal EQ Guide
+        - MusicGuyMixing Male/Female EQ Guides
+        - bchillmix Vocal EQ Cheatsheet
+        - 343labs Vocal EQ Guide
+    """
+
+    # ── 元数据 ──
+    gender: str = "female"
+    technique: str = "pop"
+
+    # ── 基频 (Hz) ──
+    # 来源: ProducerHive — 典型成年男声 85-180, 女声 165-255
+    fundamental_lo: float = 165.0
+    fundamental_hi: float = 255.0
+
+    # ── 低切 HPF (Hz) ──
+    # 来源: bchillmix — 男声 60-80, 女声 100-120; iZotope — <100Hz 以下为低频隆隆声
+    hpf_default_hz: float = 120.0
+    hpf_min_hz: float = 100.0
+    hpf_max_hz: float = 180.0
+
+    # ── 泥巴/浑浊区 (Hz) ──
+    # 来源: iZotope — 200-500Hz; Unison — 男声 200-400, 女声 300-600
+    mud_scan_lo: float = 300.0
+    mud_scan_hi: float = 600.0
+    mud_threshold_db: float = 3.0
+
+    # ── 盒子声/鼻音区 (Hz) ──
+    # 来源: MusicGuyMixing — 500Hz 盒子声, 800-1.5k 鼻音(男), 1k-2k 鼻音(女)
+    boxy_lo: float = 400.0
+    boxy_hi: float = 900.0
+    nasal_lo: float = 1000.0
+    nasal_hi: float = 2000.0
+
+    # ── 存在感 (Hz) ──
+    # 来源: Unison — 男声 3k-5k, 女声 4k-6k; 343labs — 男声 boost 5k, 女声 cut 5k
+    presence_scan_lo: float = 4000.0
+    presence_scan_hi: float = 6000.0
+    presence_boost_max_db: float = 3.0
+
+    # ── 齿音区 (Hz) ──
+    # 来源: iZotope — 5k-8k(男), 6k-9k(女); ProducerHive — 5-8kHz
+    sibilance_lo: float = 6000.0
+    sibilance_hi: float = 9000.0
+
+    # ── 空气感 (Hz) ──
+    # 来源: bchillmix — 10k-15k(男), 12k-18k(女)
+    air_scan_lo: float = 4000.0
+    air_scan_hi: float = 15000.0
+    air_boost_max_db: float = 1.5
+
+    # ── 共振检测 ──
+    # 来源: 业界共识 — Q>15 为房间模式; 女声泛音更密，阈值略降
+    resonance_q_threshold: float = 8.0
+    resonance_cut_max_db: float = 6.0
+
+    # ── 增益策略 ──
+    # 来源: 混合经验 — 民美动态大需保守, 流行可稍大胆, 摇滚最激进
+    boost_scale: float = 1.0
+
+    # ── 泥巴区先提升(thin→warm)的场景 ──
+    thin_boost_max_db: float = 2.0
+
+
+# ════════════════════════════════════════════════════════════════
+# VocalProfile 预设表: gender × technique
+# ════════════════════════════════════════════════════════════════
+
+_VOCAL_PROFILES: dict[str, dict[str, dict]] = {
+    "male": {
+        "pop": {
+            "fundamental_lo": 85.0,  "fundamental_hi": 180.0,
+            "hpf_default_hz": 80.0,  "hpf_min_hz": 60.0,  "hpf_max_hz": 100.0,
+            "mud_scan_lo": 200.0,     "mud_scan_hi": 400.0,
+            "mud_threshold_db": 3.0,
+            "boxy_lo": 300.0,         "boxy_hi": 700.0,
+            "nasal_lo": 800.0,        "nasal_hi": 1500.0,
+            "presence_scan_lo": 3000.0, "presence_scan_hi": 5000.0,
+            "presence_boost_max_db": 3.0,
+            "sibilance_lo": 5000.0,   "sibilance_hi": 8000.0,
+            "air_scan_lo": 3000.0,    "air_scan_hi": 12000.0,
+            "air_boost_max_db": 1.5,
+            "resonance_q_threshold": 8.0, "resonance_cut_max_db": 6.0,
+            "boost_scale": 1.0,       "thin_boost_max_db": 2.0,
+        },
+        "rock": {
+            "fundamental_lo": 85.0,  "fundamental_hi": 180.0,
+            "hpf_default_hz": 120.0, "hpf_min_hz": 100.0, "hpf_max_hz": 150.0,
+            "mud_scan_lo": 200.0,     "mud_scan_hi": 400.0,
+            "mud_threshold_db": 4.0,
+            "boxy_lo": 300.0,         "boxy_hi": 700.0,
+            "nasal_lo": 800.0,        "nasal_hi": 1500.0,
+            "presence_scan_lo": 3000.0, "presence_scan_hi": 5000.0,
+            "presence_boost_max_db": 3.5,
+            "sibilance_lo": 5000.0,   "sibilance_hi": 8000.0,
+            "air_scan_lo": 3000.0,    "air_scan_hi": 12000.0,
+            "air_boost_max_db": 1.5,
+            "resonance_q_threshold": 8.0, "resonance_cut_max_db": 6.0,
+            "boost_scale": 1.2,       "thin_boost_max_db": 2.0,
+        },
+        "folk": {
+            "fundamental_lo": 85.0,  "fundamental_hi": 180.0,
+            "hpf_default_hz": 80.0,  "hpf_min_hz": 60.0,  "hpf_max_hz": 120.0,
+            "mud_scan_lo": 200.0,     "mud_scan_hi": 400.0,
+            "mud_threshold_db": 3.0,
+            "boxy_lo": 300.0,         "boxy_hi": 700.0,
+            "nasal_lo": 800.0,        "nasal_hi": 1500.0,
+            "presence_scan_lo": 3000.0, "presence_scan_hi": 5000.0,
+            "presence_boost_max_db": 2.5,
+            "sibilance_lo": 5000.0,   "sibilance_hi": 8000.0,
+            "air_scan_lo": 3000.0,    "air_scan_hi": 12000.0,
+            "air_boost_max_db": 1.0,
+            "resonance_q_threshold": 8.0, "resonance_cut_max_db": 5.0,
+            "boost_scale": 0.8,       "thin_boost_max_db": 1.5,
+        },
+        "bel_canto": {
+            "fundamental_lo": 85.0,  "fundamental_hi": 180.0,
+            "hpf_default_hz": 60.0,  "hpf_min_hz": 40.0,  "hpf_max_hz": 100.0,
+            "mud_scan_lo": 200.0,     "mud_scan_hi": 400.0,
+            "mud_threshold_db": 2.5,
+            "boxy_lo": 300.0,         "boxy_hi": 700.0,
+            "nasal_lo": 800.0,        "nasal_hi": 1500.0,
+            "presence_scan_lo": 2500.0, "presence_scan_hi": 4500.0,
+            "presence_boost_max_db": 2.0,
+            "sibilance_lo": 5000.0,   "sibilance_hi": 8000.0,
+            "air_scan_lo": 3000.0,    "air_scan_hi": 12000.0,
+            "air_boost_max_db": 1.0,
+            "resonance_q_threshold": 6.0, "resonance_cut_max_db": 4.0,
+            "boost_scale": 0.6,       "thin_boost_max_db": 1.5,
+        },
+    },
+    "female": {
+        "pop": {
+            "fundamental_lo": 165.0, "fundamental_hi": 255.0,
+            "hpf_default_hz": 120.0, "hpf_min_hz": 100.0, "hpf_max_hz": 150.0,
+            "mud_scan_lo": 300.0,     "mud_scan_hi": 500.0,
+            "mud_threshold_db": 3.0,
+            "boxy_lo": 400.0,         "boxy_hi": 900.0,
+            "nasal_lo": 1000.0,       "nasal_hi": 2000.0,
+            "presence_scan_lo": 4000.0, "presence_scan_hi": 6000.0,
+            "presence_boost_max_db": 3.0,
+            "sibilance_lo": 6000.0,   "sibilance_hi": 9000.0,
+            "air_scan_lo": 4000.0,    "air_scan_hi": 15000.0,
+            "air_boost_max_db": 1.5,
+            "resonance_q_threshold": 7.0, "resonance_cut_max_db": 5.0,
+            "boost_scale": 1.0,       "thin_boost_max_db": 2.0,
+        },
+        "rock": {
+            "fundamental_lo": 165.0, "fundamental_hi": 255.0,
+            "hpf_default_hz": 130.0, "hpf_min_hz": 120.0, "hpf_max_hz": 180.0,
+            "mud_scan_lo": 300.0,     "mud_scan_hi": 500.0,
+            "mud_threshold_db": 4.0,
+            "boxy_lo": 400.0,         "boxy_hi": 900.0,
+            "nasal_lo": 1000.0,       "nasal_hi": 2000.0,
+            "presence_scan_lo": 4000.0, "presence_scan_hi": 6000.0,
+            "presence_boost_max_db": 3.5,
+            "sibilance_lo": 6000.0,   "sibilance_hi": 9000.0,
+            "air_scan_lo": 4000.0,    "air_scan_hi": 15000.0,
+            "air_boost_max_db": 1.5,
+            "resonance_q_threshold": 7.0, "resonance_cut_max_db": 5.0,
+            "boost_scale": 1.2,       "thin_boost_max_db": 2.0,
+        },
+        "folk": {
+            "fundamental_lo": 165.0, "fundamental_hi": 255.0,
+            "hpf_default_hz": 120.0, "hpf_min_hz": 100.0, "hpf_max_hz": 150.0,
+            "mud_scan_lo": 300.0,     "mud_scan_hi": 500.0,
+            "mud_threshold_db": 3.0,
+            "boxy_lo": 400.0,         "boxy_hi": 900.0,
+            "nasal_lo": 1000.0,       "nasal_hi": 2000.0,
+            "presence_scan_lo": 4000.0, "presence_scan_hi": 6000.0,
+            "presence_boost_max_db": 2.5,
+            "sibilance_lo": 6000.0,   "sibilance_hi": 9000.0,
+            "air_scan_lo": 4000.0,    "air_scan_hi": 15000.0,
+            "air_boost_max_db": 1.0,
+            "resonance_q_threshold": 7.0, "resonance_cut_max_db": 4.0,
+            "boost_scale": 0.8,       "thin_boost_max_db": 1.5,
+        },
+        "bel_canto": {
+            "fundamental_lo": 165.0, "fundamental_hi": 255.0,
+            "hpf_default_hz": 100.0, "hpf_min_hz": 80.0,  "hpf_max_hz": 180.0,
+            "mud_scan_lo": 300.0,     "mud_scan_hi": 600.0,
+            "mud_threshold_db": 2.5,
+            "boxy_lo": 400.0,         "boxy_hi": 900.0,
+            "nasal_lo": 1000.0,       "nasal_hi": 2000.0,
+            "presence_scan_lo": 3500.0, "presence_scan_hi": 5500.0,
+            "presence_boost_max_db": 2.0,
+            "sibilance_lo": 6000.0,   "sibilance_hi": 9000.0,
+            "air_scan_lo": 4000.0,    "air_scan_hi": 15000.0,
+            "air_boost_max_db": 1.0,
+            "resonance_q_threshold": 6.0, "resonance_cut_max_db": 4.0,
+            "boost_scale": 0.6,       "thin_boost_max_db": 1.5,
+        },
+        # 中国民美：民族唱法的明亮靠前 + 美声的气息支撑
+        # → 透亮、有穿透力、不闷（与西方美声的保守策略相反）
+        "chinese_folk_bel_canto": {
+            "fundamental_lo": 165.0, "fundamental_hi": 255.0,
+            "hpf_default_hz": 100.0, "hpf_min_hz": 80.0,  "hpf_max_hz": 150.0,
+            "mud_scan_lo": 300.0,     "mud_scan_hi": 600.0,
+            "mud_threshold_db": 2.5,
+            "boxy_lo": 400.0,         "boxy_hi": 900.0,
+            "nasal_lo": 1000.0,       "nasal_hi": 2000.0,
+            "presence_scan_lo": 3500.0, "presence_scan_hi": 5500.0,
+            "presence_boost_max_db": 3.0,
+            "sibilance_lo": 6000.0,   "sibilance_hi": 9000.0,
+            "air_scan_lo": 4000.0,    "air_scan_hi": 15000.0,
+            "air_boost_max_db": 1.5,
+            "resonance_q_threshold": 6.0, "resonance_cut_max_db": 4.0,
+            "boost_scale": 1.1,       "thin_boost_max_db": 2.0,
+        },
+    },
+}
+
+
+def get_vocal_profile(gender: str = "", technique: str = "") -> VocalProfile:
+    """根据性别和演唱方式返回 :class:`VocalProfile`。
+
+    用 ``gender × technique`` 查 :data:`_VOCAL_PROFILES`，
+    未匹配时回退到默认值（female/pop）。
+    """
+    gender_key = gender if gender in _VOCAL_PROFILES else "female"
+    tech_map = _VOCAL_PROFILES[gender_key]
+    tech_key = technique if technique in tech_map else "pop"
+    return VocalProfile(gender=gender_key, technique=tech_key, **tech_map[tech_key])
 
 # 混响回退 — 首选不可用时的通用回退
 _FALLBACK_REVERB: str = "ValhallaVintageVerb"

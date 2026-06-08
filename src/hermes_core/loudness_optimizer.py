@@ -57,6 +57,7 @@ class EqBandIntent:
     gain_db: float       # negative = cut, positive = boost
     q: float
     reason: str          # human-readable, e.g. "340Hz room mode Q=22.3 prominence=8.2dB"
+    slope: float = 12.0  # dB/oct，仅对 hp/lp 有效
 
 
 @dataclass

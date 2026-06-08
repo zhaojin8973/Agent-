@@ -15,19 +15,7 @@ import soundfile as sf
 
 # ═══════════════════════════ comp_engine ═══════════════════════════
 
-class TestCLA76ReleaseKnob:
-    """覆盖 _apply_cla76_params 中 release_knob 分支。"""
-
-    def test_release_knob_included(self):
-        from hermes_core.comp_engine import _apply_cla76_params
-        from hermes_core.loudness_optimizer import CompressionIntent
-        intent = CompressionIntent(
-            amount="light", crest_factor_db=10.0, gr_target_db=3.0,
-            rms_db=-18.0, peak_db=-6.0,
-        )
-        result = _apply_cla76_params(intent, attack_knob=4.0, release_knob=5.0)
-        assert "Release" in result
-        assert result["Release"] == 5.0
+class TestRvoxCoverage:
 
 
 # ═══════════════════════════ config ═══════════════════════════

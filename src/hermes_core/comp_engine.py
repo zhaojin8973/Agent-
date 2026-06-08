@@ -8,29 +8,11 @@ import bisect
 
 from hermes_core.loudness_optimizer import CompressionIntent
 from hermes_core.genre_tables import (
-    _GENRE_CLA76_ATTACK_BASE,
-    _GENRE_CLA76_ATTACK_K,
-    _CLA76_ATTACK_KNOB_MIN,
-    _CLA76_ATTACK_KNOB_MAX,
     _GENRE_CREST_GR_RATIO,
-    _CLA76_ATTACK_MS_TABLE,
-    _CLA76_RELEASE_MS_TABLE,
     _GENRE_RVOX_MULTIPLIER,
 )
 
 
-def _compute_cla76_attack_knob(crest_db: float, genre: str = "pop") -> float:
-    """Continuous CLA-76 attack knob from crest factor and genre.
-
-    ``attack_knob = base - (crest - 10) × k``, clamped to
-    [``_CLA76_ATTACK_KNOB_MIN``, ``_CLA76_ATTACK_KNOB_MAX``].
-
-    Higher crest → slower attack (smaller knob) to preserve transients.
-    """
-    base = _GENRE_CLA76_ATTACK_BASE.get(genre, 4.0)
-    k = _GENRE_CLA76_ATTACK_K.get(genre, 0.10)
-    knob = base - (crest_db - 10.0) * k
-    return round(max(_CLA76_ATTACK_KNOB_MIN, min(_CLA76_ATTACK_KNOB_MAX, knob)), 2)
 
 
 def _derive_compressor_intent(
@@ -116,53 +98,6 @@ def _apply_fet_params(intent: CompressionIntent,
     }
 
 
-def _apply_cla76_params(intent: CompressionIntent,
-                        attack_knob: float,
-                        release_knob: float | None = None) -> dict[str, float]:
-    r"""CLA-76 (Waves) physical parameter dict.
-
-    CLA-76 (1176-style FET) has a **fixed internal threshold**.
-    *Input* drives signal into that threshold.  *Output* attenuates
-    to balance the boosted uncompressed signal.
-
-    *attack_knob* is the CLA-76 knob position (1–7, CW=fast) computed
-    from crest + genre via :func:`_compute_cla76_attack_knob`.
-
-    *release_knob* is the BPM-derived knob position (1–7).  When
-    ``None`` the release parameter is not included in the output
-    (plugin default is left untouched).
-    """
-    gr = intent.gr_target_db
-    peak = intent.peak_db
-
-    # Calibrated on vocal (望归, crest≈20, peak≈-0.4, 2026-05-31).
-    # Input positions signal relative to 1176 fixed threshold.
-    # Higher peak → less Input needed (signal already near threshold).
-    # More GR → more Input needed (push harder into threshold).
-    #
-    # Formula: input_db = BASELINE + (gr * SLOPE) - peak
-    #   -40.4: baseline offset at -18 dBFS RMS (0 VU reference)
-    #   0.8:   empirical slope from linear regression on calibration data
-    #          (Input vs GR at fixed peak level)
-    input_db = -40.4 + gr * 0.8 - peak
-    input_db = max(-48.0, min(0.0, input_db))
-
-    # Output: level-match — keep signal roughly unity through the 76
-    # 3.25: empirical makeup gain coefficient (dB output per dB GR)
-    #       tuned to compensate for perceived loudness loss
-    output_db = -gr * 3.25
-    output_db = max(-48.0, min(0.0, output_db))
-
-    physical = {
-        "Input":  round(input_db, 1),
-        "Output": round(output_db, 1),
-        "Attack": attack_knob,
-    }
-    if release_knob is not None:
-        physical["Release"] = release_knob
-    return physical
-
-
 def _apply_opto_params(intent: CompressionIntent,
                         preset: dict[str, float]) -> dict[str, float]:
     """Optical compressor (LA-2A style) → physical parameter dict."""
@@ -214,33 +149,6 @@ def _apply_rvox_params(intent: CompressionIntent,
         "Gain":        round(gain_db, 1),
     }
 
-
-def _ms_to_cla76_attack(ms: float) -> float:
-    """Convert attack time (ms) to CLA-76 knob position (1−7, CW=fast)."""
-    return _lookup_ms_table(ms, _CLA76_ATTACK_MS_TABLE)
-
-
-def _ms_to_cla76_release(ms: float) -> float:
-    """Convert release time (ms) to CLA-76 knob position (1−7, CW=fast)."""
-    return _lookup_ms_table(ms, _CLA76_RELEASE_MS_TABLE)
-
-
-def _lookup_ms_table(ms: float, table: list[tuple[float, float]]) -> float:
-    """Bisect *table* (sorted by ms) and return the knob position.
-
-    Values outside the table range are clamped to the nearest endpoint.
-    """
-    ms_list = [row[0] for row in table]
-    if ms <= ms_list[0]:
-        return table[0][1]
-    if ms >= ms_list[-1]:
-        return table[-1][1]
-    idx = bisect.bisect_left(ms_list, ms)
-    # Interpolate between idx-1 and idx
-    lo_ms, lo_knob = table[idx - 1]
-    hi_ms, hi_knob = table[idx]
-    t = (ms - lo_ms) / (hi_ms - lo_ms)
-    return lo_knob + t * (hi_knob - lo_knob)
 
 
 # ════════════════════════════════════════════════════════════════

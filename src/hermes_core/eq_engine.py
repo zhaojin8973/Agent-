@@ -42,6 +42,8 @@ def _derive_eq_intent(
     role: str = "vocal",
     genre: str = "pop",
     position: str = "solo",
+    vocal_profile: object | None = None,
+    cross_report: object | None = None,
 ) -> EqIntent:
     """Derive EQ goals from spectrum analysis.
 
@@ -70,41 +72,65 @@ def _derive_eq_intent(
     6. **Genre adjustments** — pop gets extra presence, rock tolerates
        more mud, folk scales back all boosts.
     """
-    _POSITIONS = ("pre", "post", "solo")
+    _POSITIONS = ("pre", "post", "solo", "surgical")
     if position not in _POSITIONS:
         raise ValueError(f"position must be one of {_POSITIONS}, got {position!r}")
 
-    # All positions run the full rule set.
-    # Pre-comp is conservative on boosts: higher threshold, lower gain.
+    # ── 模式语义 ──
+    #   "surgical" — 仅减法（HPF + 共振切除 + 泥巴切）。
+    #       跳过存在感/空气提升，留给下游 EQ232D/Maag 处理。
+    #   "pre"      — 压缩前校正。全规则但 boost 保守。
+    #   "post"     — 压缩后。全规则无限制。
+    #   "solo"     — 独立使用。全规则无限制（向后兼容默认）。
+    surgical_only = position == "surgical"
     conservative = position == "pre"
 
+    vp = vocal_profile
     tweaks = _GENRE_EQ_TWEAKS.get(genre, _GENRE_EQ_TWEAKS["default"])
     bands: list[EqBandIntent] = []
+
+    # ── 声纹感知安全范围 ──
+    if role == "vocal" and vp:
+        hpf_min = getattr(vp, "hpf_min_hz", 40.0)
+        hpf_max = getattr(vp, "hpf_max_hz", 150.0)
+        hpf_default = getattr(vp, "hpf_default_hz", 80.0)
+        boost_scale = getattr(vp, "boost_scale", 1.0)
+    else:
+        hpf_min, hpf_max, hpf_default, boost_scale = 40.0, 150.0, 80.0, 1.0
 
     # ── Rule 1: HPF ─────────────────────────────────────────
     sub_energy = report.band_energy_db.get("sub", -60.0)
     mid_energy = report.band_energy_db.get("mid", -60.0)
     sub_excess = sub_energy - mid_energy
 
-    # HPF frequency selection based on sub-bass energy relative to midrange
-    # 3.0 dB: threshold for "excessive" sub-bass (triggers HPF raise)
-    # 10 Hz/dB: slope - how aggressively to raise HPF as sub-bass increases
-    # 80/120 Hz (vocal) and 40/80 Hz (backing): safe HPF limits
-    #   - vocal: 80 Hz default, max 120 Hz (avoid cutting fundamental)
-    #   - backing: 40 Hz default, max 80 Hz (preserve low-end instruments)
-    if role == "vocal":
-        hpf_freq = 80.0
+    # 低切频率：优先用频谱定位的精准频点，否则回退频段估算
+    hpf_hz = float(getattr(report, "hpf_hz", 0.0) or 0.0)
+    if hpf_hz <= 0:
+        hpf_hz = hpf_default
+        if role == "backing":
+            hpf_hz = max(20.0, hpf_default * 0.5)
         if sub_excess > 3.0:
-            hpf_freq = min(120.0, 80.0 + (sub_excess - 3.0) * 10)
+            hpf_hz = min(hpf_max, hpf_hz + (sub_excess - 3.0) * 10)
+    hpf_hz = max(hpf_min, min(hpf_max, hpf_hz))
+
+    # ── 交叉频谱参考：伴奏低频重 → 人声 HPF 略提高 ──
+    if cross_report and role == "vocal":
+        offset = getattr(cross_report, "vocal_hpf_offset_hz", 0.0)
+        if offset > 0:
+            hpf_hz = min(hpf_max, hpf_hz + offset)
+
+    # 斜率动态：sub 越重 → 越陡
+    if sub_excess > 12.0:
+        slope_db_per_oct = 24.0
+    elif sub_excess > 6.0:
+        slope_db_per_oct = 18.0
     else:
-        hpf_freq = 40.0
-        if sub_excess > 3.0:
-            hpf_freq = min(80.0, 40.0 + (sub_excess - 3.0) * 10)
+        slope_db_per_oct = 12.0
 
     bands.append(EqBandIntent(
-        band_type="hp", freq_hz=round(hpf_freq, 1), gain_db=0.0,
-        q=0.7,
-        reason=f"HPF@{hpf_freq:.0f}Hz sub_excess={sub_excess:.1f}dB",
+        band_type="hp", freq_hz=round(hpf_hz, 1), gain_db=0.0,
+        q=0.7, slope=slope_db_per_oct,
+        reason=f"HPF@{hpf_hz:.0f}Hz {slope_db_per_oct:.0f}dB/oct sub_excess={sub_excess:.1f}dB",
     ))
 
     # ── Rule 2: Resonance cuts ──────────────────────────────
@@ -137,68 +163,80 @@ def _derive_eq_intent(
 
     # ── Rule 3: Low-mid mud cut ─────────────────────────────
     mud_threshold = tweaks.get("mud_threshold_db", 3.0)
+    if vp:
+        mud_threshold = getattr(vp, "mud_threshold_db", mud_threshold)
     if report.mud_ratio_db > mud_threshold:
         cut_db = -min(report.mud_ratio_db - 2.0, 4.0)
         cut_db = max(cut_db, -4.0)
+        mud_hz = getattr(report, "mud_peak_hz", 350.0) or 350.0
         bands.append(EqBandIntent(
-            band_type="bell", freq_hz=350.0, gain_db=round(cut_db, 1),
+            band_type="bell", freq_hz=mud_hz, gain_db=round(cut_db, 1),
             q=0.7,
-            reason=f"Mud cut@{350}Hz mud_ratio={report.mud_ratio_db:.1f}dB",
+            reason=f"Mud cut@{mud_hz:.0f}Hz mud_ratio={report.mud_ratio_db:.1f}dB",
         ))
 
     # ── Rule 4: Presence boost ──────────────────────────────
-    # Pre-comp: higher threshold (4 dB deficit) to be conservative.
-    # Post-comp: lower threshold (2 dB) since compression can reduce presence.
-    #
-    # 4.0 / 2.0 dB: presence deficit thresholds (dB below midrange)
-    # 0.5: boost coefficient (50% of deficit, conservative correction)
-    # 3.0 dB: maximum boost cap (avoid over-EQing)
-    # 3000 Hz: presence band center frequency (vocal intelligibility region)
-    presence_deficit_threshold = 4.0 if conservative else 2.0
-    if report.presence_deficit_db > presence_deficit_threshold:
-        boost = min(report.presence_deficit_db * 0.5, 3.0)
-        boost += tweaks.get("presence_extra_db", 0.0)
-        boost *= tweaks.get("boost_scale", 1.0)
-        if conservative:
-            boost *= 0.5  # pre-comp boosts at half strength
-        bands.append(EqBandIntent(
-            band_type="bell", freq_hz=3000.0, gain_db=round(boost, 1),
-            q=1.0,
-            reason=f"Presence boost@{3000}Hz deficit={report.presence_deficit_db:.1f}dB",
-        ))
+    # Surgical 模式跳过：存在感提升留给 EQ232D / Maag。
+    if not surgical_only:
+        # Pre-comp: higher threshold (4 dB deficit) to be conservative.
+        # Post-comp: lower threshold (2 dB) since compression can reduce presence.
+        presence_deficit_threshold = 4.0 if conservative else 2.0
+        if report.presence_deficit_db > presence_deficit_threshold:
+            boost_max = getattr(vp, "presence_boost_max_db", 3.0) if vp else 3.0
+            boost = min(report.presence_deficit_db * 0.5, boost_max)
+            boost += tweaks.get("presence_extra_db", 0.0)
+            boost *= boost_scale
+            if conservative:
+                boost *= 0.5  # pre-comp boosts at half strength
+            # 交叉频谱参考：伴奏抢占 → 减半；伴奏空 → 微增
+            if cross_report and role == "vocal":
+                boost *= getattr(cross_report, "vocal_presence_factor", 1.0)
+            # 用频谱分析找到的精准缺口频率（而非硬编码 3000Hz）
+            gap_hz = getattr(report, "presence_gap_hz", 3000.0) or 3000.0
+            bands.append(EqBandIntent(
+                band_type="bell", freq_hz=gap_hz, gain_db=round(boost, 1),
+                q=1.0,
+                reason=f"Presence boost@{gap_hz:.0f}Hz deficit={report.presence_deficit_db:.1f}dB",
+            ))
 
     # ── Rule 5: Air shelf ───────────────────────────────────
-    # Graduated: severe tilt + moderately low air deserves air too.
-    # Pre-comp: thresholds are stricter (air < -35, tilt < -5).
-    if conservative:
-        air_low = report.air_level_db < -35.0
-        air_moderate = report.air_level_db < -28.0
-        tilt_dark = report.spectral_tilt_db_per_octave < -5.0
-        tilt_very_dark = report.spectral_tilt_db_per_octave < -6.5
-        air_gain_scale = 0.5
-    else:
-        air_low = report.air_level_db < -30.0
-        air_moderate = report.air_level_db < -22.0
-        tilt_dark = report.spectral_tilt_db_per_octave < -3.0
-        tilt_very_dark = report.spectral_tilt_db_per_octave < -4.5
-        air_gain_scale = 1.0
+    # Surgical 模式跳过：空气感留给 Maag EQ4。
+    if not surgical_only:
+        # Graduated: severe tilt + moderately low air deserves air too.
+        # Pre-comp: thresholds are stricter (air < -35, tilt < -5).
+        if conservative:
+            air_low = report.air_level_db < -35.0
+            air_moderate = report.air_level_db < -28.0
+            tilt_dark = report.spectral_tilt_db_per_octave < -5.0
+            tilt_very_dark = report.spectral_tilt_db_per_octave < -6.5
+            air_gain_scale = 0.5
+        else:
+            air_low = report.air_level_db < -30.0
+            air_moderate = report.air_level_db < -22.0
+            tilt_dark = report.spectral_tilt_db_per_octave < -3.0
+            tilt_very_dark = report.spectral_tilt_db_per_octave < -4.5
+            air_gain_scale = 1.0
 
-    air_gain = 0.0
-    if air_low and tilt_dark:
-        air_gain = 1.5  # both severe: full boost
-    elif tilt_very_dark and air_moderate:
-        air_gain = 1.0  # very dark + moderately low air
-    elif air_low and tilt_very_dark:
-        air_gain = 1.5  # severe air loss + very dark
+        air_gain = 0.0
+        if air_low and tilt_dark:
+            air_gain = 1.5  # both severe: full boost
+        elif tilt_very_dark and air_moderate:
+            air_gain = 1.0  # very dark + moderately low air
+        elif air_low and tilt_very_dark:
+            air_gain = 1.5  # severe air loss + very dark
 
-    if air_gain > 0.0:
-        air_gain *= tweaks.get("boost_scale", 1.0)
-        air_gain *= air_gain_scale
-        bands.append(EqBandIntent(
-            band_type="high_shelf", freq_hz=8000.0, gain_db=round(air_gain, 1),
-            q=0.7,
-            reason=f"Air shelf@8kHz air={report.air_level_db:.1f}dB tilt={report.spectral_tilt_db_per_octave:.1f}dB/oct",
-        ))
+        if air_gain > 0.0:
+            air_gain *= boost_scale
+            air_gain *= air_gain_scale
+            # 交叉频谱参考：伴奏 air 抢占 → 减量/跳过
+            if cross_report and role == "vocal":
+                air_gain *= getattr(cross_report, "vocal_air_factor", 1.0)
+            rolloff_hz = getattr(report, "air_rolloff_hz", 8000.0) or 8000.0
+            bands.append(EqBandIntent(
+                band_type="high_shelf", freq_hz=rolloff_hz, gain_db=round(air_gain, 1),
+                q=0.7,
+                reason=f"Air shelf@{rolloff_hz:.0f}Hz air={report.air_level_db:.1f}dB tilt={report.spectral_tilt_db_per_octave:.1f}dB/oct",
+            ))
 
     # ── Assemble ─────────────────────────────────────────────
     # Cap at 8 bands (Pro-Q 3 limit).  Priority order:
@@ -265,7 +303,8 @@ def _apply_proq3_eq(eq_intent: EqIntent) -> dict[str, float]:
         "Solo":                0.0,    # Disabled
     }
 
-    _SLOPE_12DB = 1.0 / 9.0    # 12 dB/oct (10 values 0–9, index 1)
+    # Pro-Q 3 slope: 0=6, 1=12, 2=18, 3=24, ..., 9=96 dB/oct
+    # 公式: slope_index = (dB_per_oct - 6) / 6, 归一化 = slope_index / 9
 
     params: dict[str, float] = {}
 
@@ -285,7 +324,9 @@ def _apply_proq3_eq(eq_intent: EqIntent) -> dict[str, float]:
             params.setdefault(f"Band {n} {pname}", pval)
 
         if band.band_type in ("hp", "lp"):
-            params[f"Band {n} Slope"] = _SLOPE_12DB
+            # 动态斜率：6-96 dB/oct → Pro-Q 3 归一化 (0–1)
+            slope_idx = max(0, min(9, (band.slope - 6.0) / 6.0))
+            params[f"Band {n} Slope"] = round(slope_idx / 9.0, 10)
 
     # Disable unused bands
     for n in range(len(eq_intent.bands) + 1, 9):
@@ -482,6 +523,8 @@ def apply_eq_baseline(
     fx_name: str = "",
     last_eq_params: dict | None = None,
     last_spectrum: dict | None = None,
+    vocal_profile: object | None = None,
+    cross_report: object | None = None,
 ) -> dict | None:
     """对指定轨道/FX 应用角色感知的 EQ 基线。
 
@@ -539,7 +582,9 @@ def apply_eq_baseline(
     # ── 频谱驱动 EQ（优先路径）─────────────────────────────
     if stem_file_path and os.path.exists(stem_file_path):
         try:
-            report = SpectrumAnalyzer.analyze(stem_file_path)
+            report = SpectrumAnalyzer.analyze(
+                stem_file_path, vocal_profile=vocal_profile,
+            )
             if last_spectrum is not None:
                 last_spectrum.update({
                     "presence_deficit": report.presence_deficit_db,
@@ -561,6 +606,8 @@ def apply_eq_baseline(
             )
             eq_intent = _derive_eq_intent(
                 report, role=role, genre=genre, position=position,
+                vocal_profile=vocal_profile,
+                cross_report=cross_report,
             )
 
             is_ssl = "ssleq" in fx_name.lower()
@@ -774,3 +821,75 @@ def auto_corrective_eq(
         "applied": True,
         "eq_fx_idx": eq_fx_idx,
     }
+
+
+# ════════════════════════════════════════════════════════════════
+# 伴奏 EQ 推导（自身平衡 + 人声避让）
+# ════════════════════════════════════════════════════════════════
+
+
+def derive_backing_eq(
+    backing_report: SpectrumReport,
+    masking_zones: list | None = None,
+    role: str = "backing",
+) -> list[EqBandIntent]:
+    """为伴奏轨推导 EQ 频段：自身平衡 + 人声避让。
+
+    Parameters
+    ----------
+    backing_report : SpectrumReport
+        伴奏的频谱分析报告。
+    masking_zones : list[MaskingZone] | None
+        来自 :class:`CrossSpectrumReport` 的掩蔽区列表。
+    role : str
+        ``"backing"``。
+
+    Returns
+    -------
+    list[EqBandIntent]
+        推导出的 EQ 频段列表（先自身平衡，后避让）。
+    """
+    bands: list[EqBandIntent] = []
+
+    # ── 自身平衡：泥巴切 ──────────────────────────────────
+    if backing_report.mud_ratio_db > 3.0:
+        cut_db = -min(backing_report.mud_ratio_db - 2.0, 4.0)
+        mud_hz = backing_report.mud_peak_hz or 350.0
+        bands.append(EqBandIntent(
+            band_type="bell", freq_hz=mud_hz, gain_db=round(cut_db, 1),
+            q=0.7, reason=f"Backing mud cut@{mud_hz:.0f}Hz",
+        ))
+
+    # ── 自身平衡：过亮/过暗 ────────────────────────────────
+    tilt = backing_report.spectral_tilt_db_per_octave
+    if tilt > 2.0:
+        rolloff = backing_report.air_rolloff_hz or 8000.0
+        bands.append(EqBandIntent(
+            band_type="high_shelf", freq_hz=rolloff,
+            gain_db=-1.5, q=0.7,
+            reason=f"Backing bright cut@{rolloff:.0f}Hz tilt={tilt:.1f}",
+        ))
+    elif tilt < -5.0:
+        bands.append(EqBandIntent(
+            band_type="high_shelf", freq_hz=6000.0,
+            gain_db=1.0, q=0.7,
+            reason=f"Backing dark boost tilt={tilt:.1f}",
+        ))
+
+    # ── 避让人声：窄 Q 微量静态衰减 ─────────────────────────
+    # 不用动态 EQ——简单、透明、不引入额外处理痕迹。
+    # 衰减量限制在 1–2dB，保持伴奏包裹感。
+    if masking_zones:
+        for zone in masking_zones:
+            cut = min(zone.cut_db * 0.5, 2.0)  # 最多 -2dB
+            if cut >= 0.5:
+                bands.append(EqBandIntent(
+                    band_type="bell",
+                    freq_hz=zone.freq_hz,
+                    gain_db=-cut,
+                    q=zone.q,
+                    reason=f"Duck {zone.zone_type}@{zone.freq_hz:.0f}Hz "
+                           f"-{cut:.1f}dB masking={zone.masking_ratio_db:.1f}dB",
+                ))
+
+    return bands

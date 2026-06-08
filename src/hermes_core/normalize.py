@@ -336,16 +336,16 @@ PLUGIN_REGISTRY: dict[str, dict] = {
         },
     },
 
-    # ── Waves CLA-76 (FET, verified sweep 2026-05-31) ─────
-    # All ranges verified via reapy readback against CLA-76 Mono GUI.
-    # Attack/Release accept knob positions 1-7 (CW=fast).
+    # ── Waves CLA-76 (FET, VST3 swept 2026-06-08) ──────
+    # Input/Output: piecewise-linear -55.2~0 dB (拐点 -36)
+    # Attack/Release: 1~7 线性, CW=快
     "VST3: CLA-76 Mono (Waves)": {
         "type": "fet",
         "params": {
-            "Input":    {"range": (-48.0, 0.0), "curve": "linear"},
-            "Output":   {"range": (-48.0, 0.0), "curve": "linear"},
-            "Attack":   {"range": (1.0, 7.0),  "curve": "linear"},
-            "Release":  {"range": (1.0, 7.0),  "curve": "linear"},
+            "Input":    {"range": (-55.2, 0.0), "curve": "linear"},
+            "Output":   {"range": (-55.2, 0.0), "curve": "linear"},
+            "Attack":   {"range": (1.0, 7.0),    "curve": "linear"},
+            "Release":  {"range": (1.0, 7.0),    "curve": "linear"},
         },
     },
 
@@ -365,6 +365,28 @@ PLUGIN_REGISTRY: dict[str, dict] = {
             "Attack":    {"table": _GENERIC_ATTACK_TABLE},
             "Release":   {"table": _GENERIC_RELEASE_TABLE},
             "Gain":      {"range": (-20.0, 20.0), "curve": "linear"},
+        },
+    },
+
+    # Shadow Hills Mastering Compressor — 光电压缩 + 离散压缩双级。
+    # 人声链仅使用光学级（离散级 bypass），Iron 变压器染色。
+    # 所有参数 0.0–1.0（VST3 内置归一化）。
+    "VST3: Shadow Hills Mastering Compressor (Plugin Alliance)": {
+        "type": "opto",
+        "params": {
+            "Hardwire Bypass":      {"range": (0.0, 1.0), "curve": "linear"},
+            "Optical Bypass 1":     {"range": (0.0, 1.0), "curve": "linear"},
+            "Optical Threshold 1":  {"range": (0.0, 1.0), "curve": "linear"},
+            "Optical Gain 1":       {"range": (0.0, 1.0), "curve": "linear"},
+            "Discrete Bypass 1":    {"range": (0.0, 1.0), "curve": "linear"},
+            "Discrete Ratio 1":     {"range": (0.0, 1.0), "curve": "linear"},
+            "Discrete Attack 1":    {"range": (0.0, 1.0), "curve": "linear"},
+            "Discrete Recover 1":   {"range": (0.0, 1.0), "curve": "linear"},
+            "Discrete Gain 1":      {"range": (0.0, 1.0), "curve": "linear"},
+            "Sidechain Filter 1":   {"range": (0.0, 1.0), "curve": "linear"},
+            "Transformer 1":        {"range": (0.0, 1.0), "curve": "linear"},
+            "Sidechain HP Freq":    {"range": (0.0, 1.0), "curve": "linear"},
+            "Mix":                  {"range": (0.0, 1.0), "curve": "linear"},
         },
     },
 
@@ -491,6 +513,42 @@ PLUGIN_REGISTRY: dict[str, dict] = {
     },
     # ReaEQ: 4 bands for basic EQ tasks.  Band Types:
     # 0=High Pass, 1=Low Shelf, 2=Bell, 3=High Shelf, 4=Low Pass.
+    # Bettermaker EQ232D — Pultec 风格双通道均衡器。
+    # 参数全范围 0.0–1.0（VST3 内置归一化），curve=linear 做 pass-through。
+    "VST3: Bettermaker EQ232D (Plugin Alliance)": {
+        "type": "eq",
+        "params": {
+            # ── Channel 1 ──
+            "ENGAGE 1":    {"range": (0.0, 1.0), "curve": "linear"},
+            "HPF IN 1":    {"range": (0.0, 1.0), "curve": "linear"},
+            "HPF FREQ 1":  {"range": (0.0, 1.0), "curve": "linear"},
+            "EQ1 IN 1":    {"range": (0.0, 1.0), "curve": "linear"},
+            "EQ1 GAIN 1":  {"range": (0.0, 1.0), "curve": "linear"},
+            "EQ1 Q 1":     {"range": (0.0, 1.0), "curve": "linear"},
+            "EQ1 FREQ 1":  {"range": (0.0, 1.0), "curve": "linear"},
+            "EQ2 IN 1":    {"range": (0.0, 1.0), "curve": "linear"},
+            "EQ2 GAIN 1":  {"range": (0.0, 1.0), "curve": "linear"},
+            "EQ2 Q 1":     {"range": (0.0, 1.0), "curve": "linear"},
+            "EQ2 FREQ 1":  {"range": (0.0, 1.0), "curve": "linear"},
+            "PEQ IN 1":    {"range": (0.0, 1.0), "curve": "linear"},
+            "LO BOOST 1":  {"range": (0.0, 1.0), "curve": "linear"},
+            "LO ATTEN 1":  {"range": (0.0, 1.0), "curve": "linear"},
+            "LO CPS 1":    {"range": (0.0, 1.0), "curve": "linear"},
+            "HI BOOST 1":  {"range": (0.0, 1.0), "curve": "linear"},
+            "HI ATTEN 1":  {"range": (0.0, 1.0), "curve": "linear"},
+            "HI BW 1":     {"range": (0.0, 1.0), "curve": "linear"},
+            "KCS BST 1":   {"range": (0.0, 1.0), "curve": "linear"},
+            "KCS ATT 1":   {"range": (0.0, 1.0), "curve": "linear"},
+            "LVL OUT 1":   {"range": (0.0, 1.0), "curve": "linear"},
+            # ── Channel 2 ──
+            "ENGAGE 2":    {"range": (0.0, 1.0), "curve": "linear"},
+            # ── 全局 ──
+            "CHANNEL":     {"range": (0.0, 1.0), "curve": "linear"},
+            "MS MATRIX":   {"range": (0.0, 1.0), "curve": "linear"},
+            # 其余 VST3 参数（SNAPSHOT, Program, Bypass, Wet, Delta 等）
+            # 无需注册——由 REAPER 默认处理
+        },
+    },
     "ReaEQ (Cockos)": {
         "type": "eq",
         "params": {
@@ -533,6 +591,56 @@ PLUGIN_REGISTRY: dict[str, dict] = {
             "Input Level":            {"range": (-30.0, 30.0), "curve": "linear"},
             "Output Level":           {"range": (-30.0, 30.0), "curve": "linear"},
             "Wet":                    {"range": (0.0, 1.0),    "curve": "linear"},
+        },
+    },
+
+    # ── Decapitator (Soundtoys) — 谐波饱和 ────────────────
+    # Style: A=0.0, E=0.25, N=0.5, T=0.75, P=1.0
+    # 所有参数 0.0–1.0（VST 内置归一化）。
+    "VST: Decapitator (Soundtoys)": {
+        "type": "saturation",
+        "params": {
+            "Style":        {"range": (0.0, 1.0), "curve": "linear"},
+            "Drive":        {"range": (0.0, 1.0), "curve": "linear"},
+            "Punish":       {"range": (0.0, 1.0), "curve": "linear"},
+            "LowCut":       {"range": (0.0, 1.0), "curve": "linear"},
+            "Tone":         {"range": (0.0, 1.0), "curve": "linear"},
+            "HighCut":      {"range": (0.0, 1.0), "curve": "linear"},
+            "Mix":          {"range": (0.0, 1.0), "curve": "linear"},
+            "AutoGain":     {"range": (0.0, 1.0), "curve": "linear"},
+            "LowThump":     {"range": (0.0, 1.0), "curve": "linear"},
+            "HighSlope":    {"range": (0.0, 1.0), "curve": "linear"},
+            "OutputTrim":   {"range": (0.0, 1.0), "curve": "linear"},
+        },
+    },
+
+    # ── Oxford Inflator (Sonnox) — 谐波密度 ────────────────
+    "VST3: Oxford Inflator (Sonnox)": {
+        "type": "harmonic",
+        "params": {
+            "Input Gain":   {"range": (0.0, 1.0), "curve": "linear"},
+            "Effect":       {"range": (0.0, 1.0), "curve": "linear"},
+            "Curve":        {"range": (0.0, 1.0), "curve": "linear"},
+            "Output Gain":  {"range": (0.0, 1.0), "curve": "linear"},
+            "In":           {"range": (0.0, 1.0), "curve": "linear"},
+            "Band Split":   {"range": (0.0, 1.0), "curve": "linear"},
+            "Clip 0dB":     {"range": (0.0, 1.0), "curve": "linear"},
+        },
+    },
+
+    # ── Maag EQ4 (Plugin Alliance) — Air Band 空气感 ─────
+    "VST3: Maag EQ4 (Plugin Alliance)": {
+        "type": "air_eq",
+        "params": {
+            "Sub":          {"range": (0.0, 1.0), "curve": "linear"},
+            "40 Hz":        {"range": (0.0, 1.0), "curve": "linear"},
+            "160 Hz":       {"range": (0.0, 1.0), "curve": "linear"},
+            "650 Hz":       {"range": (0.0, 1.0), "curve": "linear"},
+            "2.5 kHz":      {"range": (0.0, 1.0), "curve": "linear"},
+            "Air Gain":     {"range": (0.0, 1.0), "curve": "linear"},
+            "Air Band":     {"range": (0.0, 1.0), "curve": "linear"},
+            "Level Trim":   {"range": (0.0, 1.0), "curve": "linear"},
+            "In/Out":       {"range": (0.0, 1.0), "curve": "linear"},
         },
     },
 
@@ -614,7 +722,7 @@ PLUGIN_REGISTRY: dict[str, dict] = {
             "RTHighMultiply": {"range": (0.0, 1.0), "curve": "linear"},
         },
     },
-    "VST: LX480 v4 (Relab Development)": {
+    "VST3: LX480 v4 (Relab Development)": {
         "type": "reverb",
         "params": {
             # E1 引擎关键参数

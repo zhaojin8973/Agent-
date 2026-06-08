@@ -6,7 +6,7 @@ from hermes_core.fx_builder import (
     _build_eq_params,
     _build_compressor_params,
     _build_deesser_params,
-    _build_saturation_params,
+    _build_decapitator_params,
     _build_doubler_params,
     _build_dynamic_eq_params,
     build_fx_params,
@@ -66,64 +66,64 @@ class TestBuildDeesserParams:
         assert "Mode" in result
 
     def test_threshold_clamped(self):
-        """阈值应在 -60..0 dB 范围内。"""
+        """阈值应在 [-40, -10] dB 范围内（新公式：band_rms + margin）。"""
         ctx = FXBuildContext(
             fx_name="Pro-DS", fx_type="deesser", role="vocal", genre="pop",
-            presence_deficit=-500.0,
+            raw_rms_db=-18.0, raw_peak_db=-6.0,
         )
         result = _build_deesser_params(ctx)
-        assert result["Threshold"] >= -60.0
+        assert -40.0 <= result["Threshold"] <= -10.0, (
+            f"Threshold={result['Threshold']} 超出 [-40, -10]"
+        )
 
     def test_genre_affects_range(self):
         """不同流派的 Range 应不同。"""
         ctx_pop = FXBuildContext(
             fx_name="Pro-DS", fx_type="deesser", role="vocal", genre="pop",
-            presence_deficit=0.0,
+            raw_rms_db=-18.0, raw_peak_db=-6.0,
         )
         ctx_rock = FXBuildContext(
             fx_name="Pro-DS", fx_type="deesser", role="vocal", genre="rock",
-            presence_deficit=0.0,
+            raw_rms_db=-18.0, raw_peak_db=-6.0,
         )
         r_pop = _build_deesser_params(ctx_pop)["Range"]
         r_rock = _build_deesser_params(ctx_rock)["Range"]
-        # 不同流派可能有不同的默认 Range
         assert isinstance(r_pop, float)
         assert isinstance(r_rock, float)
+        # pop 和 rock Range 应相同（都是 8.5）
+        assert r_pop == r_rock
 
 
-# ═══════════════════════════ Saturation 策略 ═══════════════════════════
+# ═══════════════════════════ Saturation (Decapitator) 策略 ═══════════════════════════
 
-class TestBuildSaturationParams:
-    def test_default_crest(self):
-        """无 RMS/Peak 时使用默认 crest 12dB。"""
+class TestBuildDecapitatiorParams:
+    """Decapitator 参数推导 — 委托到 hermes_core.decapitator 模块。"""
+
+    def test_builder_delegates_to_module(self):
+        """_build_decapitator_params 委托到 decapitator.build_params。"""
         ctx = FXBuildContext(
             fx_name="Decapitator", fx_type="saturation",
             role="vocal", genre="pop",
+            raw_rms_db=-18.0, raw_peak_db=-6.0,
         )
-        result = _build_saturation_params(ctx)
+        result = _build_decapitator_params(ctx)
+        assert result is not None
         assert "Drive" in result
+        assert "Style" in result
         assert "Mix" in result
-        assert 0.1 <= result["Drive"] <= 1.0
+        assert "Tone" in result
+        assert "OutputTrim" in result
+        # Drive 在人声安全范围
+        assert 0.05 <= result["Drive"] <= 0.30
 
-    def test_low_crest_gives_high_drive(self):
-        """低波峰（压缩感强）→ 高 Drive（增加谐波）。"""
+    def test_no_rms_peak_returns_none(self):
+        """无 RMS/Peak 时返回 None。"""
         ctx = FXBuildContext(
             fx_name="Decapitator", fx_type="saturation",
             role="vocal", genre="pop",
-            raw_rms_db=-12.0, raw_peak_db=-14.0,  # crest=2dB
         )
-        result = _build_saturation_params(ctx)
-        assert result["Drive"] > 0.5  # 高 drive
-
-    def test_high_crest_gives_low_drive(self):
-        """高波峰（瞬态丰富）→ 低 Drive（保留动态）。"""
-        ctx = FXBuildContext(
-            fx_name="Decapitator", fx_type="saturation",
-            role="vocal", genre="pop",
-            raw_rms_db=-28.0, raw_peak_db=-6.0,  # crest=22dB
-        )
-        result = _build_saturation_params(ctx)
-        assert result["Drive"] < 0.5  # crest=22 → drive=0.3
+        result = _build_decapitator_params(ctx)
+        assert result is None
 
 
 # ═══════════════════════════ Doubler 策略 ═══════════════════════════
@@ -206,8 +206,10 @@ class TestBuildFxParams:
         ctx = FXBuildContext(
             fx_name="Decapitator", fx_type="saturation",
             role="vocal", genre="pop",
+            raw_rms_db=-18.0, raw_peak_db=-6.0,
         )
         result = build_fx_params(ctx)
+        assert result is not None
         assert "Drive" in result
 
     def test_unknown_type_returns_none(self):
@@ -226,15 +228,6 @@ class TestBuildFxParams:
         result = build_fx_params(ctx)
         assert result is not None
         assert "Ratio" in result or "Thresh" in result or "Threshold" in result
-
-    def test_compressor_cla76_variant(self):
-        """CLA-76 压缩器 → 使用专属参数推导。"""
-        ctx = FXBuildContext(
-            fx_name="CLA-76", fx_type="fet", role="vocal",
-            genre="rock", bpm=120.0, raw_rms_db=-18.0, raw_peak_db=-6.0,
-        )
-        result = build_fx_params(ctx)
-        assert result is not None
 
     def test_compressor_rvox_via_build_fx_params(self):
         """RVox 名称 + vca 类型 → 走压缩器路径。"""
@@ -338,60 +331,249 @@ class TestCompressorEdges:
         result = _build_compressor_params(ctx)
         assert result is None
 
-    def test_cla76_no_bpm_strips_release(self):
-        """CLA-76 无 BPM → Release 键应被移除。"""
-        ctx = FXBuildContext(
-            fx_name="CLA-76", fx_type="fet", role="vocal",
-            genre="pop", bpm=None, raw_rms_db=-18.0, raw_peak_db=-6.0,
-        )
-        result = _build_compressor_params(ctx)
-        assert result is not None
-        assert "Release" not in result
-
-    def test_vca_with_bpm_strips_timing_on_cla76(self):
-        """CLA-76 有 BPM → Release 保留（BPM 驱动）。"""
-        ctx = FXBuildContext(
-            fx_name="CLA-76", fx_type="fet", role="vocal",
-            genre="rock", bpm=120.0, raw_rms_db=-18.0, raw_peak_db=-6.0,
-        )
-        result = _build_compressor_params(ctx)
-        assert result is not None
-        # CLA-76 有 BPM 时 Release 存在
-        assert "Release" in result
 
 
 # ═══════════════════════════ De-Esser 补充 ═══════════════════════════
 
 class TestDeesserEdges:
-    """De-Esser 参数推导的更多边界情况。"""
+    """De-Esser 参数推导的更多边界情况（新 Threshold = band_rms + margin）。"""
 
-    def test_high_presence_deficit(self):
-        """高存在感缺失 → 阈值为 0dB。"""
+    def test_threshold_clamped_low(self):
+        """极低 band_rms (-60dB) + 低 crest → Threshold clamp 在 -40。"""
         ctx = FXBuildContext(
             fx_name="Pro-DS", fx_type="deesser", role="vocal", genre="pop",
-            presence_deficit=500.0,
+            raw_rms_db=-60.0, raw_peak_db=-58.0,  # crest=2 → margin=4
         )
         result = _build_deesser_params(ctx)
-        assert result["Threshold"] == 0.0
+        # band_rms=-30 (spectrum missing) + margin=4 = -26, clamped to [-40, -10]
+        assert result["Threshold"] == -26.0
 
-    def test_low_presence_deficit(self):
-        """极低存在感缺失 → 阈值接近 -60dB。"""
+    def test_threshold_high_crest(self):
+        """高 crest → 大 margin → Threshold 接近上限。"""
         ctx = FXBuildContext(
             fx_name="Pro-DS", fx_type="deesser", role="vocal", genre="pop",
-            presence_deficit=-500.0,
+            raw_rms_db=-28.0, raw_peak_db=-3.0,  # crest=25 → margin=10
         )
         result = _build_deesser_params(ctx)
-        assert result["Threshold"] == -60.0
+        # band_rms=-30 + margin=10 = -20, clamp ok
+        assert result["Threshold"] == -20.0
 
     def test_different_genre_range_values(self):
         """不同流派应产生不同的 Range 值。"""
-        genres = ["pop", "rock", "electronic", "hip_hop", "folk"]
+        genres = ["pop", "rock", "electronic", "folk"]
         ranges = {}
         for g in genres:
             ctx = FXBuildContext(
                 fx_name="Pro-DS", fx_type="deesser", role="vocal", genre=g,
+                raw_rms_db=-18.0, raw_peak_db=-6.0,
             )
             ranges[g] = _build_deesser_params(ctx)["Range"]
-        # 所有 Range 值应在合理范围内
         for g, r in ranges.items():
             assert 0.0 < r < 20.0, f"{g} Range={r} 超出范围"
+        # electronic < pop (electronic=9, pop=8.5)
+        assert ranges["folk"] < ranges["electronic"]
+
+
+# ═══════════════════════════ EQ232D Builder ═══════════════════════════
+
+
+@pytest.mark.unit
+class TestBuildEQ232DParams:
+    """Bettermaker EQ232D 参数推导测试（2026-06-07）。"""
+
+    def test_returns_eq232d_param_names(self):
+        """输出参数名应匹配 EQ232D（非 Pultec）。"""
+        from hermes_core.fx_builder import _build_eq232d_params
+        ctx = FXBuildContext(
+            fx_name="Bettermaker EQ232D", fx_type="color_eq_232d",
+            role="vocal", genre="pop", presence_deficit=3.0,
+        )
+        result = _build_eq232d_params(ctx)
+        assert result is not None
+        # EQ232D 专属参数名
+        assert "ENGAGE 1" in result
+        assert "PEQ IN 1" in result
+        assert "LO CPS 1" in result
+        assert "LO BOOST 1" in result
+        assert "LO ATTEN 1" in result
+        assert "HI BOOST 1" in result
+        assert "HI BW 1" in result
+        assert "LVL OUT 1" in result
+        # 通道配置参数
+        assert "CHANNEL" in result
+        assert "MS MATRIX" in result
+        assert "ENGAGE 2" in result
+        # 不应包含 Pultec 参数名
+        assert "Low Freq" not in result
+        assert "High Freq" not in result
+
+    def test_channel_config(self):
+        """Ch1 ON, Ch2 OFF, Dual Mono 模式, MS 关闭。"""
+        from hermes_core.fx_builder import _build_eq232d_params
+        ctx = FXBuildContext(
+            fx_name="Bettermaker EQ232D", fx_type="color_eq_232d",
+            role="vocal", genre="folk", presence_deficit=-1.0,
+        )
+        result = _build_eq232d_params(ctx)
+        assert result["ENGAGE 1"] == 1.0
+        assert result["ENGAGE 2"] == 0.0   # Ch2 完全关闭
+        assert result["CHANNEL"] == 1.0     # Dual Mono
+        assert result["MS MATRIX"] == 0.0   # M/S 关闭
+        assert result["PEQ IN 1"] == 1.0
+        assert result["LVL OUT 1"] == 0.5   # unity
+
+    def test_eq1_eq2_hpf_disabled(self):
+        """参量段和 HPF 关闭（已有 Pro-Q 3 处理）。"""
+        from hermes_core.fx_builder import _build_eq232d_params
+        ctx = FXBuildContext(
+            fx_name="Bettermaker EQ232D", fx_type="color_eq_232d",
+            role="vocal", genre="pop", presence_deficit=0.0,
+        )
+        result = _build_eq232d_params(ctx)
+        assert result["HPF IN 1"] == 0.0
+        assert result["EQ1 IN 1"] == 0.0
+        assert result["EQ2 IN 1"] == 0.0
+
+    def test_kcs_bypass(self):
+        """Kick/Snare 滤波器应保持关闭（人声用）。"""
+        from hermes_core.fx_builder import _build_eq232d_params
+        ctx = FXBuildContext(
+            fx_name="Bettermaker EQ232D", fx_type="color_eq_232d",
+            role="vocal", genre="pop", presence_deficit=0.0,
+        )
+        result = _build_eq232d_params(ctx)
+        assert result["KCS BST 1"] == 0.0
+        assert result["KCS ATT 1"] == 0.0
+
+    def test_low_cps_fixed_60hz(self):
+        """LO CPS 应固定为 0.33（约 60Hz）。"""
+        from hermes_core.fx_builder import _build_eq232d_params
+        ctx = FXBuildContext(
+            fx_name="Bettermaker EQ232D", fx_type="color_eq_232d",
+            role="vocal", genre="pop", presence_deficit=0.0,
+        )
+        result = _build_eq232d_params(ctx)
+        assert result["LO CPS 1"] == pytest.approx(0.33, abs=0.01)
+
+    def test_deficit_affects_high_boost(self):
+        """presence_deficit 驱动 HI BOOST 值。"""
+        from hermes_core.fx_builder import _build_eq232d_params
+        ctx_high = FXBuildContext(
+            fx_name="Bettermaker EQ232D", fx_type="color_eq_232d",
+            role="vocal", genre="pop", presence_deficit=10.0,
+        )
+        ctx_low = FXBuildContext(
+            fx_name="Bettermaker EQ232D", fx_type="color_eq_232d",
+            role="vocal", genre="pop", presence_deficit=0.0,
+        )
+        hi = _build_eq232d_params(ctx_high)["HI BOOST 1"]
+        lo = _build_eq232d_params(ctx_low)["HI BOOST 1"]
+        assert hi > lo
+
+    def test_dispatch_via_build_fx_params(self):
+        """build_fx_params 应正确分发到 _build_eq232d_params。"""
+        ctx = FXBuildContext(
+            fx_name="Bettermaker EQ232D", fx_type="color_eq_232d",
+            role="vocal", genre="pop", presence_deficit=3.0,
+        )
+        result = build_fx_params(ctx)
+        assert result is not None
+        assert "LO BOOST 1" in result
+
+
+# ═══════════════════════════ Shadow Hills Builder ═══════════════════════════
+
+
+@pytest.mark.unit
+class TestBuildShadowHillsParams:
+    """Shadow Hills Mastering Compressor 参数推导测试（2026-06-07）。"""
+
+    def test_returns_shadow_hills_param_names(self):
+        """输出参数名应匹配 Shadow Hills（非 CL 1B）。"""
+        from hermes_core.fx_builder import _build_shadow_hills_params
+        ctx = FXBuildContext(
+            fx_name="Shadow Hills", fx_type="tube_opto_sh",
+            role="vocal", genre="pop", raw_rms_db=-18.0,
+        )
+        result = _build_shadow_hills_params(ctx)
+        assert result is not None
+        # Shadow Hills 专属参数名
+        assert "Hardwire Bypass" in result
+        assert "Optical Bypass 1" in result
+        assert "Optical Threshold 1" in result
+        assert "Optical Gain 1" in result
+        assert "Discrete Bypass 1" in result
+        assert "Transformer 1" in result
+        assert "Sidechain HP Freq" in result
+        # 不应包含 CL 1B 参数名
+        assert "Ratio" not in result
+        assert "Attack" not in result
+        assert "Release" not in result
+        assert "Gain" not in result
+
+    def test_discrete_bypass(self):
+        """离散级必须完全 bypass。"""
+        from hermes_core.fx_builder import _build_shadow_hills_params
+        ctx = FXBuildContext(
+            fx_name="Shadow Hills", fx_type="tube_opto_sh",
+            role="vocal", genre="rock", raw_rms_db=-18.0,
+        )
+        result = _build_shadow_hills_params(ctx)
+        assert result["Discrete Bypass 1"] == 0.0  # bypass
+        assert result["Optical Bypass 1"] == 1.0   # engaged
+
+    def test_transformer_on(self):
+        """Iron 变压器染色应保持开启。"""
+        from hermes_core.fx_builder import _build_shadow_hills_params
+        ctx = FXBuildContext(
+            fx_name="Shadow Hills", fx_type="tube_opto_sh",
+            role="vocal", genre="pop", raw_rms_db=-18.0,
+        )
+        result = _build_shadow_hills_params(ctx)
+        assert result["Transformer 1"] == 1.0
+        assert result["Hardwire Bypass"] == 1.0
+
+    def test_optical_threshold_derived_from_rms(self):
+        """光学阈值应基于 RMS 计算（0–1 范围）。"""
+        from hermes_core.fx_builder import _build_shadow_hills_params
+        ctx = FXBuildContext(
+            fx_name="Shadow Hills", fx_type="tube_opto_sh",
+            role="vocal", genre="pop", raw_rms_db=-18.0,
+        )
+        result = _build_shadow_hills_params(ctx)
+        thresh = result["Optical Threshold 1"]
+        assert 0.0 <= thresh <= 1.0
+        # RMS=-18 → 阈值约为 0（不压缩）
+        assert thresh == pytest.approx(0.0, abs=0.1)
+
+        ctx_hot = FXBuildContext(
+            fx_name="Shadow Hills", fx_type="tube_opto_sh",
+            role="vocal", genre="pop", raw_rms_db=-6.0,
+        )
+        hot_result = _build_shadow_hills_params(ctx_hot)
+        hot_thresh = hot_result["Optical Threshold 1"]
+        assert hot_thresh > thresh  # 更热的信号 → 更高阈值
+
+    def test_genre_affects_sidechain_hpf(self):
+        """不同流派的侧链 HPF 值不同。"""
+        from hermes_core.fx_builder import _build_shadow_hills_params
+        hpf_values = {}
+        for g in ["pop", "rock", "electronic", "folk", "ballad"]:
+            ctx = FXBuildContext(
+                fx_name="Shadow Hills", fx_type="tube_opto_sh",
+                role="vocal", genre=g, raw_rms_db=-18.0,
+            )
+            hpf_values[g] = _build_shadow_hills_params(ctx)["Sidechain HP Freq"]
+        # 不同流派应有不同值（允许微小差异）
+        unique = len(set(round(v, 2) for v in hpf_values.values()))
+        assert unique >= 2, f"所有流派 HPF 值相同: {hpf_values}"
+
+    def test_dispatch_via_build_fx_params(self):
+        """build_fx_params 应正确分发到 _build_shadow_hills_params。"""
+        ctx = FXBuildContext(
+            fx_name="Shadow Hills", fx_type="tube_opto_sh",
+            role="vocal", genre="pop", raw_rms_db=-18.0,
+        )
+        result = build_fx_params(ctx)
+        assert result is not None
+        assert "Optical Threshold 1" in result

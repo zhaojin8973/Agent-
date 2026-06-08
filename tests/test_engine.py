@@ -1588,18 +1588,8 @@ class TestGenreTableConsistency:
         for g in _ALL_GENRES:
             assert g in _GENRE_BUS_GR_TARGET, f"流派 {g} 缺失于 _GENRE_BUS_GR_TARGET"
 
-    def test_cla76_attack_base_has_all_genres(self):
-        from hermes_core.engine import _GENRE_CLA76_ATTACK_BASE
-        for g in _ALL_GENRES:
-            assert g in _GENRE_CLA76_ATTACK_BASE, f"流派 {g} 缺失于 _GENRE_CLA76_ATTACK_BASE"
-
-    def test_cla76_attack_k_has_all_genres(self):
-        from hermes_core.engine import _GENRE_CLA76_ATTACK_K
-        for g in _ALL_GENRES:
-            assert g in _GENRE_CLA76_ATTACK_K, f"流派 {g} 缺失于 _GENRE_CLA76_ATTACK_K"
-
     def test_prods_range_has_all_genres(self):
-        from hermes_core.engine import _GENRE_PRODS_RANGE
+        from hermes_core.pro_ds import _RANGE_BY_GENRE as _GENRE_PRODS_RANGE
         for g in _ALL_GENRES:
             assert g in _GENRE_PRODS_RANGE, f"流派 {g} 缺失于 _GENRE_PRODS_RANGE"
 
@@ -1608,9 +1598,8 @@ class TestGenreTableConsistency:
         from hermes_core.engine import (
             _GENRE_VOCAL_TO_BACKING, _GENRE_TARGET_LUFS,
             _GENRE_CREST_GR_RATIO, _GENRE_RVOX_MULTIPLIER,
-            _GENRE_CLA76_ATTACK_BASE, _GENRE_CLA76_ATTACK_K,
-            _GENRE_PRODS_RANGE,
         )
+        from hermes_core.pro_ds import _RANGE_BY_GENRE as _GENRE_PRODS_RANGE
         from hermes_core.normalize import _GENRE_BUS_GR_TARGET
 
         expected = set(_ALL_GENRES)
@@ -1620,58 +1609,12 @@ class TestGenreTableConsistency:
             "_GENRE_CREST_GR_RATIO": set(_GENRE_CREST_GR_RATIO.keys()),
             "_GENRE_RVOX_MULTIPLIER": set(_GENRE_RVOX_MULTIPLIER.keys()),
             "_GENRE_BUS_GR_TARGET": set(_GENRE_BUS_GR_TARGET.keys()),
-            "_GENRE_CLA76_ATTACK_BASE": set(_GENRE_CLA76_ATTACK_BASE.keys()),
-            "_GENRE_CLA76_ATTACK_K": set(_GENRE_CLA76_ATTACK_K.keys()),
             "_GENRE_PRODS_RANGE": set(_GENRE_PRODS_RANGE.keys()),
         }
         for name, keys in tables.items():
             missing = expected - keys
             assert not missing, f"{name} 缺少流派: {missing}"
 
-
-# ══════════════════════════════════════════════════════════════
-# CLA-76 攻击旋钮全流派测试
-# ══════════════════════════════════════════════════════════════
-
-
-@pytest.mark.unit
-class TestCLA76AttackAllGenres:
-    """验证 _compute_cla76_attack_knob 在所有流派下输出合理值。"""
-
-    def test_high_crest_all_genres(self):
-        """高波峰 (20 dB) → 较慢攻击（较小旋钮值），所有流派应在 [1, 6.5]。"""
-        from hermes_core.engine import _compute_cla76_attack_knob
-        for g in _ALL_GENRES:
-            knob = _compute_cla76_attack_knob(20.0, g)
-            assert 1.0 <= knob <= 6.5, f"流派 {g}: 旋钮值 {knob} 超出范围"
-
-    def test_low_crest_all_genres(self):
-        """低波峰 (8 dB) → 较快攻击（较大旋钮值），所有流派应在 [1, 6.5]。"""
-        from hermes_core.engine import _compute_cla76_attack_knob
-        for g in _ALL_GENRES:
-            knob = _compute_cla76_attack_knob(8.0, g)
-            assert 1.0 <= knob <= 6.5, f"流派 {g}: 旋钮值 {knob} 超出范围"
-
-    def test_normal_crest_all_genres(self):
-        """标准波峰 (12 dB) → 所有流派应在 [1, 6.5]。"""
-        from hermes_core.engine import _compute_cla76_attack_knob
-        for g in _ALL_GENRES:
-            knob = _compute_cla76_attack_knob(12.0, g)
-            assert 1.0 <= knob <= 6.5, f"流派 {g}: 旋钮值 {knob} 超出范围"
-
-    def test_electronic_slower_than_folk(self):
-        """电子流派基础攻击比民谣慢（更高基础值），同等波峰下旋钮值应更大。"""
-        from hermes_core.engine import _compute_cla76_attack_knob
-        knob_electronic = _compute_cla76_attack_knob(12.0, "electronic")
-        knob_folk = _compute_cla76_attack_knob(12.0, "folk")
-        assert knob_electronic > knob_folk
-
-    def test_unknown_genre_uses_pop_defaults(self):
-        """未知流派回退到 pop 默认值。"""
-        from hermes_core.engine import _compute_cla76_attack_knob
-        knob_unknown = _compute_cla76_attack_knob(15.0, "jazz")
-        knob_pop = _compute_cla76_attack_knob(15.0, "pop")
-        assert knob_unknown == knob_pop
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1747,7 +1690,7 @@ class TestProDSAllGenres:
 
     def test_range_values_per_genre(self):
         """每个流派的 Range 值在合理范围内（0–24 dB）。"""
-        from hermes_core.engine import _GENRE_PRODS_RANGE
+        from hermes_core.pro_ds import _RANGE_BY_GENRE as _GENRE_PRODS_RANGE
 
         for g in _ALL_GENRES:
             range_db = _GENRE_PRODS_RANGE[g]
@@ -1757,7 +1700,7 @@ class TestProDSAllGenres:
 
     def test_sparse_genres_have_lower_range(self):
         """稀疏流派（folk/ballad）的 Range 应小于密集流派（electronic）。"""
-        from hermes_core.engine import _GENRE_PRODS_RANGE
+        from hermes_core.pro_ds import _RANGE_BY_GENRE as _GENRE_PRODS_RANGE
 
         assert _GENRE_PRODS_RANGE["folk"] < _GENRE_PRODS_RANGE["electronic"]
         assert _GENRE_PRODS_RANGE["ballad"] < _GENRE_PRODS_RANGE["electronic"]
@@ -1787,7 +1730,7 @@ class TestProDSAllGenres:
 
     def test_unknown_genre_uses_default_range(self):
         """未知流派回退到 8.5 dB。"""
-        from hermes_core.engine import _GENRE_PRODS_RANGE
+        from hermes_core.pro_ds import _RANGE_BY_GENRE as _GENRE_PRODS_RANGE
         range_db = _GENRE_PRODS_RANGE.get("jazz", 8.5)
         assert range_db == 8.5
 
