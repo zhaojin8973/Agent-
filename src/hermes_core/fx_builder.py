@@ -241,6 +241,21 @@ def _build_decapitator_params(ctx: FXBuildContext) -> dict | None:
 
 
 # ════════════════════════════════════════════════════════════════
+# Bettermaker EQ232D 染色策略（委托到独立模块）
+# ════════════════════════════════════════════════════════════════
+
+
+def _build_eq232d_params(ctx: FXBuildContext) -> dict:
+    """Bettermaker EQ232D — 委托到 :mod:`hermes_core.eq232d`。
+
+    所有参数逻辑、流派表、公式集中在 eq232d.py 中。
+    engine.py 的 elif 分支会优先拦截，此函数作为回退路径保留。
+    """
+    from hermes_core.eq232d import build_params as eq232d_build
+    return eq232d_build(ctx)
+
+
+# ════════════════════════════════════════════════════════════════
 # Pultec EQP-1A 电子管染色策略
 # ════════════════════════════════════════════════════════════════
 
@@ -285,105 +300,6 @@ def _build_pultec_params(ctx: FXBuildContext) -> dict:
     )
     return physical
 
-
-# ════════════════════════════════════════════════════════════════
-# Bettermaker EQ232D 染色策略
-# ════════════════════════════════════════════════════════════════
-
-
-def _build_eq232d_params(ctx: FXBuildContext) -> dict:
-    """Bettermaker EQ232D — 干净固态 Pultec 风格母带级 EQ。
-
-    硬件原型为 EQ232P MKII。人声链策略：
-    - CHANNEL=Dual Mono（人声是单声道）
-    - Channel 1 PEQ 段：Pultec 经典低频推拉 + presence 驱动高频
-    - Channel 2 完全关闭
-    - EQ1/EQ2 参量段关闭（已有 Pro-Q 3 做手术 EQ）
-    - HPF 关闭（Pro-Q 3 已做高通）
-    - KCS 旁路（底鼓/军鼓滤波器，与人声无关）
-    """
-    deficit = ctx.presence_deficit
-    sibilance = 0.0  # 后续可从 spectrum 获取
-
-    # Low: Pultec 经典 60Hz 推拉 Trick
-    # LO CPS — 低频频率选择器（CPS=Cycles Per Second）
-    # 0.33 ≈ 60Hz（经典 Pultec 值）
-    lo_cps = 0.33
-    low_boost = max(0.0, min(1.0, 3.5 / 10.0))
-    if deficit > 3.0:
-        low_atten = 2.5 / 10.0
-    elif deficit > 0:
-        low_atten = 1.5 / 10.0
-    else:
-        low_atten = 0.5 / 10.0
-
-    # High: presence 驱动（大而干净的高频提升）
-    high_boost = max(0.0, min(1.0, deficit * 0.04))
-    high_atten = 0.2 if sibilance > -30.0 else 0.0
-    high_bw = 0.5
-
-    physical = {
-        # ── 通道配置 ──
-        "CHANNEL":    1.0,   # Dual Mono（人声单声道）
-        "MS MATRIX":  0.0,   # M/S 关闭（母带功能，人声不需要）
-        # ── Channel 1: 启用 PEQ ──
-        "ENGAGE 1":   1.0,   # Ch1 ON
-        "HPF IN 1":   0.0,   # HPF 关闭（Pro-Q 3 已做）
-        "EQ1 IN 1":   0.0,   # 参量段关闭（已有手术 EQ）
-        "EQ2 IN 1":   0.0,
-        "PEQ IN 1":   1.0,   # Pultec 被动 EQ ON
-        "LO CPS 1":   lo_cps,
-        "LO BOOST 1": low_boost,
-        "LO ATTEN 1": low_atten,
-        "HI BOOST 1": high_boost,
-        "HI ATTEN 1": high_atten,
-        "HI BW 1":    high_bw,
-        "KCS BST 1":  0.0,   # Kick/Snare Boost 关闭
-        "KCS ATT 1":  0.0,   # Kick/Snare Atten 关闭
-        "LVL OUT 1":  0.5,   # unity
-        # ── Channel 2: 完全关闭 ──
-        "ENGAGE 2":   0.0,   # Ch2 OFF（避免默认直通）
-    }
-    log.info(
-        "Auto-EQ232D: Ch1 PEQ @60Hz boost=%.2f atten=%.2f | "
-        "Hi boost=%.2f bw=%.2f | Ch2=OFF | DualMono (deficit=%.1f)",
-        low_boost, low_atten, high_boost, high_bw, deficit,
-    )
-    return physical
-
-
-# ════════════════════════════════════════════════════════════════
-# Oxford Inflator 谐波密度策略
-# ════════════════════════════════════════════════════════════════
-
-
-def _build_inflator_params(ctx: FXBuildContext) -> dict:
-    """Oxford Inflator — 流派差异化谐波密度。
-
-    Effect 20-40%, Curve 负值(透明), Clip 0dB OFF。
-    人声保守使用，不超 50% 防失真。
-    """
-    from hermes_core.genre_tables import _GENRE_INFLATOR_EFFECT
-
-    effect = _GENRE_INFLATOR_EFFECT.get(ctx.genre, 0.30)
-
-    physical = {
-        "Input Gain":  0.0,     # unity
-        "Effect":      effect,
-        "Curve":       0.0,     # 负曲线 = 最透明人声模式
-        "Output Gain": 0.0,     # unity
-        "In":          1.0,     # ON
-        "Band Split":  0.0,     # OFF（全频段处理）
-        "Clip 0dB":    0.0,     # OFF — 不削波
-    }
-    log.info(
-        "Auto-Inflator: effect=%.0f%% curve=0 (genre=%s)",
-        effect * 100, ctx.genre,
-    )
-    return physical
-
-
-# ════════════════════════════════════════════════════════════════
 # CL 1B 光电压缩策略
 # ════════════════════════════════════════════════════════════════
 
@@ -477,47 +393,6 @@ def _build_shadow_hills_params(ctx: FXBuildContext) -> dict:
     return physical
 
 
-# ════════════════════════════════════════════════════════════════
-# Maag EQ4 Air Band 策略
-# ════════════════════════════════════════════════════════════════
-
-
-def _build_maag_params(ctx: FXBuildContext) -> dict:
-    """Maag EQ4 — Air Band 最终抛光。
-
-    Air 频率流派差异化 (10k/20k), Boost=deficit×0.3+|air|×0.2,
-    160Hz 补瘦声, 2.5kHz 补亮度。
-    """
-    from hermes_core.genre_tables import _GENRE_MAAG_AIR_FREQ
-
-    air_freq = _GENRE_MAAG_AIR_FREQ.get(ctx.genre, 20000.0)
-    deficit = ctx.presence_deficit
-
-    air_boost = round(max(0.0, min(6.0, deficit * 0.3 + abs(deficit) * 0.1)), 1)
-
-    # mud 代理: presence_deficit 大 → 可能是混 → 不补 160Hz
-    hz160_boost = 1.5 if deficit < -3.0 else 0.0
-    hz2500_boost = 1.5 if deficit > 4.0 else 0.0
-
-    physical = {
-        "Sub":         0.0,    # OFF（人声不需要 Sub）
-        "40 Hz":       0.0,    # OFF
-        "160 Hz":      hz160_boost,
-        "650 Hz":      0.0,    # OFF
-        "2.5 kHz":     hz2500_boost,
-        "Air Gain":    air_boost,
-        "Air Band":    air_freq,
-        "Level Trim":  1.0,    # unity（输出增益由 Inflator/Shadow Hills 控制）
-        "In/Out":      1.0,    # IN
-    }
-    log.info(
-        "Auto-Maag: air=%.0fHz +%.1fdB | 160Hz=+%.1f 2.5k=+%.1f (genre=%s)",
-        air_freq, air_boost, hz160_boost, hz2500_boost, ctx.genre,
-    )
-    return physical
-
-
-# ════════════════════════════════════════════════════════════════
 # 策略注册表
 # ════════════════════════════════════════════════════════════════
 
@@ -532,10 +407,8 @@ _FX_BUILDERS: dict[str, FXBuilderFn] = {
     "saturation":  _build_decapitator_params,
     "color_eq":    _build_pultec_params,
     "color_eq_232d": _build_eq232d_params,
-    "harmonic":    _build_inflator_params,
     "tube_opto":   _build_cl1b_params,
     "tube_opto_sh": _build_shadow_hills_params,
-    "air_eq":      _build_maag_params,
     "dynamic_eq":  _build_dynamic_eq_params,
     "doubler":     _build_doubler_params,
 }

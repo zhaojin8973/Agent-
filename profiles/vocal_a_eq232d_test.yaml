@@ -1,0 +1,36 @@
+# Hermes-Core: EQ232D 测试专用精简 Profile
+# 链到 EQ232D 为止——不加载 RVox/Inflator/ShadowHills/Maag，不加载空间效果器
+
+chain_variant: "a"
+name: "Vocal A EQ232D Test"
+description: "精简测试链：Q3→CLA76→Decap→ProDS→EQ232D"
+
+# ── gain staging ──
+clip_gain_ref_db: -18.0
+target_lufs: -11.0
+ceiling_db: -0.5
+tolerance_lufs: 0.3
+
+# ── vocal chain: 到 EQ232D 为止 ──
+vocal_chain:
+  - name: "FabFilter Pro-Q 3 (FabFilter)"
+    type: "eq"
+    eq_position: "pre"
+  - name: "CLA-76 Mono (Waves)"
+  - name: "Decapitator (Soundtoys)"
+  - name: "FabFilter Pro-DS (FabFilter)"
+  - name: "Bettermaker EQ232D (Plugin Alliance)"
+
+# ── backing chain ──
+backing_chain: []
+
+# ── 空间效果器和母带全部跳过 ──
+bus_reverb:
+  name: ""
+reverb_level_db: -10.0
+
+master_limiter:
+  name: ""
+
+genre_table:
+  chinese_folk_bel_canto: [9, 12]

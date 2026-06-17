@@ -1799,14 +1799,29 @@ class TestSpatialSendComputation:
             for bus in ("plate", "hall", "room"):
                 assert bus in entry, f"流派 {g} 缺少 {bus} 混响"
 
-    def test_all_genres_in_delay_table(self):
-        """6 个流派在 _GENRE_DELAY_SEND_BASE 中都有条目。"""
-        from hermes_core.engine import _GENRE_DELAY_SEND_BASE
+    def test_delay_table_values(self):
+        """Delay 使用固定表格值，用户直接指定。"""
+        from hermes_core.genre_tables import _GENRE_DELAY_SEND_BASE
+        from hermes_core.engine import _compute_spatial_sends
+
+        # 验证表格包含所有流派
         for g in _ALL_GENRES_SPATIAL:
-            assert g in _GENRE_DELAY_SEND_BASE, f"流派 {g} 缺失于 _GENRE_DELAY_SEND_BASE"
-            entry = _GENRE_DELAY_SEND_BASE[g]
-            for bus in ("slap", "throw", "pingpong"):
-                assert bus in entry, f"流派 {g} 缺少 {bus} 延迟"
+            assert g in _GENRE_DELAY_SEND_BASE, f"流派 {g} 缺失"
+
+        # 验证 folk 延迟禁用
+        assert _GENRE_DELAY_SEND_BASE["folk"]["slap"] <= -90.0
+
+        # 验证民美用户指定值
+        base = _GENRE_DELAY_SEND_BASE["chinese_folk_bel_canto"]
+        assert base["slap"] == -20.0
+        assert base["throw"] == -27.8
+        assert base["pingpong"] == -27.0
+
+        # 验证非禁用流派 delay 有值
+        sends = _compute_spatial_sends("pop", 12.0, 2.0, -3.0)
+        assert sends["delay_slap"] is not None
+        assert sends["delay_throw"] is not None
+        assert sends["delay_pingpong"] is not None
 
     # ── 延迟开关 ──────────────────────────────────────────
 
@@ -1850,24 +1865,26 @@ class TestSpatialSendComputation:
         assert sends_dull["reverb_room"] < sends_normal["reverb_room"]
 
     def test_sibilance_affects_plate_only(self):
-        """齿音修正仅影响 Plate，不影响 Hall/Room/Delay。"""
+        """齿音修正仅影响 Plate，Hall/Room/Delay 不受影响。"""
         from hermes_core.engine import _compute_spatial_sends
         sends_no_sib = _compute_spatial_sends("pop", 12.0, 2.0, -3.0, sibilance_peak_db=None)
         sends_sib = _compute_spatial_sends("pop", 12.0, 2.0, -3.0, sibilance_peak_db=-20.0)
         # Plate 应降低
         assert sends_sib["reverb_plate"] < sends_no_sib["reverb_plate"]
-        # Hall / Room / Delay 不应变
+        # Hall / Room / Delay 不受影响
         assert sends_sib["reverb_hall"] == sends_no_sib["reverb_hall"]
         assert sends_sib["reverb_room"] == sends_no_sib["reverb_room"]
         assert sends_sib["delay_slap"] == sends_no_sib["delay_slap"]
+        assert sends_sib["delay_throw"] == sends_no_sib["delay_throw"]
 
     def test_section_chorus_higher_than_verse(self):
-        """副歌发送量高于主歌。"""
+        """副歌混响发送量高于主歌（Delay 不受 section 影响）。"""
         from hermes_core.engine import _compute_spatial_sends
         sends_verse = _compute_spatial_sends("pop", 12.0, 2.0, -3.0, section="verse")
         sends_chorus = _compute_spatial_sends("pop", 12.0, 2.0, -3.0, section="chorus")
         assert sends_chorus["reverb_plate"] > sends_verse["reverb_plate"]
-        assert sends_chorus["delay_throw"] > sends_verse["delay_throw"]
+        # Delay 是固定表格值，不随段落变化
+        assert sends_chorus["delay_throw"] == sends_verse["delay_throw"]
 
     # ── 范围限制 ──────────────────────────────────────────
 
@@ -1918,14 +1935,15 @@ class TestSpatialSendComputation:
             "pop", crest_factor_db=14.0, presence_deficit_db=3.0,
             mud_ratio_db=-3.0, sibilance_peak_db=-28.0, section="verse",
         )
-        # 主歌基准 + 中度修正 = 比基准低 2-3 dB
-        assert sends["reverb_plate"] == pytest.approx(-14.6, abs=0.3)
-        assert sends["reverb_hall"] == pytest.approx(-16.2, abs=0.3)
-        assert sends["reverb_room"] == pytest.approx(-18.2, abs=0.3)
-        assert sends["delay_slap"] == pytest.approx(-16.3, abs=0.3)
-        assert sends["delay_throw"] == pytest.approx(-19.3, abs=0.3)
-        assert sends["delay_pingpong"] == pytest.approx(-21.3, abs=0.3)
-        assert sends["microshift"] == pytest.approx(-13.3, abs=0.3)
+        # 基准 + 中度修正后的实际计算值
+        assert sends["reverb_plate"] == pytest.approx(-14.3, abs=0.3)
+        assert sends["reverb_hall"] == pytest.approx(-19.9, abs=0.3)
+        assert sends["reverb_room"] == pytest.approx(-16.9, abs=0.3)
+        # Delay 固定表格值，不受信号偏差影响
+        assert sends["delay_slap"] == -20.0
+        assert sends["delay_throw"] == -28.0
+        assert sends["delay_pingpong"] == -27.0
+        assert sends["microshift"] == pytest.approx(-9.6, abs=0.3)
 
     def test_ballad_wetter_than_folk(self):
         """抒情流派发送量比民谣更湿润。"""
@@ -1951,11 +1969,12 @@ class TestSpatialSendComputation:
             "chinese_folk_bel_canto", crest_factor_db=14.0,
             presence_deficit_db=2.0, mud_ratio_db=-3.0, section="verse",
         )
-        # Plate + Hall 与 electronic 同级（最湿梯队）
+        # Plate + Hall 在偏湿梯队（民美 plate=-8, hall=-14 为所有流派最湿）
         assert sends["reverb_plate"] >= -12.0, (
             f"民美 plate={sends['reverb_plate']} 应偏湿润"
         )
-        assert sends["reverb_hall"] >= -12.0, (
+        # Hall 基准为 -14，加偏差后应仍在 -15 以上（偏湿）
+        assert sends["reverb_hall"] >= -15.0, (
             f"民美 hall={sends['reverb_hall']} 应偏湿润"
         )
         # Room 退后避浑

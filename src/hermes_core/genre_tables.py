@@ -107,39 +107,42 @@ _GENRE_RVOX_MULTIPLIER: dict[str, float] = {
 # Western folk: intimate, dry.  Chinese folk bel canto: bright,
 # grand, long — wetter than Western genres but not muddy.
 _GENRE_REVERB_SEND_BASE: dict[str, dict[str, float]] = {
-    # 民谣 (Western folk): 自然、亲近、干声为主
-    "folk":                    {"plate": -18.0, "hall": -20.0, "room": -14.0},
-    "ballad":                  {"plate": -14.0, "hall": -16.0, "room": -12.0},
-    "pop":                     {"plate": -12.0, "hall": -14.0, "room": -16.0},
-    "rock":                    {"plate": -16.0, "hall": -14.0, "room": -14.0},
-    "electronic":              {"plate": -10.0, "hall": -10.0, "room": -18.0},
+    # 三路比例原则: Plate 最响(质感主力) > Room 中等(空间基底) > Hall 最轻(氛围)
+    # 参考: CMUSE Reverb Send Calculator / Gearspace / 学术论文 wet=-9LU
+    "folk":                    {"plate": -16.0, "hall": -22.0, "room": -19.0},
+    "ballad":                  {"plate": -10.0, "hall": -16.0, "room": -13.0},
+    "pop":                     {"plate": -13.0, "hall": -19.0, "room": -16.0},
+    "rock":                    {"plate": -14.0, "hall": -20.0, "room": -17.0},
+    "electronic":              {"plate": -9.0,  "hall": -15.0, "room": -12.0},
     # 中国民歌/民族美声：透亮水灵 + 大气绵长，混响偏大但不浑
-    "chinese_folk_bel_canto":  {"plate": -10.0, "hall": -10.0, "room": -14.0},
+    "chinese_folk_bel_canto":  {"plate": -8.0, "hall": -14.0, "room": -11.0},
 }
 
 # Delay send level base per genre (dB).  -99.0 = disabled for this genre.
+# 由用户直接指定，不参与信号偏差调整（保持可预测性）。
+# 民美值由 REAPER 实机试听确定。
 _GENRE_DELAY_SEND_BASE: dict[str, dict[str, float]] = {
     "folk":                    {"slap": -99.0, "throw": -99.0, "pingpong": -99.0},
-    "ballad":                  {"slap": -21.0, "throw": -24.0, "pingpong": -99.0},
-    "pop":                     {"slap": -15.0, "throw": -18.0, "pingpong": -20.0},
-    "rock":                    {"slap": -15.0, "throw": -18.0, "pingpong": -18.0},
-    "electronic":              {"slap": -11.0, "throw": -14.0, "pingpong": -16.0},
-    "chinese_folk_bel_canto":  {"slap": -15.0, "throw": -18.0, "pingpong": -20.0},
+    "ballad":                  {"slap": -26.0, "throw": -30.0, "pingpong": -99.0},
+    "pop":                     {"slap": -20.0, "throw": -28.0, "pingpong": -27.0},
+    "rock":                    {"slap": -20.0, "throw": -28.0, "pingpong": -27.0},
+    "electronic":              {"slap": -15.0, "throw": -22.0, "pingpong": -22.0},
+    "chinese_folk_bel_canto":  {"slap": -28.0, "throw": -27.8, "pingpong": -27.0},
 }
 
 # MicroShift AUX send level base per genre (dB, verse 基准, chorus +3dB)
 # 设计文档 §3.1
 _GENRE_MICROSHIFT_SEND: dict[str, float] = {
-    "folk":                    -16.0,
-    "ballad":                  -14.0,
-    "pop":                     -12.0,
-    "rock":                    -12.0,
-    "electronic":              -10.0,
-    "chinese_folk_bel_canto":  -14.0,
+    "folk":                    -13.0,
+    "ballad":                  -11.0,
+    "pop":                     -9.0,
+    "rock":                    -9.0,
+    "electronic":              -7.0,
+    "chinese_folk_bel_canto":  -11.0,
 }
 
 # Send level range (dB).  Outside these bounds is impractical.
-_SEND_LEVEL_MIN: float = -24.0
+_SEND_LEVEL_MIN: float = -35.0
 _SEND_LEVEL_MAX: float = -6.0
 _SEND_DISABLED_THRESHOLD: float = -90.0  # below this = bus not created
 
@@ -336,8 +339,17 @@ _GENRE_SPATIAL_PARAMS: dict[str, dict[str, dict[str, float]]] = {
 # 值通过 _resolve_spatial_plugin_key 匹配后查找。
 
 _SPATIAL_PARAM_FALLBACK_MAP: dict[str, dict[str, str]] = {
-    # Little Plate → ValhallaPlate 回退 (plate bus)
+    # LX480 / Little Plate → ValhallaPlate 回退 (plate bus)
     "ValhallaPlate": {
+        # LX480 → ValhallaPlate（主映射）
+        "E1: Reverb Time Mid (RTM)":       "Decay",
+        "E1: Pre Delay (PDL)":             "PreDelay",
+        "E1: Size (SIZ)":                  "Size",
+        "E1: Width (WID)":                 "Width",
+        "E1: High Frequency Cutoff (HFC)": "HighEQFreq",
+        "E1: Low Frequency Cutoff (LFC)":  "LowEQFreq",
+        "E1: Mix (MIX)":                   "Mix",
+        # Little Plate → ValhallaPlate（旧兼容）
         "Decay":      "Decay",
         "Low Cut":    "LowEQFreq",
         "Mix":        "Mix",
@@ -352,6 +364,38 @@ _SPATIAL_PARAM_FALLBACK_MAP: dict[str, dict[str, str]] = {
         "E1: High Frequency Cutoff (HFC)": "HighCut",
         "E1: Low Frequency Cutoff (LFC)":  "LowCut",
     },
+    # LX480 → ValhallaRoom 回退 (room bus)
+    "ValhallaRoom": {
+        "E1: Reverb Time Mid (RTM)":       "decay",
+        "E1: Pre Delay (PDL)":             "predelay",
+        "E1: Size (SIZ)":                  "lateSize",
+        "E1: High Frequency Cutoff (HFC)": "HiCut",
+        "E1: Low Frequency Cutoff (LFC)":  "LoCut",
+        "E1: Diffusion (DIF)":             "diffusion",
+        "E1: Bass Multiply (BAS)":         "RTBassMultiply",
+        "E1: Mix (MIX)":                   "mix",
+    },
+    # ValhallaRoom (Room Verb 首选) → 其他 room 插件回退
+    # 注意: ValhallaRoom 现在是 room bus 的主插件（取代 Seventh Heaven）
+    "Seventh Heaven": {
+        "decay":            "Decay Time",
+        "predelay":         "Pre-delay",
+        "mix":              "Dry/Wet Mix",
+        "HiCut":            "Low Pass Freq",
+        "LoCut":            "High Pass Freq",
+        "earlyLateMix":     "Early / Late Level",
+        "lateSize":         "Reflection Pattern",
+        "diffusion":        "Early / Late Level",
+        "RTBassMultiply":   "Low Decay Multiplier",
+        "RTHighMultiply":   "High Decay Multiplier",
+    },
+    "EMT 140": {
+        "decay":            "DampA",
+        "predelay":         "PreDly",
+        "mix":              "Mix",
+        "HiCut":            "DampA",
+        "LoCut":            "LowCut",
+    },
     # ValhallaRoom → Pro-R 2 回退 (room bus)
     "Pro-R": {
         "decay":    "Decay Rate",
@@ -361,15 +405,22 @@ _SPATIAL_PARAM_FALLBACK_MAP: dict[str, dict[str, str]] = {
         "HiCut":    "Brightness",
         "LoCut":    "Brightness",
     },
-    # EchoBoy → ValhallaDelay 回退 (slap/rhythm bus)
-    "ValhallaDelay": {
-        "Echo1Time":   "DelayL_Ms",
-        "Feedback":    "Feedback",
-        "Mix":         "Mix",
-        "Saturation":  "DriveIn",
-        "LowCut":      "LowCut",
-        "HighCut":     "HighCut",
-        "RhythmNote":  "DelayL_Ms",
+    # ValhallaDelay → EchoBoy 回退 (当 EchoBoy 作为回退加载时)
+    "EchoBoy": {
+        "DelayL_Ms":       "Echo1Time",
+        "DelayR_Ms":       "Echo1Time",
+        "DelayLSync":      "Echo1Mode",
+        "DelayRSync":      "Echo2Mode",
+        "DelayStyle":      "Mode",
+        "DriveIn":         "Saturation",
+        "Age":             "Saturation",
+        "Diffusion":       "Saturation",
+        "DiffSize":        "Saturation",
+        "Era":             "Style",
+        "ModRate":         "Saturation",
+        "ModDepth":        "Saturation",
+        "Ducking":         "Saturation",
+        "Width":           "Saturation",
     },
 }
 
@@ -379,10 +430,20 @@ _SPATIAL_PARAM_FALLBACK_MAP: dict[str, dict[str, str]] = {
 
 # Genre-specific tweaks to EQ derivation thresholds
 _GENRE_EQ_TWEAKS: dict[str, dict] = {
-    "pop":  {"presence_extra_db": 0.5, "mud_threshold_db": 3.0, "boost_scale": 1.0},
-    "rock": {"presence_extra_db": 0.0, "mud_threshold_db": 4.0, "boost_scale": 1.0},
-    "folk": {"presence_extra_db": 0.0, "mud_threshold_db": 3.0, "boost_scale": 0.75},
-    "default": {"presence_extra_db": 0.0, "mud_threshold_db": 3.0, "boost_scale": 1.0},
+    "pop":  {"mud_threshold_db": 3.0},
+    "rock": {"mud_threshold_db": 4.0},
+    "folk": {"mud_threshold_db": 3.0},
+    "default": {"mud_threshold_db": 3.0},
+}
+
+# EQ 百分比：dev × pct% → gain，Presence 和 Air 统一比例
+_GENRE_EQ_PCT: dict[str, float] = {
+    "folk":                    30.0,
+    "ballad":                  30.0,
+    "chinese_folk_bel_canto":  30.0,
+    "pop":                     35.0,
+    "rock":                    35.0,
+    "electronic":              40.0,
 }
 
 # Minimum Q factor for EQ resonance cuts (mirrors spectrum._MIN_Q_FACTOR)
@@ -475,16 +536,6 @@ _GENRE_1176_RATIO: dict[str, int] = {
     "chinese_folk_bel_canto":  4,
 }
 
-# Oxford Inflator Effect — 流派差异化（人声保守）
-_GENRE_INFLATOR_EFFECT: dict[str, float] = {
-    "folk":                    0.20,
-    "ballad":                  0.25,
-    "pop":                     0.30,
-    "rock":                    0.35,
-    "electronic":              0.40,
-    "chinese_folk_bel_canto":  0.25,
-}
-
 # UAD CL 1B Ratio — 流派差异化
 _GENRE_CL1B_RATIO: dict[str, float] = {
     "folk":                    2.0,
@@ -495,15 +546,6 @@ _GENRE_CL1B_RATIO: dict[str, float] = {
     "chinese_folk_bel_canto":  2.0,
 }
 
-# Maag EQ4 Air Band 频率 — 流派差异化
-_GENRE_MAAG_AIR_FREQ: dict[str, float] = {
-    "folk":                    10000.0,
-    "ballad":                  10000.0,
-    "pop":                     20000.0,
-    "rock":                    20000.0,
-    "electronic":              20000.0,
-    "chinese_folk_bel_canto":  10000.0,
-}
 
 # bx_2098 Sheen — 流派差异化
 _GENRE_BX2098_SHEEN: dict[str, bool] = {
@@ -524,6 +566,49 @@ _GENRE_PROL2_STYLE: dict[str, str] = {
     "electronic":              "Aggressive",
     "chinese_folk_bel_canto":  "Transparent",
 }
+
+# bx_2098 M/S EQ — 流派差异（V形宽度）
+# Mid = 中央（人声/底鼓/贝斯/军鼓）, Side = 宽度（混响/吉他/合成器/镲片）
+_BX2098_MLF: dict[str, float] = {
+    "electronic":1.5,"rock":1.0,"pop":1.0,"ballad":0.5,"chinese_folk_bel_canto":0.5,"folk":0.0,
+}
+_BX2098_MHFQ: dict[str, tuple[float, float]] = {
+    "pop":(3200.0,1.5),"rock":(2500.0,1.0),"electronic":(3500.0,0.5),
+    "ballad":(2800.0,1.0),"chinese_folk_bel_canto":(3000.0,0.0),"folk":(2500.0,0.0),
+}
+_BX2098_MHFG: dict[str, float] = {
+    "pop":1.0,"rock":0.5,"electronic":1.0,"ballad":0.5,"chinese_folk_bel_canto":0.0,"folk":0.0,
+}
+_BX2098_SLF: dict[str, float] = {
+    "electronic":-1.0,"rock":-0.5,"pop":-1.0,"ballad":-0.5,"chinese_folk_bel_canto":0.0,"folk":0.0,
+}
+_BX2098_SHMF: dict[str, float] = {
+    "electronic":-0.5,"rock":0.0,"pop":-0.5,"ballad":0.0,"chinese_folk_bel_canto":0.0,"folk":0.0,
+}
+_BX2098_SHFG: dict[str, float] = {
+    "electronic":2.0,"pop":2.0,"rock":1.5,"ballad":1.0,"chinese_folk_bel_canto":0.5,"folk":0.0,
+}
+_BX2098_THD: dict[str, float] = {
+    "rock":0.3,"electronic":0.2,"pop":0.15,"ballad":0.0,"chinese_folk_bel_canto":0.0,"folk":0.0,
+}
+
+# bx_2098 参数索引（REAPER TrackFX_SetParam）
+# Mid (Ch1) / Side (Ch2) / Global
+_BX2098_MID_HPF_FREQ, _BX2098_MID_HPF_IN, _BX2098_MID_HPF_PEAK = 4, 5, 7
+_BX2098_MID_LF_IN, _BX2098_MID_LF_FREQ, _BX2098_MID_LF_GAIN, _BX2098_MID_LF_PEAK, _BX2098_MID_LF_GLOW = 9, 10, 11, 12, 13
+_BX2098_MID_LMF_IN, _BX2098_MID_LMF_FREQ, _BX2098_MID_LMF_GAIN, _BX2098_MID_LMF_Q, _BX2098_MID_LMF_PEAK = 15, 16, 17, 18, 19
+_BX2098_MID_HMF_IN, _BX2098_MID_HMF_FREQ, _BX2098_MID_HMF_GAIN, _BX2098_MID_HMF_Q, _BX2098_MID_HMF_PEAK = 21, 22, 23, 24, 25
+_BX2098_MID_HF_IN, _BX2098_MID_HF_FREQ, _BX2098_MID_HF_GAIN, _BX2098_MID_HF_PEAK = 27, 28, 29, 30
+_BX2098_MID_SHEEN = 31
+_BX2098_SIDE_HPF_FREQ, _BX2098_SIDE_HPF_IN, _BX2098_SIDE_HPF_PEAK = 35, 36, 38
+_BX2098_SIDE_LF_IN, _BX2098_SIDE_LF_FREQ, _BX2098_SIDE_LF_GAIN, _BX2098_SIDE_LF_PEAK, _BX2098_SIDE_LF_GLOW = 40, 41, 42, 43, 44
+_BX2098_SIDE_LMF_IN, _BX2098_SIDE_LMF_Q = 46, 50
+_BX2098_SIDE_HMF_IN, _BX2098_SIDE_HMF_FREQ, _BX2098_SIDE_HMF_GAIN, _BX2098_SIDE_HMF_Q, _BX2098_SIDE_HMF_PEAK = 52, 53, 54, 55, 56
+_BX2098_SIDE_HF_IN, _BX2098_SIDE_HF_FREQ, _BX2098_SIDE_HF_GAIN, _BX2098_SIDE_HF_PEAK = 58, 59, 60, 61
+_BX2098_SIDE_SHEEN = 62
+_BX2098_GLOBAL_A, _BX2098_GLOBAL_B = 64, 65
+_BX2098_MONO_IN, _BX2098_MONO_FREQ = 68, 69
+_BX2098_THD_IN, _BX2098_THD_AMOUNT = 72, 73
 
 # ════════════════════════════════════════════════════════════════
 # 混响器流派配对表
@@ -807,3 +892,18 @@ def get_vocal_profile(gender: str = "", technique: str = "") -> VocalProfile:
 
 # 混响回退 — 首选不可用时的通用回退
 _FALLBACK_REVERB: str = "ValhallaVintageVerb"
+
+
+def _bpm_to_rtm_s(bpm: float, anchors: list[tuple[float, float]]) -> float:
+    """BPM 锚点线性插值 → RTM 秒数。"""
+    if bpm <= anchors[0][0]:
+        return anchors[0][1]
+    if bpm >= anchors[-1][0]:
+        return anchors[-1][1]
+    for i in range(len(anchors) - 1):
+        b0, s0 = anchors[i]
+        b1, s1 = anchors[i + 1]
+        if b0 <= bpm <= b1:
+            t = (bpm - b0) / (b1 - b0)
+            return round(s0 + t * (s1 - s0), 2)
+    return anchors[-1][1]

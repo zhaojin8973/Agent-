@@ -170,17 +170,50 @@ def mix_val(genre: str = "pop") -> float:
     return _MIX_BY_GENRE.get(genre, _MIX_BY_GENRE[_DEFAULT_GENRE])
 
 
-def tone_val(genre: str = "pop", presence_deficit: float = 0.0) -> float:
-    """流派 + 频谱暗亮度 → Tone 归一化值 (0.42-0.58)。
+def tone_val(genre: str = "pop", *,
+             spectrum: dict | None = None,
+             gender: str = "",
+             presence_deficit: float = 0.0) -> float:
+    """流派 + 频谱偏差 → Tone 归一化值 (0.42-0.58)。
 
-    Tone 是 pre-saturation tilt——影响哪些频率被失真：
+    两层结构：
+    - 纠错层：presence 相对能量 vs 参考模板偏差
+    - 美化层：流派驱动额外偏移
+
+    Tone 是 pre-saturation tilt：
     - < 0.5 (暗) → 低频先失真 → 暖厚
     - > 0.5 (亮) → 高频先失真 → 清晰颗粒
-
-    presence_deficit > 0 说明声音偏暗 → Tone 适当提高补偿。
     """
+    from hermes_core.vocal_ref import get_ref, relativize, deviation, is_outside
+
     base = _TONE_BASE.get(genre, _TONE_BASE[_DEFAULT_GENRE])
-    val = base + presence_deficit * 0.015
+
+    # ── 纠错层：presence 偏差 → Tone 偏移 ──
+    correction = 0.0
+    band_energy = spectrum.get("band_energy_db", {}) if spectrum else {}
+    if band_energy and "mid" in band_energy:
+        ref = get_ref(gender)
+        rel = relativize(band_energy)
+        pres_rel = rel.get("presence", -20.0)
+        pres_center, pres_tol = ref["presence"]
+        dev = deviation(pres_rel, pres_center)
+
+        if dev < -pres_tol:
+            # 高频偏暗 → Tone 提高，更多高频失真
+            correction = min(abs(dev + pres_tol) * 0.008, 0.06)
+        elif dev > pres_tol:
+            # 高频偏亮 → Tone 降低，保护高频
+            correction = -min(abs(dev - pres_tol) * 0.005, 0.04)
+    else:
+        # 回退
+        correction = presence_deficit * 0.008
+
+    # ── 美化层 ──
+    _ENHANCE = {"folk": -0.01, "ballad": 0.0, "chinese_folk_bel_canto": 0.0,
+                "pop": 0.02, "rock": 0.03, "rap": 0.03, "electronic": 0.04}
+    enhance = _ENHANCE.get(genre, 0.01)
+
+    val = base + correction + enhance
     return round(max(_TONE_MIN, min(_TONE_MAX, val)), 3)
 
 
@@ -199,15 +232,10 @@ def output_trim(drive_val: float) -> float:
 # Builder — 供 fx_builder 调用
 # ════════════════════════════════════════════════════════════════
 
-def build_params(ctx) -> dict | None:
-    """从 FXBuildContext 推导完整的 Decapitator 物理参数。
+def build_params(ctx, *, gender: str = "", spectrum: dict | None = None) -> dict | None:
+    """从 FXBuildContext + spectrum 推导 Decapitator 参数。
 
-    由 fx_builder._build_decapitator_params 在检测到 Decapitator 时调用。
-
-    Returns
-    -------
-    dict or None
-        物理参数字典，rms/peak 缺失时返回 None。
+    两层结构：纠错层 (vocal_ref) + 美化层。
     """
     rms = ctx.raw_rms_db
     peak = ctx.raw_peak_db
@@ -221,7 +249,7 @@ def build_params(ctx) -> dict | None:
     sty = style_code(genre)
     drv = drive(crest, genre)
     mix = mix_val(genre)
-    ton = tone_val(genre, presence)
+    ton = tone_val(genre, spectrum=spectrum, gender=gender, presence_deficit=presence)
     out = output_trim(drv)
 
     physical = {

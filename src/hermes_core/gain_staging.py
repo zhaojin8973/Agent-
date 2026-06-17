@@ -23,7 +23,8 @@ class GainStagingEngine:
     # ── 分轨导入 ───────────────────────────────────────────
 
     def import_stems(self, file_paths: list[str],
-                    position: float = 0.0) -> list[dict]:
+                    position: float = 0.0,
+                    output_dir: str | None = None) -> list[dict]:
         """Import audio files, creating one track per file named by basename.
 
         Returns list of {name, track_index, file_path, success}.
@@ -32,7 +33,7 @@ class GainStagingEngine:
         for path in file_paths:
             name = os.path.splitext(os.path.basename(path))[0]
             idx = self._tracks.create(name=name)
-            ok = self._tracks.import_media(idx, path, position)
+            ok = self._tracks.import_media(idx, path, position, output_dir)
             results.append({
                 "name": name,
                 "track_index": idx,
@@ -66,7 +67,8 @@ class GainStagingEngine:
                 genre: str = "pop",
                 bpm: float | None = None,
                 vocal_indices: list[int] | None = None,
-                backing_indices: list[int] | None = None) -> dict:
+                backing_indices: list[int] | None = None,
+                output_dir: str | None = None) -> dict:
         """公共入口：分轨分析 + 录音增益 + 状态转换。
 
         Returns {stems, genre, vocal_indices, backing_indices}.
@@ -74,6 +76,7 @@ class GainStagingEngine:
         return self._prepare_stems_impl(
             stem_paths, genre=genre, vocal_indices=vocal_indices,
             backing_indices=backing_indices,
+            output_dir=output_dir,
         )
 
     def _prepare_stems_impl(
@@ -83,9 +86,10 @@ class GainStagingEngine:
         genre: str = "pop",
         vocal_indices: list[int] | None = None,
         backing_indices: list[int] | None = None,
+        output_dir: str | None = None,
     ) -> dict:
         # 1. Import stems
-        imported = self.import_stems(stem_paths)
+        imported = self.import_stems(stem_paths, output_dir=output_dir)
 
         # 2. Classify roles
         if vocal_indices is None:

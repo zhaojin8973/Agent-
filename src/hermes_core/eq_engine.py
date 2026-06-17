@@ -17,6 +17,7 @@ from hermes_core.loudness_optimizer import EqIntent, EqBandIntent
 from hermes_core.spectrum import SpectrumReport, SpectrumAnalyzer
 from hermes_core.genre_tables import (
     _GENRE_EQ_TWEAKS,
+    _GENRE_EQ_PCT,
     _MIN_EQ_Q,
     _PROQ3_SHAPE,
     _PROQ3_FREQ_LOG_BASE,
@@ -119,13 +120,11 @@ def _derive_eq_intent(
         if offset > 0:
             hpf_hz = min(hpf_max, hpf_hz + offset)
 
-    # 斜率动态：sub 越重 → 越陡
-    if sub_excess > 12.0:
+    # 斜率动态：频率越低越陡
+    if hpf_hz < 100.0:
         slope_db_per_oct = 24.0
-    elif sub_excess > 6.0:
-        slope_db_per_oct = 18.0
     else:
-        slope_db_per_oct = 12.0
+        slope_db_per_oct = 18.0
 
     bands.append(EqBandIntent(
         band_type="hp", freq_hz=round(hpf_hz, 1), gain_db=0.0,
@@ -175,68 +174,50 @@ def _derive_eq_intent(
             reason=f"Mud cut@{mud_hz:.0f}Hz mud_ratio={report.mud_ratio_db:.1f}dB",
         ))
 
-    # ── Rule 4: Presence boost ──────────────────────────────
-    # Surgical 模式跳过：存在感提升留给 EQ232D / Maag。
+    # ── Rule 4: Presence boost + Rule 5: Air shelf（百分比驱动）─
     if not surgical_only:
-        # Pre-comp: higher threshold (4 dB deficit) to be conservative.
-        # Post-comp: lower threshold (2 dB) since compression can reduce presence.
-        presence_deficit_threshold = 4.0 if conservative else 2.0
-        if report.presence_deficit_db > presence_deficit_threshold:
-            boost_max = getattr(vp, "presence_boost_max_db", 3.0) if vp else 3.0
-            boost = min(report.presence_deficit_db * 0.5, boost_max)
-            boost += tweaks.get("presence_extra_db", 0.0)
-            boost *= boost_scale
-            if conservative:
-                boost *= 0.5  # pre-comp boosts at half strength
-            # 交叉频谱参考：伴奏抢占 → 减半；伴奏空 → 微增
-            if cross_report and role == "vocal":
-                boost *= getattr(cross_report, "vocal_presence_factor", 1.0)
-            # 用频谱分析找到的精准缺口频率（而非硬编码 3000Hz）
-            gap_hz = getattr(report, "presence_gap_hz", 3000.0) or 3000.0
-            bands.append(EqBandIntent(
-                band_type="bell", freq_hz=gap_hz, gain_db=round(boost, 1),
-                q=1.0,
-                reason=f"Presence boost@{gap_hz:.0f}Hz deficit={report.presence_deficit_db:.1f}dB",
-            ))
+        from hermes_core.vocal_ref import get_ref, relativize, deviation
 
-    # ── Rule 5: Air shelf ───────────────────────────────────
-    # Surgical 模式跳过：空气感留给 Maag EQ4。
-    if not surgical_only:
-        # Graduated: severe tilt + moderately low air deserves air too.
-        # Pre-comp: thresholds are stricter (air < -35, tilt < -5).
-        if conservative:
-            air_low = report.air_level_db < -35.0
-            air_moderate = report.air_level_db < -28.0
-            tilt_dark = report.spectral_tilt_db_per_octave < -5.0
-            tilt_very_dark = report.spectral_tilt_db_per_octave < -6.5
-            air_gain_scale = 0.5
-        else:
-            air_low = report.air_level_db < -30.0
-            air_moderate = report.air_level_db < -22.0
-            tilt_dark = report.spectral_tilt_db_per_octave < -3.0
-            tilt_very_dark = report.spectral_tilt_db_per_octave < -4.5
-            air_gain_scale = 1.0
+        band = getattr(report, "band_energy_db", {}) or {}
+        ref = get_ref(getattr(vp, "gender", "") if vp else "") if band and "mid" in band else None
 
-        air_gain = 0.0
-        if air_low and tilt_dark:
-            air_gain = 1.5  # both severe: full boost
-        elif tilt_very_dark and air_moderate:
-            air_gain = 1.0  # very dark + moderately low air
-        elif air_low and tilt_very_dark:
-            air_gain = 1.5  # severe air loss + very dark
+        if ref:
+            rel = relativize(band)
 
-        if air_gain > 0.0:
-            air_gain *= boost_scale
-            air_gain *= air_gain_scale
-            # 交叉频谱参考：伴奏 air 抢占 → 减量/跳过
-            if cross_report and role == "vocal":
-                air_gain *= getattr(cross_report, "vocal_air_factor", 1.0)
-            rolloff_hz = getattr(report, "air_rolloff_hz", 8000.0) or 8000.0
-            bands.append(EqBandIntent(
-                band_type="high_shelf", freq_hz=rolloff_hz, gain_db=round(air_gain, 1),
-                q=0.7,
-                reason=f"Air shelf@{rolloff_hz:.0f}Hz air={report.air_level_db:.1f}dB tilt={report.spectral_tilt_db_per_octave:.1f}dB/oct",
-            ))
+            for rule_key, band_key, band_type, default_q in [
+                ("presence", "presence", "bell",        1.0),
+                ("air",      "air",      "high_shelf",  0.7),
+            ]:
+                band_rel = rel.get(band_key, -32.0)
+                ref_center, ref_tol = ref[band_key]
+                dev = deviation(band_rel, ref_center)
+
+                # 仅在偏差超出容差时生效
+                if abs(dev) <= ref_tol:
+                    continue
+
+                pct = _GENRE_EQ_PCT.get(genre, 30)
+                gain_db = round(-dev * pct / 100.0, 1)
+                if conservative:
+                    gain_db = round(gain_db * 0.5, 1)
+
+                if abs(gain_db) < 0.3:
+                    continue
+
+                if band_key == "presence":
+                    gap_hz = getattr(report, "presence_gap_hz", 3000.0) or 3000.0
+                    reason = f"Presence{gain_db:+.1f}dB@{gap_hz:.0f}Hz dev={dev:+.1f}dB"
+                    bands.append(EqBandIntent(
+                        band_type="bell", freq_hz=gap_hz, gain_db=gain_db,
+                        q=default_q, reason=reason,
+                    ))
+                else:
+                    rolloff_hz = getattr(report, "air_rolloff_hz", 8000.0) or 8000.0
+                    reason = f"Air{gain_db:+.1f}dB@{rolloff_hz:.0f}Hz dev={dev:+.1f}dB"
+                    bands.append(EqBandIntent(
+                        band_type="high_shelf", freq_hz=rolloff_hz,
+                        gain_db=gain_db, q=default_q, reason=reason,
+                    ))
 
     # ── Assemble ─────────────────────────────────────────────
     # Cap at 8 bands (Pro-Q 3 limit).  Priority order:
@@ -244,7 +225,7 @@ def _derive_eq_intent(
     #   2. Resonance cuts (most prominent first)
     #   3. Tonal balance (mud → presence → air)
     hpf_bands = [b for b in bands if b.band_type == "hp"]
-    reso_bands = [b for b in bands if b.band_type == "bell" and b.gain_db < -2.0]
+    reso_bands = [b for b in bands if b.band_type == "bell" and b.gain_db <= -2.0]
     tonal_bands = [b for b in bands if b not in hpf_bands and b not in reso_bands]
 
     capped: list[EqBandIntent] = []

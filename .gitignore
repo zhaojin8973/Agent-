@@ -12,5 +12,6 @@ tests/_test_midi_tmp/
 tests/_test_spectrum_tmp/
 Backups/
 output_*/
+output/
 *.bak
 backup_session.md

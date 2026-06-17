@@ -431,6 +431,84 @@ PLUGIN_REGISTRY: dict[str, dict] = {
         },
     },
 
+    # ── 母带插件 ──────────────────────────────────────────
+    # bx_2098 EQ (Plugin Alliance) — 四段母带 EQ（LF/LMF/HMF/HF）+ M/S + THD
+    # 每通道：LF Shelf + LMF Bell + HMF Bell + HF Shelf
+    "VST3: bx_2098 EQ (Plugin Alliance)": {
+        "type": "eq_mastering",
+        "params": {
+            # ── Channel 1 ──
+            "HPF Frequency 1":  {"range": (10.0, 400.0),    "curve": "linear"},
+            "HPF In 1":         {"range": (0.0, 1.0),       "curve": "linear"},
+            "LF In 1":          {"range": (0.0, 1.0),       "curve": "linear"},
+            "LF Frequency 1":   {"range": (10.0, 400.0),    "curve": "linear"},
+            "LF Gain 1":        {"range": (-5.0, 5.0),      "curve": "linear"},
+            "LF Glow 1":        {"range": (0.0, 1.0),       "curve": "linear"},
+            "LMF In 1":         {"range": (0.0, 1.0),       "curve": "linear"},
+            "LMF Frequency 1":  {"range": (100.0, 2000.0),  "curve": "linear"},
+            "LMF Gain 1":       {"range": (-5.0, 5.0),      "curve": "linear"},
+            "LMF Q 1":          {"range": (0.1, 5.0),       "curve": "linear"},
+            "LMF Notch 1":      {"range": (0.0, 1.0),       "curve": "linear"},
+            "HMF In 1":         {"range": (0.0, 1.0),       "curve": "linear"},
+            "HMF Frequency 1":  {"range": (800.0, 12000.0), "curve": "linear"},
+            "HMF Gain 1":       {"range": (-5.0, 5.0),      "curve": "linear"},
+            "HMF Q 1":          {"range": (0.1, 5.0),       "curve": "linear"},
+            "HMF Notch 1":      {"range": (0.0, 1.0),       "curve": "linear"},
+            "HF In 1":          {"range": (0.0, 1.0),       "curve": "linear"},
+            "HF Frequency 1":   {"range": (2500.0, 40000.0),"curve": "linear"},
+            "HF Gain 1":        {"range": (-5.0, 5.0),      "curve": "linear"},
+            "HF Sheen 1":       {"range": (0.0, 1.0),       "curve": "linear"},
+            # ── Channel 2（与 Ch1 同步）──
+            "HPF Frequency 2":  {"range": (10.0, 400.0),    "curve": "linear"},
+            "HPF In 2":         {"range": (0.0, 1.0),       "curve": "linear"},
+            "LF In 2":          {"range": (0.0, 1.0),       "curve": "linear"},
+            "LF Frequency 2":   {"range": (10.0, 400.0),    "curve": "linear"},
+            "LF Gain 2":        {"range": (-5.0, 5.0),      "curve": "linear"},
+            "LF Glow 2":        {"range": (0.0, 1.0),       "curve": "linear"},
+            "LMF In 2":         {"range": (0.0, 1.0),       "curve": "linear"},
+            "LMF Frequency 2":  {"range": (100.0, 2000.0),  "curve": "linear"},
+            "LMF Gain 2":       {"range": (-5.0, 5.0),      "curve": "linear"},
+            "LMF Q 2":          {"range": (0.1, 5.0),       "curve": "linear"},
+            "LMF Notch 2":      {"range": (0.0, 1.0),       "curve": "linear"},
+            "HMF In 2":         {"range": (0.0, 1.0),       "curve": "linear"},
+            "HMF Frequency 2":  {"range": (800.0, 12000.0), "curve": "linear"},
+            "HMF Gain 2":       {"range": (-5.0, 5.0),      "curve": "linear"},
+            "HMF Q 2":          {"range": (0.1, 5.0),       "curve": "linear"},
+            "HMF Notch 2":      {"range": (0.0, 1.0),       "curve": "linear"},
+            "HF In 2":          {"range": (0.0, 1.0),       "curve": "linear"},
+            "HF Frequency 2":   {"range": (2500.0, 40000.0),"curve": "linear"},
+            "HF Gain 2":        {"range": (-5.0, 5.0),      "curve": "linear"},
+            "HF Sheen 2":       {"range": (0.0, 1.0),       "curve": "linear"},
+            # ── 全局 ──
+            "Mid/Side":         {"range": (0.0, 1.0),       "curve": "linear"},
+            "Mono Maker In":    {"range": (0.0, 1.0),       "curve": "linear"},
+            "Mono Maker":       {"range": (20.0, 20000.0),  "curve": "linear"},
+            "THD In":           {"range": (0.0, 1.0),       "curve": "linear"},
+            "THD":              {"range": (0.0, 1.0),       "curve": "linear"},
+        },
+    },
+
+    # The God Particle (Cradle) — Jaycen Joshua 母带链
+    # 设计理念："穿过去就好"，Input 驱动整体谐波/压缩/宽度
+    "VST3: The God Particle (Cradle)": {
+        "type": "god_particle",
+        "params": {
+            "Input Gain":          {"range": (0.0, 1.0), "curve": "linear"},
+            "Output Gain":         {"range": (0.0, 1.0), "curve": "linear"},
+            "EQ Low Gain":         {"range": (0.0, 1.0), "curve": "linear"},
+            "EQ Mid Gain":         {"range": (0.0, 1.0), "curve": "linear"},
+            "EQ High Gain":        {"range": (0.0, 1.0), "curve": "linear"},
+            "EQ Bypass":           {"range": (0.0, 1.0), "curve": "linear"},
+            "Character":           {"range": (0.0, 1.0), "curve": "linear"},
+            "Character Bypass":    {"range": (0.0, 1.0), "curve": "linear"},
+            "Limiter Input Gain":  {"range": (0.0, 1.0), "curve": "linear"},
+            "Limiter Bypass":      {"range": (0.0, 1.0), "curve": "linear"},
+            "Bypass":              {"range": (0.0, 1.0), "curve": "linear"},
+            "Wet":                 {"range": (0.0, 1.0), "curve": "linear"},
+            "Delta":               {"range": (0.0, 1.0), "curve": "linear"},
+        },
+    },
+
     # ── EQs ────────────────────────────────────────────
     # Pro-Q 3 verified via reapy readback (2026-05-31).
     # All per-band params are pre-normalised (0–1) by _apply_proq3_eq().
@@ -679,6 +757,19 @@ PLUGIN_REGISTRY: dict[str, dict] = {
         "params": {},
     },
 
+    # ── MicroShift (Soundtoys) — 立体声展宽 ─────────────
+    "VST3: MicroShift (Soundtoys)": {
+        "type": "doubler",
+        "params": {
+            "Mix":       {"range": (0.0, 1.0), "curve": "linear"},
+            "InputGain": {"range": (0.0, 1.0), "curve": "linear"},
+            "Detune":    {"range": (0.0, 1.0), "curve": "linear"},
+            "Delay":     {"range": (0.0, 1.0), "curve": "linear"},
+            "Focus":     {"range": (0.0, 1.0), "curve": "linear"},
+            "Style":     {"range": (0.0, 1.0), "curve": "linear"},
+        },
+    },
+
     # ── Spatial: Reverbs ────────────────────────────────
     "VST: Little Plate (Soundtoys)": {
         "type": "reverb",
@@ -725,16 +816,20 @@ PLUGIN_REGISTRY: dict[str, dict] = {
     "VST3: LX480 v4 (Relab Development)": {
         "type": "reverb",
         "params": {
-            # E1 引擎关键参数
-            "E1: Reverb Time Mid (RTM)":        {"range": (0.0, 1.0), "curve": "linear"},
-            "E1: Pre Delay (PDL)":              {"range": (0.0, 1.0), "curve": "linear"},
+            # E1 引擎参数 + 全局参数
+            "E1: Algorithm":                    {"range": (0.0, 1.0), "curve": "linear"},
             "E1: Size (SIZ)":                   {"range": (0.0, 1.0), "curve": "linear"},
+            "E1: Reverb Time Mid (RTM)":        {"range": (0.0, 1.0), "curve": "linear"},
+            "E1: Shape (SHP)":                  {"range": (0.0, 1.0), "curve": "linear"},
+            "E1: Spread (SPR)":                 {"range": (0.0, 1.0), "curve": "linear"},
+            "E1: Pre Delay (PDL)":              {"range": (0.0, 1.0), "curve": "linear"},
+            "E1: Width (WID)":                  {"range": (0.0, 1.0), "curve": "linear"},
             "E1: High Frequency Cutoff (HFC)":  {"range": (0.0, 1.0), "curve": "linear"},
             "E1: Low Frequency Cutoff (LFC)":   {"range": (0.0, 1.0), "curve": "linear"},
-            "E1: Mix (MIX)":                    {"range": (0.0, 1.0), "curve": "linear"},
-            "E1: Bass Multiply (BAS)":          {"range": (0.0, 1.0), "curve": "linear"},
             "E1: Diffusion (DIF)":              {"range": (0.0, 1.0), "curve": "linear"},
-            "E1: Width (WID)":                  {"range": (0.0, 1.0), "curve": "linear"},
+            "E1: Bass Multiply (BAS)":          {"range": (0.0, 1.0), "curve": "linear"},
+            "E1: Decay Optimization (DCO)":     {"range": (0.0, 1.0), "curve": "linear"},
+            "E1: Mix (MIX)":                    {"range": (0.0, 1.0), "curve": "linear"},
             "E1: Reverb Mode (MOD)":            {"range": (0.0, 1.0), "curve": "linear"},
         },
     },
@@ -802,6 +897,37 @@ PLUGIN_REGISTRY: dict[str, dict] = {
             "Width":   {"range": (0.0, 1.0), "curve": "linear"},   # 立体声宽度
             "Mix":     {"range": (0.0, 1.0), "curve": "linear"},   # 干湿比
             "LowCut":  {"range": (0.0, 1.0), "curve": "linear"},   # 低切
+        },
+    },
+
+    # ── Seventh Heaven Professional (LiquidSonics) ──────
+    # Bricasti M7 仿真，Room Verb 首选插件。
+    # 参数扫描: 2026-06-12 REAPER TrackFX_GetParamName (71 params)
+    "VST3: Seventh Heaven Professional (LiquidSonics)": {
+        "type": "reverb",
+        "params": {
+            "Master Gain":              {"range": (0.0, 1.0), "curve": "linear"},
+            "Dry/Wet Mix":              {"range": (0.0, 1.0), "curve": "linear"},
+            "Decay Time":               {"range": (0.0, 1.0), "curve": "linear"},
+            "Early / Late Level":       {"range": (0.0, 1.0), "curve": "linear"},
+            "VLF Reverb Level":         {"range": (0.0, 1.0), "curve": "linear"},
+            "Early Rolloff":            {"range": (0.0, 1.0), "curve": "linear"},
+            "Late Rolloff":             {"range": (0.0, 1.0), "curve": "linear"},
+            "Pre-delay":                {"range": (0.0, 1.0), "curve": "linear"},
+            "Pre-delay Sync":           {"range": (0.0, 1.0), "curve": "linear"},
+            "Pre-delay Tempo":          {"range": (0.0, 1.0), "curve": "linear"},
+            "Reflection Pattern":       {"range": (0.0, 1.0), "curve": "linear"},
+            "Low Decay Mul Freq":       {"range": (0.0, 1.0), "curve": "linear"},
+            "High Decay Mul Freq":      {"range": (0.0, 1.0), "curve": "linear"},
+            "Low Decay Multiplier":     {"range": (0.0, 1.0), "curve": "linear"},
+            "High Decay Multiplier":    {"range": (0.0, 1.0), "curve": "linear"},
+            "Low Pass Freq":            {"range": (0.0, 1.0), "curve": "linear"},
+            "High Pass Freq":           {"range": (0.0, 1.0), "curve": "linear"},
+            "Low Pass Enable":          {"range": (0.0, 1.0), "curve": "linear"},
+            "High Pass Enable":         {"range": (0.0, 1.0), "curve": "linear"},
+            "Bypass":                   {"range": (0.0, 1.0), "curve": "linear"},
+            "Wet":                      {"range": (0.0, 1.0), "curve": "linear"},
+            "Delta":                    {"range": (0.0, 1.0), "curve": "linear"},
         },
     },
 

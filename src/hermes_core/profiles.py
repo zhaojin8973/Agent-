@@ -241,7 +241,8 @@ class MixingProfile:
         try:
             return cls.from_yaml(yaml_path)
         except (FileNotFoundError, OSError):
-            return cls()  # 返回默认 Profile
+            log.warning("Profile YAML not found: %s, using default chain", yaml_path)
+            return cls(vocal_chain=get_default_vocal_chain())
 
     @classmethod
     def from_yaml(cls, path: str) -> "MixingProfile":
@@ -342,12 +343,10 @@ class MixingProfile:
 
 
 def get_default_vocal_chain() -> list[FXPreset]:
-    """Return the default 9-stage vocal processing chain.
+    """返回默认 9 段人声处理链 (Vocal A: 无 UAD)。
 
-    ``HPF → Saturation → Surgical EQ → Peak Comp → De-Esser
-    → Dynamic EQ → RMS Comp → Color EQ → Doubler``
-
-    This is the recommended 9-stage vocal chain per the MIXING_KNOWLEDGE_BASE.
+    与 ``profiles/vocal_a_chinese_bel_canto.yaml`` 等 YAML 保持一致。
+    已废弃 SSLEQ/MicroShift 等早期测试插件。
     """
     return [
         FXPreset(
@@ -356,37 +355,35 @@ def get_default_vocal_chain() -> list[FXPreset]:
             eq_position="pre",
         ),
         FXPreset(
-            name="VST3: Decapitator Mono (Soundtoys)",
-            fx_type="saturation",
-        ),
-        FXPreset(
-            name="VST: FabFilter Pro-Q 3 (FabFilter)",
-            fx_type="eq",
-            eq_position="solo",
-        ),
-        FXPreset(
             name="VST3: CLA-76 Mono (Waves)",
             fx_type="fet",
+        ),
+        FXPreset(
+            name="VST3: Decapitator (Soundtoys)",
+            fx_type="saturation",
         ),
         FXPreset(
             name="VST: FabFilter Pro-DS (FabFilter)",
             fx_type="deesser",
         ),
         FXPreset(
-            name="VST: FabFilter Pro-Q 3 (FabFilter)",
-            fx_type="dynamic_eq",
+            name="VST3: Bettermaker EQ232D (Plugin Alliance)",
+            fx_type="color_eq_232d",
         ),
         FXPreset(
             name="VST3: RVox Mono (Waves)",
             fx_type="rvox",
         ),
         FXPreset(
-            name="VST3: SSLEQ Mono (Waves)",
-            fx_type="eq",
-            eq_position="post",
+            name="VST3: Oxford Inflator (Sonnox)",
+            fx_type="harmonic",
         ),
         FXPreset(
-            name="VST3: MicroShift (Soundtoys)",
-            fx_type="doubler",
+            name="VST3: Shadow Hills Mastering Compressor (Plugin Alliance)",
+            fx_type="tube_opto_sh",
+        ),
+        FXPreset(
+            name="VST3: Maag EQ4 (Plugin Alliance)",
+            fx_type="air_eq",
         ),
     ]

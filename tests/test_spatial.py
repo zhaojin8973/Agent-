@@ -20,7 +20,6 @@ from hermes_core.genre_tables import (
     _DELAY_BUS_TYPES,
     _SEND_LEVEL_MIN,
     _SEND_LEVEL_MAX,
-    _SEND_DISABLED_THRESHOLD,
 )
 from hermes_core.spatial_engine import _compute_spatial_sends
 from hermes_core.audio_utils import note_to_ms
@@ -338,6 +337,49 @@ class TestComputeSpatialSends:
         assert sibilant["reverb_plate"] <= normal["reverb_plate"], (
             "高齿音应降低 plate 发送量"
         )
+
+    def test_delay_table_values_match_spec(self):
+        """民美 delay 使用用户指定值。"""
+        sends = _compute_spatial_sends(
+            genre="chinese_folk_bel_canto", crest_factor_db=12.0,
+            presence_deficit_db=2.0, mud_ratio_db=-3.0,
+            section="verse",
+        )
+        # 用户指定：Slap=-20, Throw=-27.8, PingPong=-27
+        assert sends["delay_slap"] == -20.0
+        assert sends["delay_throw"] == -27.8
+        assert sends["delay_pingpong"] == -27.0
+
+    def test_delay_values_independent_of_signal(self):
+        """Delay 发送量不受信号偏差影响（用户直接指定）。"""
+        sends_neutral = _compute_spatial_sends(
+            genre="pop", crest_factor_db=12.0,
+            presence_deficit_db=2.0, mud_ratio_db=-3.0,
+            section="verse",
+        )
+        sends_high_crest = _compute_spatial_sends(
+            genre="pop", crest_factor_db=18.0,
+            presence_deficit_db=8.0, mud_ratio_db=5.0,
+            section="bridge",
+        )
+        # Delay 不随信号变化
+        assert sends_neutral["delay_slap"] == sends_high_crest["delay_slap"]
+        assert sends_neutral["delay_throw"] == sends_high_crest["delay_throw"]
+        assert sends_neutral["delay_pingpong"] == sends_high_crest["delay_pingpong"]
+
+    def test_delay_slap_lower_than_throw(self):
+        """非禁用流派中 delay 发送量在有效范围内且低于混响。"""
+        for genre in ["ballad", "pop", "rock", "electronic",
+                       "chinese_folk_bel_canto"]:
+            sends = _compute_spatial_sends(
+                genre=genre, crest_factor_db=12.0,
+                presence_deficit_db=2.0, mud_ratio_db=-3.0,
+                section="verse",
+            )
+            if sends["delay_slap"] is not None:
+                assert sends["delay_slap"] < sends["reverb_plate"], (
+                    f"{genre}: slap={sends['delay_slap']} 应 < plate={sends['reverb_plate']}"
+                )
 
 
 # ════════════════════════════════════════════════════════════════

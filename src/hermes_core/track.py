@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from hermes_core.bridge import ReaperBridge
-from hermes_core.audio_utils import db_to_norm, norm_to_db, _register_pcm_temp
+from hermes_core.audio_utils import db_to_norm, norm_to_db
 
 log = logging.getLogger(__name__)
 
@@ -57,8 +57,12 @@ def _wav_duration_fallback(file_path: str) -> float:
     raise ValueError(f"WAV data chunk not found in: {file_path}")
 
 
-def _convert_to_pcm(file_path: str) -> str:
-    """Convert a float WAV to 16-bit PCM temp file that REAPER can import."""
+def _convert_to_pcm(file_path: str, output_dir: str | None = None) -> str:
+    """Convert a float WAV to 16-bit PCM file that REAPER can import.
+
+    若 *output_dir* 给定，PCM 写入该目录（工程文件旁，持久化）；
+    否则写入系统临时目录（兼容旧调用）。
+    """
     from hermes_core.signal import _read_wav_manual
     sw, sr, channels, raw = _read_wav_manual(file_path)
     if sw == 4:
@@ -76,24 +80,27 @@ def _convert_to_pcm(file_path: str) -> str:
     pcm_f32 = pcm_f32.reshape(-1, channels)
     i16 = (pcm_f32 * 32767.0).clip(-32768, 32767).astype(np.int16)
 
-    fd, tmp_path = tempfile.mkstemp(suffix=".wav", prefix="hermes_pcm_")
-    os.close(fd)
+    # PCM 写入 output_dir（持久化）或系统临时目录（兼容旧逻辑）
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+        base = os.path.splitext(os.path.basename(file_path))[0]
+        pcm_path = os.path.join(output_dir, f"{base}_pcm.wav")
+    else:
+        fd, pcm_path = tempfile.mkstemp(suffix=".wav", prefix="hermes_pcm_")
+        os.close(fd)
     try:
-        with wave.open(tmp_path, "wb") as wf:
+        with wave.open(pcm_path, "wb") as wf:
             wf.setnchannels(channels)
             wf.setsampwidth(2)
             wf.setframerate(sr)
             wf.writeframes(i16.tobytes())
-        # 注册到 atexit 兜底清理，防止调用方忘记清理
-        _register_pcm_temp(tmp_path)
     except Exception:
-        # 写入失败时清理已创建的临时文件
         try:
-            os.unlink(tmp_path)
+            os.unlink(pcm_path)
         except OSError:
             pass
         raise
-    return tmp_path
+    return pcm_path
 
 
 @dataclass
@@ -245,23 +252,24 @@ class TrackManager:
     # ── Media Import ────────────────────────────────────────
 
     def import_media(self, track_index: int, file_path: str,
-                     position: float = 0.0) -> bool:
+                     position: float = 0.0,
+                     output_dir: str | None = None) -> bool:
         """Import an audio file onto a track at the given position (seconds).
         Uses high-level reapy API to bypass ARM64 RPR_InsertMedia bug.
         Returns True on success.
+
+        *output_dir*: PCM 文件持久化目录（避免 temp 清理导致音频丢失）。
         """
         if not os.path.isfile(file_path):
             return False
         import_path = os.path.abspath(file_path)
-        is_temp = False
         try:
             try:
                 with wave.open(file_path, "rb") as wf:
                     duration = wf.getnframes() / max(wf.getframerate(), 1)
             except wave.Error:
-                # Float WAV — convert to 16-bit PCM temp file for import
-                import_path = _convert_to_pcm(file_path)
-                is_temp = True
+                # Float WAV — 转为 16-bit PCM，写入持久目录
+                import_path = _convert_to_pcm(file_path, output_dir)
                 duration = _wav_duration_fallback(file_path)
             rpr = self._bridge.rpr
             api = rpr.reascript_api
@@ -278,15 +286,10 @@ class TrackManager:
         except Exception as e:
             log.warning("import_media failed for %s: %s", file_path, e)
             return False
-        finally:
-            if is_temp and os.path.isfile(import_path):
-                try:
-                    os.unlink(import_path)
-                except OSError:
-                    pass
 
     def import_stems(self, stem_map: dict[str, str],
-                     position: float = 0.0) -> list[dict]:
+                     position: float = 0.0,
+                     output_dir: str | None = None) -> list[dict]:
         """Import multiple stems, creating one track per stem.
 
         stem_map: {track_name: file_path}
@@ -295,7 +298,7 @@ class TrackManager:
         results = []
         for name, path in stem_map.items():
             idx = self.create(name=name)
-            ok = self.import_media(idx, path, position)
+            ok = self.import_media(idx, path, position, output_dir)
             results.append({
                 "name": name,
                 "track_index": idx,

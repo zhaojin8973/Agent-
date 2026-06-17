@@ -58,6 +58,27 @@ from hermes_core.genre_tables import (
     _SEND_LEVEL_MIN,
     _SEND_LEVEL_MAX,
     _GENRE_MICROSHIFT_SEND,
+    _SPATIAL_PARAM_FALLBACK_MAP,
+    # bx_2098 M/S EQ 流派表
+    _GENRE_BX2098_SHEEN,
+    _BX2098_MLF, _BX2098_MHFQ, _BX2098_MHFG,
+    _BX2098_SLF, _BX2098_SHMF, _BX2098_SHFG, _BX2098_THD,
+    # bx_2098 参数索引
+    _BX2098_MID_HPF_FREQ, _BX2098_MID_HPF_IN, _BX2098_MID_HPF_PEAK,
+    _BX2098_MID_LF_IN, _BX2098_MID_LF_FREQ, _BX2098_MID_LF_GAIN, _BX2098_MID_LF_PEAK, _BX2098_MID_LF_GLOW,
+    _BX2098_MID_LMF_IN, _BX2098_MID_LMF_FREQ, _BX2098_MID_LMF_GAIN, _BX2098_MID_LMF_Q, _BX2098_MID_LMF_PEAK,
+    _BX2098_MID_HMF_IN, _BX2098_MID_HMF_FREQ, _BX2098_MID_HMF_GAIN, _BX2098_MID_HMF_Q, _BX2098_MID_HMF_PEAK,
+    _BX2098_MID_HF_IN, _BX2098_MID_HF_FREQ, _BX2098_MID_HF_GAIN, _BX2098_MID_HF_PEAK,
+    _BX2098_MID_SHEEN,
+    _BX2098_SIDE_HPF_FREQ, _BX2098_SIDE_HPF_IN, _BX2098_SIDE_HPF_PEAK,
+    _BX2098_SIDE_LF_IN, _BX2098_SIDE_LF_FREQ, _BX2098_SIDE_LF_GAIN, _BX2098_SIDE_LF_PEAK, _BX2098_SIDE_LF_GLOW,
+    _BX2098_SIDE_LMF_IN, _BX2098_SIDE_LMF_Q,
+    _BX2098_SIDE_HMF_IN, _BX2098_SIDE_HMF_FREQ, _BX2098_SIDE_HMF_GAIN, _BX2098_SIDE_HMF_Q, _BX2098_SIDE_HMF_PEAK,
+    _BX2098_SIDE_HF_IN, _BX2098_SIDE_HF_FREQ, _BX2098_SIDE_HF_GAIN, _BX2098_SIDE_HF_PEAK,
+    _BX2098_SIDE_SHEEN,
+    _BX2098_GLOBAL_A, _BX2098_GLOBAL_B,
+    _BX2098_MONO_IN, _BX2098_MONO_FREQ,
+    _BX2098_THD_IN, _BX2098_THD_AMOUNT,
 )
 from hermes_core.comp_engine import (
     _derive_compressor_intent,
@@ -297,6 +318,9 @@ class MixingEngine:
         self._reverb_send_node = None
         self._bpm = None
         self._last_spectrum: dict = {}
+        self._post_rvox_signal: dict = {}
+        self._post_balance_signal: dict = {}
+        self._master_spectrum: dict = {}
         self._dirty = False
         self._pipeline_state = PipelineState.CREATED
         self._spatial_result.clear()
@@ -306,7 +330,8 @@ class MixingEngine:
                       genre: str = "pop",
                       bpm: float | None = None,
                       gender: str = "",
-                      technique: str = ""):
+                      technique: str = "",
+                      skip_spatial: bool = False):
         """Apply a :class:`MixingProfile` — FX chains, sends, and auto-compression.
 
         1. **EQ baseline** — conservative HPF + gentle presence boost.
@@ -455,23 +480,26 @@ class MixingEngine:
                                 log.debug("Backing ducking failed: %s", exc)
 
         # ── 空间效果器：Reverb×3 + Delay×3 + MicroShift AUX ──
-        from hermes_core.signal import SignalAnalyzer
-        sd = stem_data.get(0, {})
-        crest_db = sd.get("crest_factor_db", 12.0)
-        presence_db = sd.get("presence_deficit_db", 0.0)
-        mud_db = sd.get("mud_ratio_db", 0.0)
+        # 优先使用 post-RVox 新鲜数据，回退到 stem_data
+        post_sig = getattr(self, "_post_rvox_signal", {}) or {}
+        crest_db = post_sig.get("crest_factor_db") or stem_data.get(0, {}).get("crest_factor_db", 12.0)
+        presence_db = post_sig.get("presence_deficit") if post_sig.get("presence_deficit") is not None else stem_data.get(0, {}).get("presence_deficit_db", 0.0)
+        mud_db = stem_data.get(0, {}).get("mud_ratio_db", 0.0)  # post_rvox 没有 mud_ratio，保持旧源
 
-        spatial_sends = _compute_spatial_sends(
-            genre=genre,
-            crest_factor_db=crest_db,
-            presence_deficit_db=presence_db,
-            mud_ratio_db=mud_db,
-            section="verse",
-        )
-        self._spatial_result = self.build_spatial_chain(
-            vocal_track, spatial_sends, genre, _bpm,
-            variant=getattr(profile, "chain_variant", ""),
-        )
+        if not skip_spatial:
+            spatial_sends = _compute_spatial_sends(
+                genre=genre,
+                crest_factor_db=crest_db,
+                presence_deficit_db=presence_db,
+                mud_ratio_db=mud_db,
+                section="verse",
+            )
+            self._spatial_result = self.build_spatial_chain(
+                vocal_track, spatial_sends, genre, _bpm,
+                variant=getattr(profile, "chain_variant", ""),
+            )
+        else:
+            self._spatial_result = {}
 
         self._mark_stage("apply_profile")
         self._record_audit(
@@ -567,7 +595,10 @@ class MixingEngine:
             elif "decapitator" in actual_name.lower():
                 from hermes_core.decapitator import build_params as decap_build
                 from hermes_core.decapitator import normalize_params as decap_normalize
-                physical = decap_build(ctx)
+                vp = getattr(self, "_vocal_profile", None)
+                decap_gender = getattr(vp, "gender", "") if vp else ""
+                spectrum_data = getattr(self, "_last_spectrum", None) or None
+                physical = decap_build(ctx, gender=decap_gender, spectrum=spectrum_data)
                 if physical is not None:
                     node.params = dict(physical)
                     normalized = decap_normalize(physical)
@@ -586,6 +617,79 @@ class MixingEngine:
                 if physical is not None:
                     node.params = dict(physical)
                     normalized = prods_normalize(physical)
+                    for pname, pval in normalized.items():
+                        self._fx.set_param(track_index, idx, pname, pval)
+            # ── EQ232D 走独立模块 ──
+            elif any(tag in actual_name.lower() for tag in ("eq232d", "bettermaker")):
+                from hermes_core.eq232d import build_params as eq232d_build
+                from hermes_core.eq232d import normalize_params as eq232d_normalize
+                vp = getattr(self, "_vocal_profile", None)
+                gender = getattr(vp, "gender", "") if vp else ""
+                spectrum_data = getattr(self, "_last_spectrum", None) or None
+                physical = eq232d_build(ctx, gender=gender, spectrum=spectrum_data)
+                if physical is not None:
+                    node.params = dict(physical)
+                    normalized = eq232d_normalize(physical)
+                    for pname, pval in normalized.items():
+                        self._fx.set_param(track_index, idx, pname, pval)
+            # ── RVox 走独立模块 ──
+            elif "rvox" in actual_name.lower():
+                from hermes_core.rvox import build_params as rvox_build
+                from hermes_core.rvox import normalize_params as rvox_normalize
+                from hermes_core.comp_engine import _derive_compressor_intent
+                sd_rvox = stem_data.get(stem_idx, {})
+                rms_db = sd_rvox.get("raw_rms_db")
+                peak_db = sd_rvox.get("raw_peak_db")
+                if rms_db is None: rms_db = -18.0
+                if peak_db is None: peak_db = -3.0
+                intent = _derive_compressor_intent(rms_db, peak_db, genre=genre)
+                physical = rvox_build(ctx, gr_target_db=intent.gr_target_db)
+                if physical is not None:
+                    node.params = dict(physical)
+                    normalized = rvox_normalize(physical)
+                    for pname, pval in normalized.items():
+                        self._fx.set_param(track_index, idx, pname, pval)
+            # ── Oxford Inflator: 先 mid-chain 重分析，再用 post-RVox crest 驱动 ──
+            elif "inflator" in actual_name.lower():
+                self._post_rvox_reanalyze(track_index)
+                from hermes_core.inflator import build_params as inflator_build
+                from hermes_core.inflator import normalize_params as inflator_normalize
+                post_sig = getattr(self, "_post_rvox_signal", {}) or {}
+                post_crest = post_sig.get("crest_factor_db", 0.0)
+                physical = inflator_build(ctx, post_crest_db=post_crest)
+                if physical is not None:
+                    node.params = dict(physical)
+                    normalized = inflator_normalize(physical)
+                    for pname, pval in normalized.items():
+                        self._fx.set_param(track_index, idx, pname, pval)
+            # ── Shadow Hills: 用 post-RVox 新鲜 RMS/crest 驱动光电压缩 ──
+            elif "shadow" in actual_name.lower():
+                from hermes_core.shadow_hills import build_params as sh_build
+                from hermes_core.shadow_hills import normalize_params as sh_normalize
+                post_sig = getattr(self, "_post_rvox_signal", {}) or {}
+                post_rms = post_sig.get("rms_db", -18.0)
+                post_crest = post_sig.get("crest_factor_db", 0.0)
+                physical = sh_build(ctx, post_rms_db=post_rms, post_crest_db=post_crest)
+                if physical is not None:
+                    node.params = dict(physical)
+                    normalized = sh_normalize(physical)
+                    for pname, pval in normalized.items():
+                        self._fx.set_param(track_index, idx, pname, pval)
+            # ── Maag EQ4: post-RVox 频谱偏差驱动 Air Band 抛光 ──
+            elif "maag" in actual_name.lower():
+                from hermes_core.maag import build_params as maag_build
+                from hermes_core.maag import normalize_params as maag_normalize
+                post_sig = getattr(self, "_post_rvox_signal", {}) or {}
+                spectrum_data = {
+                    "band_energy_db": post_sig.get("band_energy_db", {}),
+                    "air_level_db": post_sig.get("air_level_db"),
+                } if post_sig.get("band_energy_db") else None
+                vp = getattr(self, "_vocal_profile", None)
+                gender = getattr(vp, "gender", "") if vp else ""
+                physical = maag_build(ctx, gender=gender, spectrum=spectrum_data)
+                if physical is not None:
+                    node.params = dict(physical)
+                    normalized = maag_normalize(physical)
                     for pname, pval in normalized.items():
                         self._fx.set_param(track_index, idx, pname, pval)
             else:
@@ -740,6 +844,64 @@ class MixingEngine:
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
+    def _post_rvox_reanalyze(self, vocal_track: int) -> None:
+        """RVox 之后 mid-chain 信号+频谱重分析。
+
+        在 Inflator 之前独奏人声轨道全曲渲染（此时已过
+        Q3 + CLA-76 + Decap + Pro-DS + EQ232D + RVox 6 个插件），
+        同时运行 SignalAnalyzer（RMS/Peak/LUFS/Crest）和
+        SpectrumAnalyzer（band_energy/air_level/presence_deficit），
+        存入 ``self._post_rvox_signal``，供 Inflator、Shadow Hills、Maag 使用。
+        """
+        import os
+        import tempfile
+        import shutil
+        from hermes_core.signal import SignalAnalyzer
+
+        tmp_dir = tempfile.mkdtemp(prefix="hermes_postrvox_")
+        try:
+            out_wav = os.path.join(tmp_dir, "render.wav")
+            if os.path.exists(out_wav):
+                os.remove(out_wav)
+
+            result = self._solo_render([vocal_track], tmp_dir, "postrvox")
+
+            wav_path = result.get("output_path")
+            if wav_path and os.path.exists(wav_path):
+                # ── 信号动态 ──
+                sig_report = SignalAnalyzer.analyze(wav_path)
+                crest = round(sig_report.peak_db - sig_report.rms_db, 1)
+
+                # ── 频谱数据（同一渲染文件，零额外开销）──
+                from hermes_core.spectrum import SpectrumAnalyzer
+                spec_report = SpectrumAnalyzer.analyze(
+                    wav_path,
+                    vocal_profile=getattr(self, "_vocal_profile", None),
+                )
+
+                self._post_rvox_signal = {
+                    "rms_db":           sig_report.rms_db,
+                    "peak_db":          sig_report.peak_db,
+                    "integrated_lufs":  sig_report.integrated_lufs,
+                    "true_peak_dbtp":   sig_report.true_peak_dbtp,
+                    "crest_factor_db":  crest,
+                    "band_energy_db":   spec_report.band_energy_db,
+                    "air_level_db":     spec_report.air_level_db,
+                    "presence_deficit": spec_report.presence_deficit_db,
+                }
+                log.info(
+                    "Post-RVox reanalyze: RMS=%.1fdB peak=%.1fdB "
+                    "LUFS=%.1f crest=%.1fdB air=%.1fdB band=%s",
+                    sig_report.rms_db, sig_report.peak_db,
+                    sig_report.integrated_lufs, crest,
+                    spec_report.air_level_db,
+                    {k: v for k, v in spec_report.band_energy_db.items()},
+                )
+        except Exception as exc:
+            log.warning("Post-RVox reanalyze failed (%s), using stem data", exc)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
     def auto_corrective_eq(self, track_idx: int) -> dict:
         """基于频谱分析的共振检测自动生成校正性 EQ。（委托到 eq_engine）"""
         return _auto_corrective_eq_impl(
@@ -779,6 +941,8 @@ class MixingEngine:
         Subsequent saves use ``options=8`` to keep REAPER's internal path
         in sync with the actual file location.
         """
+        # 强制绝对路径：相对路径在 REAPER 中解析不一致，触发 NEWTEMP 弹窗
+        output_dir = os.path.abspath(output_dir)
         os.makedirs(output_dir, exist_ok=True)
 
         target = os.path.join(output_dir, f"{name}.rpp")
@@ -1058,7 +1222,7 @@ class MixingEngine:
             log.debug("_sync_meta: failed to read tracks — %s", exc)
 
         # 空间总线信息
-        if hasattr(self, "_reverb_send_node") and self._reverb_send_node:
+        if self._reverb_send_node is not None:
             try:
                 self._meta.spatial_buses = {
                     "reverb": {
@@ -1253,7 +1417,7 @@ class MixingEngine:
 
         # 母带信息
         report["mastering"]["pipeline_state"] = self._pipeline_state.value
-        if hasattr(self, "_reverb_send_node") and self._reverb_send_node:
+        if self._reverb_send_node is not None:
             report["mastering"]["reverb"] = {
                 "level_db": self._reverb_send_node.params.get("level_db"),
             }
@@ -1431,12 +1595,13 @@ class MixingEngine:
         return result
 
     def import_stems(self, file_paths: list[str],
-                    position: float = 0.0) -> list[dict]:
+                    position: float = 0.0,
+                    output_dir: str | None = None) -> list[dict]:
         """Import audio files, creating one track per file named by basename.
 
         Returns list of {name, track_index, file_path, success}.
         """
-        return self._gain_staging.import_stems(file_paths, position)
+        return self._gain_staging.import_stems(file_paths, position, output_dir)
 
     def list_tracks(self) -> list[TrackInfo]:
         """Return TrackInfo for all tracks in the project."""
@@ -1502,6 +1667,7 @@ class MixingEngine:
             return self._gain_staging.prepare(
                 stem_paths, genre=genre, vocal_indices=vocal_indices,
                 backing_indices=backing_indices,
+                output_dir=self._meta_dir,
             )
 
         result = self._undo_block("Prepare Stems", _do_prepare)
@@ -1709,6 +1875,20 @@ class MixingEngine:
             balance_info["ratio_lu"],
         )
 
+        # ── Post-balance dry vocal re-analysis ──
+        # 在所有 insert FX + 推子平衡完成后，solo-render 干声人声
+        # （pre 空间 send），重分析信号特征用于空间效果器参数推导。
+        # 一次分析，多处复用：plate/hall/room verb + MicroShift + mastering EQ。
+        vocal_track = (
+            stem_idx_to_track.get(vocal_indices[0])
+            if vocal_indices else None
+        )
+        if vocal_track is not None:
+            self._post_balance_analyze(vocal_track, tmp)
+            self._update_spatial_params(
+                genre, getattr(self, "_bpm", None),
+            )
+
         # ── Build reverb wet cache for preview mode ──
         reverb_wet_path = self._cache_reverb_wet(tmp)
 
@@ -1719,11 +1899,12 @@ class MixingEngine:
         # send levels.  The sends are not created here — only
         # computed and returned for downstream use.
         vocal_stem = self._stems_cache[0] if self._stems_cache else {}
-        crest_db = (
+        post_sig = getattr(self, "_post_rvox_signal", {}) or {}
+        crest_db = post_sig.get("crest_factor_db") or (
             vocal_stem.get("raw_peak_db", -3.0)
             - vocal_stem.get("raw_rms_db", -18.0)
         )
-        spectrum = getattr(self, "_last_spectrum", {}) or {}
+        spectrum = post_sig if post_sig.get("band_energy_db") else (getattr(self, "_last_spectrum", {}) or {})
         spatial_sends = _compute_spatial_sends(
             genre=genre,
             crest_factor_db=crest_db,
@@ -1751,6 +1932,339 @@ class MixingEngine:
             "stems": stems,
             "spatial_sends": spatial_sends,
         }
+
+    # ── Post-Balance 信号重分析 + 空间效果器参数更新 ──────────────
+
+    def _post_balance_analyze(
+        self, vocal_track: int, tmp_dir: str,
+    ) -> None:
+        """推子平衡后干声人声重分析。
+
+        Solo-render 人声轨（post 全部 insert FX，pre 空间 send），
+        同时运行 SignalAnalyzer + SpectrumAnalyzer，存入
+        ``self._post_balance_signal``。
+
+        一次分析，多处复用：
+        - plate/hall/room verb 参数推导
+        - MicroShift 参数更新（后续）
+        - Mastering EQ 频谱参考（后续）
+        """
+        out_dir = os.path.join(tmp_dir, "post_balance")
+        os.makedirs(out_dir, exist_ok=True)
+
+        try:
+            result = self._solo_render([vocal_track], out_dir, "post_balance")
+            wav_path = result.get("output_path")
+            if not wav_path or not os.path.exists(wav_path):
+                log.warning(
+                    "Post-balance render failed (no output), "
+                    "skipping spatial param update",
+                )
+                return
+
+            # ── 信号动态 ──
+            sig_report = SignalAnalyzer.analyze(wav_path)
+            crest = round(sig_report.peak_db - sig_report.rms_db, 1)
+
+            # ── 频谱数据 ──
+            from hermes_core.spectrum import SpectrumAnalyzer
+
+            spec_report = SpectrumAnalyzer.analyze(
+                wav_path,
+                vocal_profile=getattr(self, "_vocal_profile", None),
+            )
+            bands = spec_report.band_energy_db
+            mid_energy = bands.get("mid", -60.0)
+
+            # air_rel = air - mid（mid-relative，与 Maag 的 relativize 一致）
+            air_rel = (
+                round(bands.get("air", -80.0) - mid_energy, 1)
+                if mid_energy != 0
+                else None
+            )
+            # mud_ratio = low_mid - mid（正值=偏浑）
+            mud_ratio = (
+                round(bands.get("low_mid", -60.0) - mid_energy, 1)
+                if mid_energy != 0
+                else 0.0
+            )
+
+            self._post_balance_signal = {
+                "rms_db":           sig_report.rms_db,
+                "peak_db":          sig_report.peak_db,
+                "integrated_lufs":  sig_report.integrated_lufs,
+                "true_peak_dbtp":   sig_report.true_peak_dbtp,
+                "crest_factor_db":  crest,
+                "band_energy_db":   bands,
+                "air_rel_db":       air_rel,
+                "mud_ratio_db":     mud_ratio,
+                "presence_deficit": spec_report.presence_deficit_db,
+            }
+            log.info(
+                "Post-balance reanalyze: RMS=%.1fdB crest=%.1fdB "
+                "air_rel=%s mud=%.1fdB presence=%.1fdB bands=%s",
+                sig_report.rms_db, crest,
+                f"{air_rel:.1f}" if air_rel is not None else "N/A",
+                mud_ratio, spec_report.presence_deficit_db,
+                {k: round(v, 1) for k, v in bands.items()},
+            )
+        except Exception as exc:
+            log.warning(
+                "Post-balance reanalyze failed (%s), "
+                "spatial params will use static defaults", exc,
+            )
+
+    def _master_spectrum_analyze(self, tmp_dir: str) -> dict:
+        """全混音 master 输出频谱分析（pre-mastering）。
+
+        渲染 master 输出（vocal FX + backing + spatial sends + 推子平衡，
+        **不包含母带插件**），分析整体频谱，用于 bx_2098 和 God Particle
+        的母带 EQ 决策。
+
+        结果存入 ``self._master_spectrum``。
+        """
+        out_dir = os.path.join(tmp_dir, "master_spectrum")
+        os.makedirs(out_dir, exist_ok=True)
+        try:
+            result = self._render.render_mix(
+                output_dir=out_dir,
+                bounds="entire_project",
+                fmt="wav",
+                sample_rate=0,
+                timeout=120.0,
+            )
+            wav_path = result.get("output_path")
+            if not wav_path or not os.path.exists(wav_path):
+                log.warning("Master spectrum render failed, falling back to vocal spectrum")
+                return {}
+
+            # ── 信号动态 ──
+            sig_report = SignalAnalyzer.analyze(wav_path)
+            crest = round(sig_report.peak_db - sig_report.rms_db, 1)
+
+            # ── 频谱数据 ──
+            from hermes_core.spectrum import SpectrumAnalyzer
+            spec_report = SpectrumAnalyzer.analyze(wav_path)
+            bands = spec_report.band_energy_db
+            mid_energy = bands.get("mid", -60.0)
+
+            air_rel = (
+                round(bands.get("air", -80.0) - mid_energy, 1)
+                if mid_energy != 0 else None
+            )
+            mud_ratio = (
+                round(bands.get("low_mid", -60.0) - mid_energy, 1)
+                if mid_energy != 0 else 0.0
+            )
+
+            self._master_spectrum = {
+                "rms_db":           sig_report.rms_db,
+                "peak_db":          sig_report.peak_db,
+                "integrated_lufs":  sig_report.integrated_lufs,
+                "true_peak_dbtp":   sig_report.true_peak_dbtp,
+                "crest_factor_db":  crest,
+                "band_energy_db":   bands,
+                "air_rel_db":       air_rel,
+                "mud_ratio_db":     mud_ratio,
+                "presence_deficit": spec_report.presence_deficit_db,
+            }
+            log.info(
+                "Master spectrum: peak=%.1fdB mud=%.1fdB air_rel=%s "
+                "pres=%.1fdB bands=%s",
+                sig_report.peak_db, mud_ratio,
+                f"{air_rel:.1f}" if air_rel is not None else "N/A",
+                spec_report.presence_deficit_db,
+                {k: round(v, 1) for k, v in bands.items()},
+            )
+            return self._master_spectrum
+        except Exception as exc:
+            log.warning("Master spectrum analysis failed (%s), falling back to vocal spectrum", exc)
+            return {}
+
+    def _update_spatial_params(
+        self, genre: str, bpm: float | None = None,
+    ) -> None:
+        """更新空间效果器参数（plate/room/hall reverb + slap/throw/pingpong delay）。
+
+        参数由流派审美 + BPM 决定，不依赖信号特征。
+        自动检测回退插件并映射参数名。
+        """
+        spatial = getattr(self, "_spatial_result", {}) or {}
+
+        # ── Plate Verb ──
+        plate_info = spatial.get("reverb_plate")
+        if plate_info:
+            try:
+                from hermes_core.plate_verb import build_params as pv_build
+                from hermes_core.fx_builder import FXBuildContext
+
+                ctx = FXBuildContext(
+                    fx_name="VST3: LX480 v4 (Relab Development)",
+                    fx_type="reverb",
+                    role="vocal",
+                    genre=genre,
+                )
+                pv_params = pv_build(ctx, bpm=bpm)
+                self._apply_bus_params(
+                    plate_info, pv_params, "Plate", genre,
+                )
+            except Exception as exc:
+                log.warning("Plate verb param update failed: %s", exc)
+
+        # ── Room Verb ──
+        room_info = spatial.get("reverb_room")
+        if room_info:
+            try:
+                from hermes_core.room_verb import build_params as rv_build
+                from hermes_core.fx_builder import FXBuildContext
+
+                ctx = FXBuildContext(
+                    fx_name="VST: ValhallaRoom (Valhalla DSP, LLC)",
+                    fx_type="reverb",
+                    role="vocal",
+                    genre=genre,
+                )
+                rv_params = rv_build(ctx, bpm=bpm)
+                self._apply_bus_params(
+                    room_info, rv_params, "Room", genre,
+                )
+            except Exception as exc:
+                log.warning("Room verb param update failed: %s", exc)
+
+        # ── Hall Verb ──
+        hall_info = spatial.get("reverb_hall")
+        if hall_info:
+            try:
+                from hermes_core.hall_verb import build_params as hv_build
+                from hermes_core.fx_builder import FXBuildContext
+
+                ctx = FXBuildContext(
+                    fx_name="VST3: Seventh Heaven Professional (LiquidSonics)",
+                    fx_type="reverb",
+                    role="vocal",
+                    genre=genre,
+                )
+                hv_params = hv_build(ctx, bpm=bpm)
+                self._apply_bus_params(
+                    hall_info, hv_params, "Hall", genre,
+                )
+            except Exception as exc:
+                log.warning("Hall verb param update failed: %s", exc)
+
+        # ── Delay（Slap / Throw / PingPong）──
+        _DELAY_TYPE_KEYS = {
+            "delay_slap": "slap", "delay_throw": "throw",
+            "delay_pingpong": "pingpong",
+        }
+        for send_key, delay_type in _DELAY_TYPE_KEYS.items():
+            delay_info = spatial.get(send_key)
+            if not delay_info:
+                continue
+            try:
+                from hermes_core.delay import build_params as delay_build
+                from hermes_core.fx_builder import FXBuildContext
+
+                ctx = FXBuildContext(
+                    fx_name="VST: ValhallaDelay (Valhalla DSP, LLC)",
+                    fx_type="delay",
+                    role="vocal",
+                    genre=genre,
+                )
+                delay_params = delay_build(ctx, bpm=bpm, delay_type=delay_type)
+                self._apply_bus_params(
+                    delay_info, delay_params, delay_type.title(), genre,
+                )
+            except Exception as exc:
+                log.warning(
+                    "%s delay param update failed: %s", delay_type, exc,
+                )
+
+    def _apply_bus_params(
+        self,
+        bus_info: dict,
+        params: dict[str, float],
+        label: str,
+        genre: str,
+    ) -> None:
+        """将推导参数写入空间总线，含回退插件名映射和读回验证。
+
+        Parameters
+        ----------
+        bus_info : dict
+            ``{"aux_index": int, "fx_index": int}``
+        params : dict
+            ``{参数名: norm值}`` 映射
+        label : str
+            日志标签（"Plate" / "Room" / "Hall"）
+        genre : str
+            流派名，仅用于日志
+        """
+        aux_idx = bus_info["aux_index"]
+        fx_idx = bus_info["fx_index"]
+        track_ptr = self._bridge.api.GetTrack(0, aux_idx)
+        raw_name = self._bridge.api.TrackFX_GetFXName(
+            track_ptr, fx_idx, "", 256,
+        )
+        actual_name = _extract_reaper_string(raw_name) or ""
+
+        # 回退插件参数名映射
+        fallback_map: dict[str, str] = {}
+        for fk in _SPATIAL_PARAM_FALLBACK_MAP:
+            if fk.lower() in actual_name.lower():
+                fallback_map = _SPATIAL_PARAM_FALLBACK_MAP[fk]
+                break
+
+        applied = 0
+        for pname, pval in params.items():
+            actual_pname = (
+                fallback_map.get(pname, pname) if fallback_map else pname
+            )
+            if self._fx.set_param(aux_idx, fx_idx, actual_pname, pval):
+                applied += 1
+
+        log.info(
+            "%s verb params updated: %d/%d applied [%s] (%s)",
+            label, applied, len(params), actual_name or "?", genre,
+        )
+
+        # ── 参数读回验证（REAPER 实时读回，非本地缓存）──
+        param_cache = self._fx._param_cache.get((aux_idx, fx_idx), {})
+        verified = 0
+        mismatched = 0
+        for pname, expected in params.items():
+            actual_pname = (
+                fallback_map.get(pname, pname) if fallback_map else pname
+            )
+            param_idx = param_cache.get(actual_pname.lower())
+            if param_idx is None:
+                continue
+            try:
+                raw = self._bridge.api.TrackFX_GetParam(
+                    track_ptr, fx_idx, param_idx, 0.0, 0.0,
+                )
+                if isinstance(raw, (tuple, list)):
+                    val = float(raw[0]) if len(raw) > 0 else 0.0
+                else:
+                    val = float(raw)
+                if abs(val - expected) < 0.015:
+                    verified += 1
+                else:
+                    mismatched += 1
+                    log.warning(
+                        "  %s MISMATCH %s: set=%.3f readback=%.3f",
+                        label, actual_pname, expected, val,
+                    )
+            except Exception as e:
+                log.warning(
+                    "%s verify: readback failed for '%s': %s",
+                    label, actual_pname, e,
+                )
+
+        status = "OK" if mismatched == 0 else f"{mismatched} MISMATCH"
+        log.info(
+            "%s param verify: %d/%d %s [%s]",
+            label, verified, len(params), status, actual_name or "?",
+        )
 
     def apply_backing_processing(
         self,
@@ -1875,6 +2389,7 @@ class MixingEngine:
             target_gr_db,
         )
 
+        self._bus_comp_applied = True
         self._mark_stage("apply_bus_compressor")
         return {
             "peak_db": peak_db,
@@ -2158,17 +2673,24 @@ class MixingEngine:
                 bus, aux_idx, loaded_name or "?", level_db, genre,
             )
 
-            # ── Delay → Reverb 交叉发送（§3.5）──
-            for reverb_key, reverb_info in result.items():
-                if not reverb_key.startswith("reverb_"):
-                    continue
+            # ── Delay → Reverb 交叉发送 ──
+            # Slap→Plate（加厚+板式质感）, Throw→Hall（回声+大厅空间）
+            # PingPong 不发混响（立体声交替不需要）
+            _DELAY_REVERB_MAP = {
+                "slap":    "reverb_plate",
+                "throw":   "reverb_hall",
+            }
+            _CROSS_SEND_DB = -12.0
+            target_reverb = _DELAY_REVERB_MAP.get(bus)
+            if target_reverb and target_reverb in result:
                 try:
                     self._send.create(
-                        src=aux_idx, dest=reverb_info["aux_index"],
-                        level_db=-8.0,
+                        src=aux_idx, dest=result[target_reverb]["aux_index"],
+                        level_db=_CROSS_SEND_DB,
                     )
+                    log.info("Cross-send: %s → %s (%.0fdB)", bus, target_reverb, _CROSS_SEND_DB)
                 except Exception as exc:
-                    log.debug("Cross-send %s→%s failed: %s", bus, reverb_key, exc)
+                    log.debug("Cross-send %s→%s failed: %s", bus, target_reverb, exc)
 
         # ── Phase 3: MicroShift AUX（§3.1）──
         microshift_level = spatial_sends.get("microshift")
@@ -2253,15 +2775,15 @@ class MixingEngine:
     ) -> dict | None:
         """创建 MicroShift AUX（§3.1）：MicroShift → Pro-Q3 MS HPF。
 
-        MicroShift AUX 还会发送到所有已创建的 Reverb/Delay bus，
-        让展宽后的信号和主唱共享同一空间。
+        MicroShift 作为独立 AUX 与 Reverb/Delay 平行，不交叉发送。
+        业界最佳实践：doubler/widener 应独立控制，不与空间效果串联。
         """
         bus_name = _SPATIAL_BUS_NAMES.get("microshift", "MicroShift")
         plugin_names = _SPATIAL_PLUGIN.get("microshift", ["MicroShift"])
 
         aux_idx = self._tracks.create(name=bus_name)
 
-        # 1. MicroShift 插件（Mix=100%, Detune=0.15, Delay=0.08, Focus=1-5kHz）
+        # 1. MicroShift 插件
         ms_fx_idx = -1
         for candidate in plugin_names:
             ms_fx_idx = self._fx.add(aux_idx, candidate)
@@ -2272,52 +2794,44 @@ class MixingEngine:
             return None
 
         # 设置 MicroShift 参数
-        ms_params = {
-            "Mix": 1.0,       # 100% wet（AUX 全湿）
-            "Detune": 0.15,   # ±9 音分
-            "Delay": 0.08,    # 中短延迟
-            "Focus": 0.5,     # 1-5kHz（归一化）
-        }
-        from hermes_core.normalize import normalize_params
-        try:
-            normalized = normalize_params("MicroShift", ms_params)
+        from hermes_core.microshift import build_params as ms_build
+        from hermes_core.microshift import normalize_params as ms_normalize
+        from hermes_core.fx_builder import FXBuildContext
+        post_sig = getattr(self, "_post_rvox_signal", {}) or {}
+        post_crest = post_sig.get("crest_factor_db", 0.0)
+        ms_ctx = FXBuildContext(
+            fx_name="VST3: MicroShift (Soundtoys)",
+            fx_type="doubler", role="vocal", genre=genre,
+        )
+        ms_params = ms_build(ms_ctx, post_crest_db=post_crest)
+        if ms_params:
+            normalized = ms_normalize(ms_params)
             for key, value in normalized.items():
                 self._fx.set_param(aux_idx, ms_fx_idx, key, value)
-        except Exception:
-            # 直接尝试设参数值
-            pass
 
-        # 2. Pro-Q 3 MS 模式 — Side HPF @ 500Hz
+        # 2. Pro-Q 3 — Side-channel HPF（保人声核心单声道凝聚）
+        #    频率流派分化：民美/folk 850Hz → pop 750Hz → rock/electronic 650Hz
+        _MS_SIDE_HPF: dict[str, float] = {
+            "folk": 0.555, "ballad": 0.555, "chinese_folk_bel_canto": 0.555,
+            "pop": 0.540, "rock": 0.522, "rap": 0.522, "electronic": 0.522,
+        }
+        hpf_norm = _MS_SIDE_HPF.get(genre, 0.540)
         eq_idx = self._fx.add(aux_idx, "FabFilter Pro-Q 3")
         if eq_idx >= 0:
-            # Side-channel HPF via Mid-Side mode
             try:
-                self._fx.set_param(aux_idx, eq_idx, "MS Mode", 1.0)
-                # Band 1: Side HPF @ 500Hz
-                self._fx.set_param(aux_idx, eq_idx, "Band 1 Type", "High Pass")
-                self._fx.set_param(aux_idx, eq_idx, "Band 1 Freq", 500.0)
-                self._fx.set_param(aux_idx, eq_idx, "Band 1 Q", 0.71)
-                self._fx.set_param(aux_idx, eq_idx, "Band 1 Sidechain", 1.0)  # Side only
+                self._fx.set_param(aux_idx, eq_idx, "Band 1 Used", 1.0)
+                self._fx.set_param(aux_idx, eq_idx, "Band 1 Shape", 0.20)
+                self._fx.set_param(aux_idx, eq_idx, "Band 1 Frequency", hpf_norm)
+                self._fx.set_param(aux_idx, eq_idx, "Band 1 Q", 0.455)
+                self._fx.set_param(aux_idx, eq_idx, "Band 1 Slope", 0.1111)
+                self._fx.set_param(aux_idx, eq_idx, "Band 1 Stereo Placement", 1.0)
             except Exception:
                 pass
 
-        # 3. 主唱 Send → MicroShift AUX
+        # 3. 主唱 Send → MicroShift AUX（独立发送，不串联到 Reverb/Delay）
         send_info = self._send.create(
             src=vocal_track, dest=aux_idx, level_db=send_level_db,
         )
-
-        # 4. MicroShift → 每种 Reverb/Delay bus（共享空间）
-        ms_to_spatial_db = max(send_level_db - 6.0, _SEND_LEVEL_MIN)
-        for key, info in result.items():
-            if not (key.startswith("reverb_") or key.startswith("delay_")):
-                continue
-            try:
-                self._send.create(
-                    src=aux_idx, dest=info["aux_index"],
-                    level_db=ms_to_spatial_db,
-                )
-            except Exception as exc:
-                log.debug("MicroShift→%s send failed: %s", key, exc)
 
         log.info(
             "MicroShift: aux %d [%s + Pro-Q3 MS HPF], send=%.1f dB (%s)",
@@ -2524,26 +3038,182 @@ class MixingEngine:
             )
             self._bus_comp_applied = True
 
-        # 2. bx_2098 EQ — BAX wide mastering EQ
+        # ── Full-mix 频谱分析（母带 EQ 决策依据）──
+        # 必须在母带插件（bx_2098/TGP/Pro-L 2）挂载前执行，
+        # 渲染全混音（vocal+backing+spatial+推子平衡+bus comp）。
+        self._master_spectrum_analyze(tmp_dir or tempfile.mkdtemp(prefix="hermes_mspec_"))
+        master_spec = getattr(self, "_master_spectrum", None) or {}
+
+        # 2. bx_2098 EQ — M/S 母带 EQ（REAPER 逐参数校准对照表）
         bx2098_idx = self.add_master_fx("bx_2098 EQ (Plugin Alliance)")
         if bx2098_idx >= 0:
             genre = getattr(self._meta, "genre", "pop") if self._meta else "pop"
-            from hermes_core.genre_tables import _GENRE_BX2098_SHEEN
-            sheen = _GENRE_BX2098_SHEEN.get(genre, True)
-            self._fx.set_param(-1, bx2098_idx, "Low Shelf Freq", 0.0)
-            self._fx.set_param(-1, bx2098_idx, "Low Shelf Gain", 0.5)
-            self._fx.set_param(-1, bx2098_idx, "High Shelf Freq", 0.0)
-            self._fx.set_param(-1, bx2098_idx, "High Shelf Gain", 0.5)
-            self._fx.set_param(-1, bx2098_idx, "Glow", 1.0 if sheen else 0.0)
-            self._fx.set_param(-1, bx2098_idx, "Sheen", 1.0 if sheen else 0.0)
+            # 必须用原始 RPR —— FxManager.set_param 在母线上有 bug
+            import reapy
+            from reapy import reascript_api as _R
+            _MP = reapy.Project().master_track.id
 
-        # 3. The God Particle — Jaycen Joshua mastering chain
-        god_idx = self.add_master_fx("Cradle")
+            # 用 full-mix 频谱，fallback 到人声频谱
+            post_bal = master_spec if master_spec else (getattr(self, "_post_balance_signal", {}) or {})
+            mud_db = post_bal.get("mud_ratio_db", 0.0)
+            air_rel_db = post_bal.get("air_rel_db", -80.0)
+            pres_def = post_bal.get("presence_deficit", 0.0)
+            sheen_on = _GENRE_BX2098_SHEEN.get(genre, True)
+
+            # ── REAPER 校准对照表: norm→物理值 ──
+            _CAL_F = {  # 频率 (Hz)
+                "hpf":  [(0,20),(0.25,25),(0.5,35),(0.75,77.5),(1,300)],
+                "lf":   [(0,30),(0.25,78.2),(0.5,111.5),(0.75,172.5),(1,300)],
+                "lmf":  [(0,100),(0.25,181.3),(0.5,267.5),(0.75,428.8),(1,1000)],
+                "hmf":  [(0,500),(0.25,1050),(0.5,1800),(0.75,2980),(1,4500)],
+                "hf":   [(0,2000),(0.25,5280),(0.5,8650),(0.75,13680),(1,21000)],
+                "mono": [(0,20),(0.25,115),(0.5,663),(0.75,3820),(1,22000)],
+            }
+            _CAL_G = [(0,-18),(0.25,-8),(0.5,0),(0.75,7),(1,18)]  # 增益 (dB)
+            _CAL_Q = [(0,0.7),(0.25,1.0),(0.5,1.3),(0.75,1.7),(1,2.0)]  # Q
+
+            def _interp(target: float, table: list) -> float:
+                """反向插值：物理值 → norm"""
+                if target <= table[0][1]: return table[0][0]
+                if target >= table[-1][1]: return table[-1][0]
+                for i in range(len(table) - 1):
+                    n0, p0 = table[i]
+                    n1, p1 = table[i + 1]
+                    if p0 <= target <= p1:
+                        return n0 + (target - p0) * (n1 - n0) / (p1 - p0)
+                return 0.5
+
+            # ── bx_2098 流派表（Mid=中央, Side=宽度）──
+            mid_lf = _BX2098_MLF.get(genre, 0.5)
+            mid_hmf_freq, mid_hmf_gain = _BX2098_MHFQ.get(genre, (3000.0, 0.5))
+            mid_hf = _BX2098_MHFG.get(genre, 0.5)
+            side_lf = _BX2098_SLF.get(genre, 0.0)
+            side_hmf = _BX2098_SHMF.get(genre, 0.0)
+            side_hf = _BX2098_SHFG.get(genre, 0.0)
+            thd_val = _BX2098_THD.get(genre, 0.0)
+            lmf_gain = -1.5 if mud_db > 3.0 else 0.0
+            if pres_def > 15.0: mid_hmf_gain = round(mid_hmf_gain + 0.5, 1)
+            if air_rel_db is not None and air_rel_db < -35.0:
+                side_hf = round(side_hf + 1.0, 1)
+
+            # === Mid (Ch1) ===  (直接 RPR，不用闭包)
+            s = lambda p, v: _R.TrackFX_SetParam(_MP, bx2098_idx, p, v)
+            s(_BX2098_MID_HPF_FREQ, _interp(25.0, _CAL_F["hpf"]))
+            s(_BX2098_MID_HPF_IN, 1.0)
+            s(_BX2098_MID_HPF_PEAK, 0.0)
+            s(_BX2098_MID_LF_IN, 1.0)
+            s(_BX2098_MID_LF_FREQ, _interp(70.0, _CAL_F["lf"]))
+            s(_BX2098_MID_LF_GAIN, _interp(mid_lf, _CAL_G))
+            s(_BX2098_MID_LF_PEAK, 0.0); s(_BX2098_MID_LF_GLOW, 1.0)
+            s(_BX2098_MID_LMF_IN, 1.0 if lmf_gain != 0.0 else 0.0)
+            s(_BX2098_MID_LMF_FREQ, _interp(350.0, _CAL_F["lmf"]))
+            s(_BX2098_MID_LMF_GAIN, _interp(lmf_gain, _CAL_G))
+            s(_BX2098_MID_LMF_Q, _interp(0.7, _CAL_Q))
+            s(_BX2098_MID_LMF_PEAK, 0.0)
+            s(_BX2098_MID_HMF_IN, 1.0 if mid_hmf_gain != 0.0 else 0.0)
+            s(_BX2098_MID_HMF_FREQ, _interp(mid_hmf_freq, _CAL_F["hmf"]))
+            s(_BX2098_MID_HMF_GAIN, _interp(mid_hmf_gain, _CAL_G))
+            s(_BX2098_MID_HMF_Q, _interp(0.6, _CAL_Q))
+            s(_BX2098_MID_HMF_PEAK, 0.0)
+            s(_BX2098_MID_HF_IN, 1.0)
+            s(_BX2098_MID_HF_FREQ, _interp(12000.0, _CAL_F["hf"]))
+            s(_BX2098_MID_HF_GAIN, _interp(mid_hf, _CAL_G))
+            s(_BX2098_MID_HF_PEAK, 0.0)
+            s(_BX2098_MID_SHEEN, 1.0 if sheen_on else 0.0)
+
+            # === Side (Ch2) ===
+            s(_BX2098_SIDE_HPF_FREQ, _interp(25.0, _CAL_F["hpf"]))
+            s(_BX2098_SIDE_HPF_IN, 1.0)
+            s(_BX2098_SIDE_HPF_PEAK, 0.0)
+            s(_BX2098_SIDE_LF_IN, 1.0)
+            s(_BX2098_SIDE_LF_FREQ, _interp(70.0, _CAL_F["lf"]))
+            s(_BX2098_SIDE_LF_GAIN, _interp(side_lf, _CAL_G))
+            s(_BX2098_SIDE_LF_PEAK, 0.0); s(_BX2098_SIDE_LF_GLOW, 1.0)
+            s(_BX2098_SIDE_LMF_IN, 0.0); s(_BX2098_SIDE_LMF_Q, 0.0)
+            s(_BX2098_SIDE_HMF_IN, 1.0 if side_hmf != 0.0 else 0.0)
+            s(_BX2098_SIDE_HMF_FREQ, _interp(3000.0, _CAL_F["hmf"]))
+            s(_BX2098_SIDE_HMF_GAIN, _interp(side_hmf, _CAL_G))
+            s(_BX2098_SIDE_HMF_Q, _interp(0.6, _CAL_Q))
+            s(_BX2098_SIDE_HMF_PEAK, 0.0)
+            s(_BX2098_SIDE_HF_IN, 1.0)
+            s(_BX2098_SIDE_HF_FREQ, _interp(12000.0, _CAL_F["hf"]))
+            s(_BX2098_SIDE_HF_GAIN, _interp(side_hf, _CAL_G))
+            s(_BX2098_SIDE_HF_PEAK, 0.0)
+            s(_BX2098_SIDE_SHEEN, 1.0 if sheen_on else 0.0)
+
+            # === 全局 ===
+            s(_BX2098_GLOBAL_A, 0.0); s(_BX2098_GLOBAL_B, 1.0)
+            s(_BX2098_MONO_IN, 1.0); s(_BX2098_MONO_FREQ, _interp(100.0, _CAL_F["mono"]))
+            s(_BX2098_THD_IN, 1.0 if thd_val > 0 else 0.0)
+            s(_BX2098_THD_AMOUNT, thd_val)
+
+            # 强写 Gain 关键参数确认
+            _R.TrackFX_SetParam(_MP, bx2098_idx, _BX2098_MID_LF_GAIN, _interp(mid_lf, _CAL_G))
+            _R.TrackFX_SetParam(_MP, bx2098_idx, _BX2098_MID_HMF_GAIN, _interp(mid_hmf_gain, _CAL_G))
+            _R.TrackFX_SetParam(_MP, bx2098_idx, _BX2098_MID_HF_GAIN, _interp(mid_hf, _CAL_G))
+            _R.TrackFX_SetParam(_MP, bx2098_idx, _BX2098_SIDE_LF_GAIN, _interp(side_lf, _CAL_G))
+
+            log.info(
+                "bx_2098 M/S: Mid(LF=+%.1f HMF@%.0f=+%.1f HF=+%.1f) "
+                "Side(LF=%+.1f HMF=%+.1f HF=+%.1f) "
+                "LMF=%.0f(mud=%.1f) sheen=%s mono@100 THD=%.2f",
+                mid_lf, mid_hmf_freq, mid_hmf_gain, mid_hf,
+                side_lf, side_hmf, side_hf,
+                lmf_gain, mud_db, sheen_on, thd_val,
+            )
+
+        # 3. The God Particle — 频谱驱动三段 EQ + Character
+        #    索引: Input(0/不碰), Output(1/不碰=天花板), EQ_L(2/±6dB), EQ_M(3/±6dB),
+        #          EQ_H(4/±6dB), EQ_BP(5), Char(6/0-1→0-200%), Char_BP(7),
+        #          LimIn(8/headroom增益), LimBP(9/0=ON保音色), BP(10), Wet(11), Delta(12)
+        god_idx = self.add_master_fx("VST3: The God Particle (Cradle)")
         if god_idx >= 0:
-            self._fx.set_param(-1, god_idx, "Input", 0.5)  # unity
+            import reapy; from reapy import reascript_api as _R
+            _MP = reapy.Project().master_track.id
+            genre = getattr(self._meta, "genre", "pop") if self._meta else "pop"
+            post_bal = master_spec if master_spec else (getattr(self, "_post_balance_signal", {}) or {})
+            mud_db = post_bal.get("mud_ratio_db", 0.0)
+            air_rel_db = post_bal.get("air_rel_db", -80.0)
+            bands = post_bal.get("band_energy_db", {})
+
+            _GL = {"electronic":2.0,"rock":1.5,"pop":1.0,"ballad":1.0,"chinese_folk_bel_canto":1.0,"folk":0.0}
+            _GH = {"electronic":3.0,"pop":2.0,"rock":1.5,"ballad":1.0,"chinese_folk_bel_canto":0.0,"folk":0.0}
+            _GC = {"folk":0.175,"ballad":0.175,"chinese_folk_bel_canto":0.175,"pop":0.200,"rock":0.200,"electronic":0.250}
+            base_low = _GL.get(genre, 1.0)
+            base_high = _GH.get(genre, 0.0)
+            char_val = _GC.get(genre, 0.40)
+
+            c_low = c_mid = c_high = 0.0
+            if mud_db > 3.0: c_low = -1.5
+            mid_e = bands.get("mid", -60.0)
+            hm_e = bands.get("high_mid", -60.0)
+            if hm_e > -100 and mid_e > hm_e + 3.0: c_mid = -1.0
+            if air_rel_db < -35.0 and mud_db <= 3.0: c_high = 2.0
+            elif air_rel_db < -30.0 and mud_db <= 0.0: c_high = 1.0
+
+            eq_low_db  = max(-3.0, min(3.0, base_low + c_low))
+            eq_mid_db  = max(-3.0, min(3.0, c_mid))
+            eq_high_db = max(0.0, min(6.0, base_high + c_high))
+
+            # Input/Output — 不碰（Input=unity, Output=0=天花板）
+            _R.TrackFX_SetParam(_MP, god_idx, 2, 0.5 + eq_low_db / 12.0)   # EQ Low (±6dB)
+            _R.TrackFX_SetParam(_MP, god_idx, 3, 0.5 + eq_mid_db / 12.0)   # EQ Mid (±6dB)
+            _R.TrackFX_SetParam(_MP, god_idx, 4, 0.5 + eq_high_db / 12.0)  # EQ High (±6dB)
+            _R.TrackFX_SetParam(_MP, god_idx, 6, char_val)   # Character (流派)
+            # Limiter ON, 用 headroom 控制增益 (peak_ceiling=3dB → norm=0.3)
+            lim_in_norm = abs(_PEAK_CEILING_DB) / 10.0
+            _R.TrackFX_SetParam(_MP, god_idx, 8, lim_in_norm)   # Limiter Input (headroom)
+            _R.TrackFX_SetParam(_MP, god_idx, 9, 0.0)   # Limiter ON (保音色)
+            # Wet/Bypass/CharBP/EQ_BP/Input/Output — 不碰
+            log.info(
+                "God Particle: EQ(L%+.1f M%+.1f H%+.1f) char=%.2f lim=+%.1fdB (%s) mud=%.1f air=%.0f",
+                eq_low_db, eq_mid_db, eq_high_db, char_val,
+                abs(_PEAK_CEILING_DB), genre, mud_db, air_rel_db,
+            )
 
         # 4. Pro-L 2 final limiter
         self._mastering._on_progress = on_progress
+        self._mastering._finalize_genre = getattr(self._meta, "genre", "pop") if self._meta else "pop"
         result = self._undo_block(
             "Finalize Master",
             lambda: self._mastering.finalize(

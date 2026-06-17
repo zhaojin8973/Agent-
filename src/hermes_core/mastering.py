@@ -175,6 +175,22 @@ class MasteringEngine:
                 "Pro-L 2 Gain param not found — may need calibration",
             )
 
+        # Pro-L 2 Style — 流派差异化（设计文档 §五）
+        # Transparent=0.0 / Allround=0.35 / Aggressive=0.70
+        try:
+            from hermes_core.genre_tables import _GENRE_PROL2_STYLE
+            genre = getattr(self, "_finalize_genre", "pop")
+            style_name = _GENRE_PROL2_STYLE.get(genre, "Allround")
+            _STYLE_NORM: dict[str, float] = {
+                "Transparent": 0.0, "Allround": 0.35, "Aggressive": 0.70,
+            }
+            style_val = _STYLE_NORM.get(style_name, 0.35)
+            self._fx.set_param(-1, fx_idx, "Style", style_val)
+            log.info("Pro-L 2: ceiling=%.1fdBTP style=%s(%.2f) genre=%s",
+                     ceiling_db, style_name, style_val, genre)
+        except Exception:
+            log.debug("Pro-L 2 Style not applied — param may have moved")
+
         # 2. 探测渲染
         _progress("probe_render", 0.15)
         probe_result = self._render.render_mix(probe_dir)

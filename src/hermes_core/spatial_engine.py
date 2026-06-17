@@ -67,9 +67,9 @@ def _compute_spatial_sends(
     base_delay = _GENRE_DELAY_SEND_BASE.get(genre, _DEFAULT_DELAY)
 
     # ── 偏差计算 ──────────────────────────────────────────
-    crest_bias = -(crest_factor_db - _CREST_REFERENCE) * 0.5
-    density_bias = mud_ratio_db * 0.3
-    presence_bias = -(presence_deficit_db - _PRESENCE_DEFICIT_THRESHOLD) * 0.3
+    crest_bias = -(crest_factor_db - _CREST_REFERENCE) * 0.20
+    density_bias = mud_ratio_db * 0.12
+    presence_bias = -(presence_deficit_db - _PRESENCE_DEFICIT_THRESHOLD) * 0.15
     section_bias = _SECTION_BOOST.get(section, 0.0)
 
     sibilance_bias = 0.0
@@ -80,24 +80,27 @@ def _compute_spatial_sends(
     sends: dict[str, float | None] = {}
 
     for bus_type, base_db in base_reverb.items():
-        bias = crest_bias + density_bias + presence_bias + section_bias
+        raw_bias = crest_bias + density_bias + presence_bias + section_bias
         if bus_type == "plate":
-            bias += sibilance_bias
+            raw_bias += sibilance_bias
+        # 偏差限制在 ±4dB 以内，base 值主导最终结果
+        bias = max(-4.0, min(4.0, raw_bias))
         sends[f"reverb_{bus_type}"] = round(
             max(_SEND_LEVEL_MIN, min(_SEND_LEVEL_MAX, base_db + bias)), 1,
         )
 
+    # ── Delay 发送量：用户直接指定，不参与信号偏差 ─────────
     for bus_type, base_db in base_delay.items():
         if base_db <= _SEND_DISABLED_THRESHOLD:
             sends[f"delay_{bus_type}"] = None
         else:
-            bias = crest_bias + presence_bias + section_bias
             sends[f"delay_{bus_type}"] = round(
-                max(_SEND_LEVEL_MIN, min(_SEND_LEVEL_MAX, base_db + bias)), 1,
+                max(_SEND_LEVEL_MIN, min(_SEND_LEVEL_MAX, base_db)), 1,
             )
 
     # ── MicroShift AUX（§3.1）──────────────────────────────
-    base_microshift = _GENRE_MICROSHIFT_SEND.get(genre, -12.0)  # 回退到 pop
+    _DEFAULT_MICROSHIFT = _GENRE_MICROSHIFT_SEND.get("pop", -12.0)
+    base_microshift = _GENRE_MICROSHIFT_SEND.get(genre, _DEFAULT_MICROSHIFT)
     bias = crest_bias + presence_bias + section_bias
     sends["microshift"] = round(
         max(_SEND_LEVEL_MIN, min(_SEND_LEVEL_MAX, base_microshift + bias)), 1,
@@ -111,23 +114,42 @@ def _compute_spatial_sends(
 # ════════════════════════════════════════════════════════════════
 
 
+def _strip_format_prefix(name: str) -> str:
+    """去除插件名前的格式前缀（VST3:/VST:/AU:/CLAP:/JS:）。"""
+    for prefix in ('VST3:', 'VST:', 'AU:', 'AUi:', 'CLAP:', 'JS:'):
+        if name.startswith(prefix):
+            return name[len(prefix):]
+    return name
+
+
+# 预构建：registry key → stripped key 的映射（仅计算一次）
+_STRIPPED_REGISTRY: dict[str, str] = {}
+for _k in PLUGIN_REGISTRY:
+    _stripped = _strip_format_prefix(_k).strip().lower()
+    _STRIPPED_REGISTRY[_stripped] = _k
+
+
 def _resolve_spatial_plugin_key(fx_name: str) -> str | None:
     """将 REAPER 返回的插件名匹配到 PLUGIN_REGISTRY 键。
 
-    先用子串匹配查找，失败后用 _SPATIAL_PARAM_FALLBACK_MAP 的键匹配。
+    去除格式前缀（VST3/AU/VST/CLAP/JS）后匹配，
+    不再因格式差异导致匹配失败。
     返回 PLUGIN_REGISTRY 的键名，找不到返回 None。
     """
     # 精确匹配
     if fx_name in PLUGIN_REGISTRY:
         return fx_name
-    # 子串匹配（如 "VST3: EchoBoy (Soundtoys)" 匹配 PLUGIN_REGISTRY 键）
-    name_lower = fx_name.lower()
-    for key in PLUGIN_REGISTRY:
-        if key.lower() in name_lower or name_lower in key.lower():
-            return key
-    # 回退映射键匹配（如 "ValhallaPlate" 匹配 "ValhallaPlate (Valhalla DSP, LLC)"）
+    # 去格式前缀后精确匹配
+    stripped = _strip_format_prefix(fx_name).strip().lower()
+    if stripped in _STRIPPED_REGISTRY:
+        return _STRIPPED_REGISTRY[stripped]
+    # 子串匹配（兜底）
+    for stripped_key, registry_key in _STRIPPED_REGISTRY.items():
+        if stripped_key in stripped or stripped in stripped_key:
+            return registry_key
+    # 回退映射键匹配
     for fallback_key in _SPATIAL_PARAM_FALLBACK_MAP:
-        if fallback_key.lower() in name_lower:
+        if fallback_key.lower() in stripped:
             return fallback_key
     return None
 

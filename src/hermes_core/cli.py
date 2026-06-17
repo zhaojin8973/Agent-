@@ -33,6 +33,8 @@ def _build_vocal_mix_parser(subparsers) -> None:
                    help="歌手性别（默认 female）")
     p.add_argument("--technique", default="",
                    help="演唱方式（pop/rock/folk/bel_canto/chinese_folk_bel_canto）")
+    p.add_argument("--test-plugin", default="",
+                   help="仅测试指定插件，链到此截止（如 EQ232D/RVox/Decapitator）")
 
 
 def _build_check_parser(subparsers) -> None:
@@ -108,19 +110,42 @@ def cmd_vocal_mix(args) -> int:
     resolved_bpm = _resolve_bpm(args)
 
     with MixingEngine(watchdog=args.watchdog) as eng:
+        eng.allow_track_deletion()
+        # 将 BPM 写入 REAPER 工程速度
+        if resolved_bpm and resolved_bpm > 0:
+            eng._bridge.api.CSurf_OnTempoChange(resolved_bpm)
+            log.info("Set project tempo to %.1f BPM", resolved_bpm)
         log.info("Creating project: %s", project_name)
-        eng.create_project(project_name, args.output, sample_rate=48000)
+        eng.create_project(project_name, os.path.abspath(args.output), sample_rate=48000, genre=args.genre)
 
         # Plugin preflight
         if args.profile:
-            profile = MixingProfile.from_yaml(args.profile)
+            profile = MixingProfile.from_yaml(os.path.abspath(args.profile))
         else:
-            from hermes_core.profiles import get_default_vocal_chain
-            profile = MixingProfile(
-                vocal_chain=get_default_vocal_chain(),
-                backing_chain=[],
-            )
-        missing = eng.preflight_plugins(profile.all_fx_names())
+            # 自动按流派/技术加载 YAML，不再静默回退到默认链
+            from hermes_core.profiles import MixingProfile as MP
+            technique = (args.technique or args.genre or "pop")
+            variant = "a"  # 默认走 Vocal A（无 UAD），后续支持 --variant
+            profile = MP.for_genre(technique, variant=variant)
+            log.info("自动加载 profile: %s (variant=%s)", technique, variant)
+
+        # ── 测试模式：链截断 ──
+        test_plugin = (args.test_plugin or "").strip()
+        if test_plugin:
+            chain = list(profile.vocal_chain)
+            stop_idx = None
+            for i, fx in enumerate(chain):
+                if test_plugin.lower() in fx.name.lower():
+                    stop_idx = i + 1
+                    break
+            if stop_idx:
+                profile.vocal_chain = chain[:stop_idx]
+                log.info("测试模式：链截断到 %s（%d 个插件）", test_plugin, stop_idx)
+            else:
+                log.warning("测试插件 '%s' 未在链中找到，使用完整链", test_plugin)
+
+        result = eng.preflight_plugins(profile.all_fx_names())
+        missing = [k for k, v in result.items() if not v]
         if missing:
             log.error("Missing plugins: %s", ", ".join(missing))
             log.error("Install the missing plugins or update your profile.")
@@ -137,45 +162,76 @@ def cmd_vocal_mix(args) -> int:
             backing_indices=backing_indices,
         )
 
-        # Apply FX chain from profile (EQ baseline + auto-compression + reverb)
+        # Apply FX chain（测试模式下跳过空间效果器）
         eng.apply_profile(profile, vocal_track=0, backing_tracks=backing_indices,
                           genre=args.genre, bpm=resolved_bpm,
                           gender=getattr(args, "gender", ""),
-                          technique=getattr(args, "technique", ""))
+                          technique=getattr(args, "technique", ""),
+                          skip_spatial=bool(test_plugin))
 
-        # Post-FX fader balance
-        log.info("Measuring post-FX loudness and balancing faders...")
-        balance = eng.post_fx_balance(
-            vocal_indices=vocal_indices,
-            backing_indices=backing_indices,
-            genre=args.genre,
-        )
-        log.info(
-            "Balance: vocal=%.1f LUFS, backing=%.1f LUFS, combined=%.1f LUFS",
-            balance.get("vocal_lufs", float("nan")),
-            balance.get("backing_lufs", float("nan")),
-            balance.get("combined_lufs", float("nan")),
-        )
+        if not test_plugin:
+            # Post-FX fader balance
+            log.info("Measuring post-FX loudness and balancing faders...")
+            balance = eng.post_fx_balance(
+                vocal_indices=vocal_indices,
+                backing_indices=backing_indices,
+                genre=args.genre,
+            )
+            log.info(
+                "Balance: vocal=%.1f LUFS, backing=%.1f LUFS, combined=%.1f LUFS",
+                balance.get("vocal_lufs", float("nan")),
+                balance.get("backing_lufs", float("nan")),
+                balance.get("combined_lufs", float("nan")),
+            )
 
-        # Bus compressor (master track — user handles TGP + Pro-L 2 manually)
-        log.info("Applying bus compressor ...")
-        bus_result = eng.apply_bus_compressor(
-            bpm=resolved_bpm,
-            genre=args.genre,
-        )
-        if bus_result.get("error"):
-            log.warning("Bus compressor: %s", bus_result["error"])
-        log.info(
-            "Bus comp: peak=%.1f dB → thresh=%.1f dB, attack=%.1f ms, "
-            "makeup=%.1f dB, target GR=%.1f dB",
-            bus_result["peak_db"],
-            bus_result["thresh_db"],
-            bus_result["attack_ms"],
-            bus_result["makeup_db"],
-            bus_result["gr_target"],
-        )
+            # 混响发送量校准（用 post_fx_balance 的 vocal LUFS，
+            # 若为 -120 则 fallback 到 post-rvox 信号分析值）
+            vocal_lufs = balance.get("vocal_lufs", -120)
+            if vocal_lufs <= -100:
+                # 回退：用 post-RVox 信号分析中的 LUFS
+                post_sig = getattr(eng, "_post_rvox_signal", {}) or {}
+                vocal_lufs = post_sig.get("integrated_lufs", -23.0)
+                log.info("vocal LUFS fallback → %.1f", vocal_lufs)
+            # calibrate_reverb_sends 已删除 — 发送量由 _compute_spatial_sends 处理
 
-        log.info("✓ Pipeline complete — master fader untouched for manual mastering")
+            # Bus compressor
+            log.info("Applying bus compressor ...")
+            bus_result = eng.apply_bus_compressor(
+                bpm=resolved_bpm,
+                genre=args.genre,
+            )
+            if bus_result.get("error"):
+                log.warning("Bus compressor: %s", bus_result["error"])
+            log.info(
+                "Bus comp: peak=%.1f dB → thresh=%.1f dB, attack=%.1f ms, "
+                "makeup=%.1f dB, target GR=%.1f dB",
+                bus_result["peak_db"],
+                bus_result["thresh_db"],
+                bus_result["attack_ms"],
+                bus_result["makeup_db"],
+                bus_result["gr_target"],
+            )
+
+        eng.save_project()
+
+        # ── 母带链：finalize_master（bx_2098 → God Particle → Pro-L 2）──
+        log.info("Finalizing master ...")
+        master_kwargs = {}
+        target_lufs = getattr(args, 'target_lufs', None)
+        if target_lufs is not None:
+            master_kwargs["target_lufs"] = target_lufs
+        master_result = eng.finalize_master(**master_kwargs)
+        if master_result.get("passed"):
+            log.info(
+                "✓ Pipeline complete — mastered to %.1f LUFS (gain=%.1fdB)",
+                master_result.get("achieved_lufs", 0),
+                master_result.get("gain_db", 0),
+            )
+        else:
+            log.warning(
+                "⚠ Mastering: %s (%.1f LUFS)", master_result.get("error", "unknown"),
+                master_result.get("achieved_lufs", 0),
+            )
 
     return 0
 
@@ -190,7 +246,8 @@ def cmd_check(args) -> int:
     print(f"Plugins required: {', '.join(profile.all_fx_names())}")
 
     with MixingEngine(watchdog=False) as eng:
-        missing = eng.preflight_plugins(profile.all_fx_names())
+        result = eng.preflight_plugins(profile.all_fx_names())
+        missing = [k for k, v in result.items() if not v]
         if missing:
             print(f"✗ Missing: {', '.join(missing)}")
             return 1

@@ -96,12 +96,12 @@ SPATIAL_PLUGIN_MAP: dict[str, list[str]] = {
         "ValhallaVintageVerb",
     ],
     "room":    [
-        "Seventh Heaven", "UAD EMT 140", "ValhallaRoom",
+        "ValhallaRoom", "Seventh Heaven", "UAD EMT 140",
         "FabFilter Pro-R",
     ],
-    "slap":    ["EchoBoy", "ValhallaDelay"],
-    "throw":   ["EchoBoy", "ValhallaDelay"],
-    "pingpong": ["EchoBoy", "ValhallaDelay"],
+    "slap":    ["ValhallaDelay"],
+    "throw":   ["ValhallaDelay"],
+    "pingpong": ["ValhallaDelay"],
     "microshift": ["MicroShift", "Soundtoys MicroShift", "VST3: MicroShift (Soundtoys)"],
     "blackhole": ["Blackhole", "Supermassive"],
     "supernova": ["Supernova", "ValhallaVintageVerb"],
@@ -110,24 +110,24 @@ SPATIAL_PLUGIN_MAP: dict[str, list[str]] = {
 # ── 流派专属混响配对（Vocal B: 含 UAD，设计文档 §3.2.1）───
 GENRE_SPATIAL_PLUGINS: dict[str, dict[str, list[str]]] = {
     "folk": {
-        "room":  ["Seventh Heaven", "ValhallaVintageVerb"],
-        "plate": ["LX480 v4", "ValhallaPlate"],
-        "hall":  ["Cinematic Rooms", "Seventh Heaven", "ValhallaVintageVerb"],
-    },
-    "ballad": {
-        "room":  ["Seventh Heaven", "ValhallaVintageVerb"],
-        "plate": ["LX480 v4", "ValhallaPlate"],
-        "hall":  ["Cinematic Rooms", "Seventh Heaven", "ValhallaVintageVerb"],
-    },
-    "pop": {
-        "room":  ["UAD EMT 140", "Seventh Heaven", "ValhallaVintageVerb"],
+        "room":  ["ValhallaRoom", "Seventh Heaven", "ValhallaVintageVerb"],
         "plate": ["LX480 v4", "ValhallaPlate"],
         "hall":  ["Seventh Heaven", "Cinematic Rooms", "ValhallaVintageVerb"],
     },
+    "ballad": {
+        "room":  ["ValhallaRoom", "Seventh Heaven", "ValhallaVintageVerb"],
+        "plate": ["LX480 v4", "ValhallaPlate"],
+        "hall":  ["Seventh Heaven", "Cinematic Rooms", "ValhallaVintageVerb"],
+    },
+    "pop": {
+        "room":  ["ValhallaRoom", "Seventh Heaven", "ValhallaVintageVerb"],
+        "plate": ["LX480 v4", "ValhallaPlate"],
+        "hall":  ["ValhallaVintageVerb", "Seventh Heaven", "Cinematic Rooms"],
+    },
     "rock": {
-        "room":  ["UAD EMT 140", "Seventh Heaven", "ValhallaVintageVerb"],
+        "room":  ["ValhallaRoom", "Seventh Heaven", "ValhallaVintageVerb"],
         "plate": ["Tai Chi", "LX480 v4", "ValhallaPlate"],
-        "hall":  ["LX480 v4", "Cinematic Rooms", "ValhallaVintageVerb"],
+        "hall":  ["ValhallaVintageVerb", "LX480 v4", "Cinematic Rooms"],
     },
     "electronic": {
         "room":  ["LX480 v4", "ValhallaPlate"],
@@ -135,33 +135,33 @@ GENRE_SPATIAL_PLUGINS: dict[str, dict[str, list[str]]] = {
         "hall":  ["ValhallaVintageVerb"],
     },
     "chinese_folk_bel_canto": {
-        "room":  ["Seventh Heaven", "ValhallaVintageVerb"],
+        "room":  ["ValhallaRoom", "Seventh Heaven", "ValhallaVintageVerb"],
         "plate": ["LX480 v4", "ValhallaPlate"],
-        "hall":  ["Cinematic Rooms", "Seventh Heaven", "ValhallaVintageVerb"],
+        "hall":  ["Seventh Heaven", "Cinematic Rooms", "ValhallaVintageVerb"],
     },
 }
 
 # ── 流派专属混响配对（Vocal A: 无 UAD，EMT140→ValhallaPlate）──
 GENRE_SPATIAL_PLUGINS_A: dict[str, dict[str, list[str]]] = {
     "folk": {
-        "room":  ["Seventh Heaven", "ValhallaVintageVerb"],
-        "plate": ["LX480 v4", "ValhallaPlate"],
-        "hall":  ["Cinematic Rooms", "Seventh Heaven", "ValhallaVintageVerb"],
-    },
-    "ballad": {
-        "room":  ["Seventh Heaven", "ValhallaVintageVerb"],
-        "plate": ["LX480 v4", "ValhallaPlate"],
-        "hall":  ["Cinematic Rooms", "Seventh Heaven", "ValhallaVintageVerb"],
-    },
-    "pop": {
-        "room":  ["ValhallaPlate", "Seventh Heaven", "ValhallaVintageVerb"],
+        "room":  ["ValhallaRoom", "Seventh Heaven", "ValhallaVintageVerb"],
         "plate": ["LX480 v4", "ValhallaPlate"],
         "hall":  ["Seventh Heaven", "Cinematic Rooms", "ValhallaVintageVerb"],
     },
+    "ballad": {
+        "room":  ["ValhallaRoom", "Seventh Heaven", "ValhallaVintageVerb"],
+        "plate": ["LX480 v4", "ValhallaPlate"],
+        "hall":  ["Seventh Heaven", "Cinematic Rooms", "ValhallaVintageVerb"],
+    },
+    "pop": {
+        "room":  ["ValhallaRoom", "Seventh Heaven", "ValhallaVintageVerb"],
+        "plate": ["LX480 v4", "ValhallaPlate"],
+        "hall":  ["ValhallaVintageVerb", "Seventh Heaven", "Cinematic Rooms"],
+    },
     "rock": {
-        "room":  ["ValhallaPlate", "Seventh Heaven", "ValhallaVintageVerb"],
+        "room":  ["ValhallaRoom", "Seventh Heaven", "ValhallaVintageVerb"],
         "plate": ["Tai Chi", "LX480 v4", "ValhallaPlate"],
-        "hall":  ["LX480 v4", "Cinematic Rooms", "ValhallaVintageVerb"],
+        "hall":  ["ValhallaVintageVerb", "LX480 v4", "Cinematic Rooms"],
     },
     "electronic": {
         "room":  ["LX480 v4", "ValhallaPlate"],
@@ -169,9 +169,9 @@ GENRE_SPATIAL_PLUGINS_A: dict[str, dict[str, list[str]]] = {
         "hall":  ["ValhallaVintageVerb"],
     },
     "chinese_folk_bel_canto": {
-        "room":  ["Seventh Heaven", "ValhallaVintageVerb"],
+        "room":  ["ValhallaRoom", "Seventh Heaven", "ValhallaVintageVerb"],
         "plate": ["LX480 v4", "ValhallaPlate"],
-        "hall":  ["Cinematic Rooms", "Seventh Heaven", "ValhallaVintageVerb"],
+        "hall":  ["Seventh Heaven", "Cinematic Rooms", "ValhallaVintageVerb"],
     },
 }
 

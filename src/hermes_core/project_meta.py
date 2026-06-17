@@ -78,6 +78,14 @@ class ProjectMeta:
     audio_files: list[str] = field(default_factory=list)
     checkpoints: list[dict] = field(default_factory=list)
 
+    # ── 渐进式测试扩展 ──
+    last_focus: str = ""                        # 上次焦点插件名
+    bpm: float = 0.0                            # 工程 BPM
+    gender: str = ""                            # 歌手性别
+    source_hash: str = ""                       # 源文件 hash（检测变更）
+    plugin_params: dict[str, dict] = field(default_factory=dict)   # 插件名 → {params: {...}}
+    spectrum_snapshot: dict = field(default_factory=dict)           # 上次频谱分析快照
+
     # ── I/O ───────────────────────────────────────────────────
 
     @classmethod
@@ -109,6 +117,12 @@ class ProjectMeta:
                 audio_files=data.get("audio_files", []),
                 checkpoints=data.get("checkpoints", []),
                 lifecycle_state=data.get("lifecycle_state", "created"),
+                last_focus=data.get("last_focus", ""),
+                bpm=float(data.get("bpm", 0.0)),
+                gender=data.get("gender", ""),
+                source_hash=data.get("source_hash", ""),
+                plugin_params=data.get("plugin_params", {}),
+                spectrum_snapshot=data.get("spectrum_snapshot", {}),
             )
         except (json.JSONDecodeError, OSError) as exc:
             log.warning("Failed to load meta from %s: %s", path, exc)
@@ -147,6 +161,13 @@ class ProjectMeta:
             },
             "audio_files": self.audio_files,
             "checkpoints": self.checkpoints,
+            # 渐进式测试扩展
+            "last_focus": self.last_focus,
+            "bpm": self.bpm,
+            "gender": self.gender,
+            "source_hash": self.source_hash,
+            "plugin_params": self.plugin_params,
+            "spectrum_snapshot": self.spectrum_snapshot,
         }
         path.write_text(
             json.dumps(data, ensure_ascii=False, indent=2),
@@ -456,3 +477,86 @@ def create_project_dirs(project_path: str | Path) -> dict[str, Path]:
         d.mkdir(exist_ok=True)
         created[sub] = d
     return created
+
+
+# ════════════════════════════════════════════════════════════════
+# 确定性工程命名（渐进式测试）
+# ════════════════════════════════════════════════════════════════
+
+# Vocal A 链插件顺序（用于上游查找 + fork 判断）
+_VOCAL_A_CHAIN_ORDER: tuple[str, ...] = (
+    "Pro-Q3", "CLA76", "Decap", "ProDS",
+    "EQ232D", "RVox", "Inflator", "ShadowHills", "Maag",
+)
+
+# 焦点插件名 → 链中索引
+_FOCUS_INDEX: dict[str, int] = {
+    name: i for i, name in enumerate(_VOCAL_A_CHAIN_ORDER)
+}
+
+
+def _extract_vocal_name(file_path: str) -> str:
+    """从文件路径提取干净的人声来源名。
+
+    >>> _extract_vocal_name("望归 Vocal（测试）.wav")
+    '望归'
+    >>> _extract_vocal_name("/path/to/张三_vocal.wav")
+    '张三'
+    """
+    import os
+    base = os.path.splitext(os.path.basename(file_path))[0]
+    # 去掉常见冗余后缀
+    for suffix in (" Vocal", " vocal", "_vocal", "（测试）", "(测试)",
+                   "_dry", "_raw", "_lead", " Lead", "(lead)"):
+        base = base.replace(suffix, "")
+    return base.strip()
+
+
+def build_project_name(vocal_name: str, genre: str, focus: str = "",
+                       variant: str = "") -> str:
+    """构建确定性工程名。
+
+    ``{人声来源}_{流派}[_{变体}]_{焦点}``
+
+    *focus* 为空时默认为 ``"全链"``。
+    *variant* 为 "b" 时追加 ``_B`` 后缀以区分 Vocal B（UAD）项目。
+    Vocal A（variant="" 或 "a"）不加后缀。
+
+    >>> build_project_name("望归", "民美", "EQ232D")
+    '望归_民美_EQ232D'
+    >>> build_project_name("望归", "pop")
+    '望归_pop_全链'
+    >>> build_project_name("望归", "pop", "Pultec", variant="b")
+    '望归_pop_B_Pultec'
+    """
+    focus_clean = focus.strip() or "全链"
+    genre_short = _short_genre(genre)
+    if variant and variant.lower() == "b":
+        return f"{vocal_name}_{genre_short}_B_{focus_clean}"
+    return f"{vocal_name}_{genre_short}_{focus_clean}"
+
+
+def _short_genre(genre: str) -> str:
+    """流派名简化为短标签。"""
+    _SHORT: dict[str, str] = {
+        "pop": "pop",
+        "folk": "folk",
+        "rock": "rock",
+        "ballad": "ballad",
+        "electronic": "electronic",
+        "rap": "rap",
+        "hiphop": "rap",
+        "chinese_folk_bel_canto": "民美",
+        "chinese_bel_canto": "民美",
+    }
+    return _SHORT.get(genre, genre)
+
+
+def get_chain_order() -> tuple[str, ...]:
+    """返回 Vocal A 链插件顺序（用于上游查找）。"""
+    return _VOCAL_A_CHAIN_ORDER
+
+
+def get_focus_index(focus: str) -> int | None:
+    """返回焦点插件在链中的位置索引。"""
+    return _FOCUS_INDEX.get(focus)
