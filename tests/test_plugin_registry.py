@@ -217,18 +217,18 @@ class TestSpatialPlugins:
 
     def test_slap_plugins(self):
         plugins = get_spatial_plugins("slap")
-        assert len(plugins) >= 2
-        assert "EchoBoy" in plugins
+        assert len(plugins) >= 1
+        assert "ValhallaDelay" in plugins
 
     def test_throw_plugins(self):
         plugins = get_spatial_plugins("throw")
-        assert len(plugins) >= 2
-        assert "EchoBoy" in plugins
+        assert len(plugins) >= 1
+        assert "ValhallaDelay" in plugins
 
     def test_pingpong_plugins(self):
         plugins = get_spatial_plugins("pingpong")
-        assert len(plugins) >= 2
-        assert "EchoBoy" in plugins
+        assert len(plugins) >= 1
+        assert "ValhallaDelay" in plugins
 
     def test_unknown_bus_type_raises(self):
         with pytest.raises(KeyError):
@@ -280,17 +280,15 @@ class TestValidateRegistryConsistency:
     def test_reports_missing_entries(self):
         """不在 normalize 注册表中的主选/回退应被报告。
 
-        'saturation' 和 'doubler' 的 primary 不在 normalize 注册表中。
+        'saturation' 的 primary (Decapitator) 不在 normalize 注册表中。
         """
         result = validate_registry_consistency()
         missing = result["missing"]
 
-        # saturation 和 doubler 的主选不在 normalize 注册表中
+        # saturation 的主选不在 normalize 注册表中
         saturation_missing = any("saturation" in m for m in missing)
-        doubler_missing = any("doubler" in m for m in missing)
 
         assert saturation_missing, "saturation 应被报告为缺失"
-        assert doubler_missing, "doubler 应被报告为缺失"
         assert result["ok"] is False, "存在缺失时 ok 应为 False"
 
     def test_registered_plugins_not_in_missing(self):

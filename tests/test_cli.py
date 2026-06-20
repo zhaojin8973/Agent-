@@ -72,7 +72,7 @@ class TestParserBuilding:
 def _mock_engine_ctx():
     """创建成功路径的 mock MixingEngine 上下文管理器。"""
     me = MagicMock()
-    me.preflight_plugins.return_value = []
+    me.preflight_plugins.return_value = {}
     me.create_project.return_value = {"path": "/tmp/p.rpp"}
     me.prepare_stems.return_value = {"stems": []}
     me.post_fx_balance.return_value = {}
@@ -110,7 +110,7 @@ class TestCmdVocalMix:
              patch("hermes_core.profiles.get_default_vocal_chain", return_value=[]):
             me = _mock_engine_ctx()
             mec.return_value.__enter__.return_value = me
-            a = argparse.Namespace(vocal="v.wav",backing=["b.wav"],genre="pop",
+            a = argparse.Namespace(technique="",test_plugin="",vocal="v.wav",backing=["b.wav"],genre="pop",
                 target_lufs=None,output="/o",profile=None,tolerance=0.3,
                 watchdog=False,bpm=None,midi=None)
             assert cmd_vocal_mix(a) == 0
@@ -118,9 +118,9 @@ class TestCmdVocalMix:
     def test_missing_plugins(self):
         with patch("hermes_core.MixingEngine") as mec, \
              patch("hermes_core.profiles.get_default_vocal_chain", return_value=[]):
-            me = _mock_engine_ctx(); me.preflight_plugins.return_value = ["X"]
+            me = _mock_engine_ctx(); me.preflight_plugins.return_value = {"X": False}
             mec.return_value.__enter__.return_value = me
-            a = argparse.Namespace(vocal="v.wav",backing=["b.wav"],genre="pop",
+            a = argparse.Namespace(technique="",test_plugin="",vocal="v.wav",backing=["b.wav"],genre="pop",
                 target_lufs=None,output="/o",profile=None,tolerance=0.3,
                 watchdog=False,bpm=None,midi=None)
             assert cmd_vocal_mix(a) == 1
@@ -132,7 +132,7 @@ class TestCmdVocalMix:
             me = _mock_engine_ctx()
             mec.return_value.__enter__.return_value = me
             mp.from_yaml.return_value = MagicMock(all_fx_names=lambda: ["EQ","Comp"])
-            a = argparse.Namespace(vocal="v.wav",backing=["b.wav"],genre="pop",
+            a = argparse.Namespace(technique="",test_plugin="",vocal="v.wav",backing=["b.wav"],genre="pop",
                 target_lufs=None,output="/o",profile="p.yaml",tolerance=0.3,
                 watchdog=False,bpm=None,midi=None)
             assert cmd_vocal_mix(a) == 0
@@ -146,7 +146,7 @@ class TestCmdVocalMix:
                 "thresh_db":-20,"attack_ms":10,"makeup_db":3,
                 "gr_target":4,"error":"threshold too low"}
             mec.return_value.__enter__.return_value = me
-            a = argparse.Namespace(vocal="v.wav",backing=["b.wav"],genre="pop",
+            a = argparse.Namespace(technique="",test_plugin="",vocal="v.wav",backing=["b.wav"],genre="pop",
                 target_lufs=None,output="/o",profile=None,tolerance=0.3,
                 watchdog=False,bpm=None,midi=None)
             assert cmd_vocal_mix(a) == 0
@@ -168,7 +168,7 @@ class TestCmdCheck:
              patch("hermes_core.MixingEngine") as mec:
             mp.from_yaml.return_value = MagicMock(all_fx_names=lambda: ["A","B"])
             me = _mock_engine_ctx()
-            me.preflight_plugins.return_value = ["B"]
+            me.preflight_plugins.return_value = {"B": False}
             mec.return_value.__enter__.return_value = me
             assert cmd_check(argparse.Namespace(profile="/t.yaml")) == 1
 

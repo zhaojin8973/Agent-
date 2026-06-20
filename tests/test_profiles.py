@@ -337,12 +337,12 @@ class TestGetDefaultVocalChain:
         from hermes_core.profiles import get_default_vocal_chain
         chain = get_default_vocal_chain()
         types = [fx.fx_type for fx in chain]
-        # HPF → Saturation → Surgical EQ → FET Comp → De-Esser
-        # → Dynamic EQ → RMS Comp → Color EQ → Doubler
-        assert "eq" in types[:2]      # HPF + Surgical EQ
+        # Vocal A 链: eq → fet → saturation → deesser → color_eq_232d
+        #   → rvox → harmonic → tube_opto_sh → air_eq
+        assert "eq" in types[:2]      # EQ 在前两位
         assert "deesser" in types
-        assert "doubler" in types
-        assert types[-1] == "doubler"
+        assert "air_eq" in types
+        assert types[-1] == "air_eq"
 
 
 # ═══════════════════════════ all_fx_names with bus_delay ═══════════════════════
@@ -394,9 +394,11 @@ class TestGetDefaultVocalChainModule:
         assert "saturation" in types
         assert "fet" in types
         assert "deesser" in types
-        assert "dynamic_eq" in types
+        assert "color_eq_232d" in types
         assert "rvox" in types
-        assert "doubler" in types
+        assert "harmonic" in types
+        assert "tube_opto_sh" in types
+        assert "air_eq" in types
 
     def test_all_presets_have_name(self):
         """每个预设都应有名称。"""
@@ -414,13 +416,16 @@ class TestGetDefaultVocalChainModule:
 
 @pytest.mark.unit
 class TestMixingProfileForGenre:
-    """测试 MixingProfile.for_genre 类方法。"""
+    """测试 MixingProfile.for_genre 类方法。默认 variant="a" (Vocal A 无 UAD)。"""
 
-    def test_pop_genre_loads_from_yaml(self):
-        """pop 流派应从 YAML 加载完整配置。"""
+    def test_pop_genre_loads_vocal_a_by_default(self):
+        """pop 流派默认加载 Vocal A (无 UAD) YAML。"""
         profile = MixingProfile.for_genre(genre="pop")
         assert isinstance(profile, MixingProfile)
         assert len(profile.vocal_chain) > 0
+        # Vocal A 链不含 UAD 插件
+        names = " ".join(fx.name for fx in profile.vocal_chain)
+        assert "UAD" not in names
 
     def test_rock_genre_loads_from_yaml(self):
         """rock 流派应从 YAML 加载。"""
@@ -443,9 +448,25 @@ class TestMixingProfileForGenre:
         profile = MixingProfile.for_genre(genre="chinese_folk_bel_canto")
         assert isinstance(profile, MixingProfile)
 
-    def test_unknown_genre_falls_back_to_pop(self):
-        """未知流派 → _GENRE_YAML_MAP 回退到 vocal_pop。"""
+    def test_unknown_genre_falls_back_to_vocal_a_pop(self):
+        """未知流派 → _GENRE_YAML_MAP 回退到 vocal_a_pop。"""
         profile = MixingProfile.for_genre(genre="unknown_xyz")
         assert isinstance(profile, MixingProfile)
-        # vocal_pop.yaml 存在，所以应该能加载成功
         assert len(profile.vocal_chain) > 0
+
+    def test_vocal_b_with_empty_variant(self):
+        """variant="" 加载无前缀 Vocal B (有 UAD)。"""
+        profile = MixingProfile.for_genre(genre="pop", variant="")
+        assert isinstance(profile, MixingProfile)
+        assert len(profile.vocal_chain) > 0
+        # Vocal B 链应包含 UAD 插件
+        names = " ".join(fx.name for fx in profile.vocal_chain)
+        assert "UAD" in names
+
+    def test_variant_a_is_default(self):
+        """不传 variant 默认走 Vocal A (无 UAD)。"""
+        profile = MixingProfile.for_genre(genre="pop")
+        assert isinstance(profile, MixingProfile)
+        names = " ".join(fx.name for fx in profile.vocal_chain)
+        assert "UAD" not in names
+        assert "CLA-76" in names

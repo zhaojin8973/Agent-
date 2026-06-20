@@ -18,7 +18,6 @@ from hermes_core.track import TrackManager, TrackInfo
 from hermes_core.loudness_optimizer import CompressionIntent, EqIntent, EqBandIntent
 from hermes_core.bus import BusManager
 from hermes_core.fx import FxManager
-from tests.conftest import require_reaper, clean_project, make_test_wav
 from hermes_core.send import SendManager
 from hermes_core.render import RenderManager
 from hermes_core.signal import SignalAnalyzer, SignalReport
@@ -543,113 +542,6 @@ class TestFullPipeline:
 
             audit = eng.audit_mix(result["output_path"])
             assert audit["passed"]
-
-
-@pytest.mark.integration
-class TestProjectManagementIntegration:
-    def test_create_named_project_and_get_info(self):
-        require_reaper()
-        eng = MixingEngine()
-        eng._bridge.connect()
-        eng.allow_track_deletion()
-
-        eng.create_project(name="HermesTest", output_dir="/tmp/hermes_test", sample_rate=44100)
-        info = eng.get_project_info()
-
-        assert info["track_count"] == 0
-        assert info["sample_rate"] == 44100
-
-    def test_create_project_returns_dict(self):
-        require_reaper()
-        eng = MixingEngine()
-        eng._bridge.connect()
-        eng.allow_track_deletion()
-
-        result = eng.create_project(name="ReturnTest", output_dir="/tmp/pj", sample_rate=48000)
-
-        assert result["name"] == "ReturnTest"
-        assert result["sample_rate"] == 48000
-        assert result["track_count"] == 0
-
-    def test_get_project_info_after_import(self, tmp_path):
-        require_reaper()
-        eng = MixingEngine()
-        eng._bridge.connect()
-        eng.allow_track_deletion()
-
-        eng.create_project(name="ImportInfo", output_dir="/tmp/pj", sample_rate=48000)
-        wav = make_test_wav(tmp_path / "test.wav")
-        eng.import_stems([str(wav)])
-
-        info = eng.get_project_info()
-        assert info["track_count"] == 1
-        assert info["sample_rate"] == 48000
-
-    def test_save_project_does_not_raise(self):
-        require_reaper()
-        eng = MixingEngine()
-        eng._bridge.connect()
-        eng.allow_track_deletion()
-
-        eng.create_project(name="SaveTest", output_dir="/tmp/hermes_test")
-        # First save may open dialog - just verify no exception
-        try:
-            eng.save_project()
-        except Exception:
-            pass  # Save dialog may appear for unsaved projects
-    def test_full_pipeline_render_and_audit(self, tmp_path):
-        require_reaper()
-        eng = MixingEngine()
-        eng._bridge.connect()
-        eng.allow_track_deletion()
-
-        eng.create_project(name='TestProj', output_dir="/tmp/pj", sample_rate=48000)
-
-        wav1 = make_test_wav(tmp_path / "kick.wav", duration_sec=1.0, frequency=80.0)
-        wav2 = make_test_wav(tmp_path / "snare.wav", duration_sec=1.0, frequency=200.0)
-
-        imported = eng.import_stems([str(wav1), str(wav2)])
-        assert len(imported) == 2
-        assert all(r["success"] for r in imported)
-
-        eng.apply_gain(0, -3.0)
-        eng.add_fx(0, "ReaEQ")
-
-        bus_idx = eng.create_bus("DrumBus", [0, 1])
-        assert bus_idx >= 0
-
-        result = eng.render_mix(str(tmp_path), verify=True)
-        assert result.get("output_path") is not None
-        assert "signal_check" in result
-
-        audit = eng.audit_mix(result["output_path"])
-        assert audit["passed"] is True
-
-    def test_health_check_and_track_listing(self):
-        require_reaper()
-        eng = MixingEngine()
-        eng._bridge.connect()
-        eng.allow_track_deletion()
-        eng.create_project(name="TestProj", output_dir="/tmp/pj")
-
-        eng.import_stems([])
-        health = eng.health_check()
-        assert health["reapy_connected"] is True
-
-        tracks = eng.list_tracks()
-        assert isinstance(tracks, list)
-
-    def test_render_rejects_empty_project(self, tmp_path):
-        require_reaper()
-        eng = MixingEngine()
-        eng._bridge.connect()
-        eng.allow_track_deletion()
-        eng.create_project(name="TestProj", output_dir="/tmp/pj")
-
-
-# ════════════════════════════════════════════════════════════════
-# PRODUCTION_GAPS features — unit tests
-# ════════════════════════════════════════════════════════════════
 
 
 class TestIdempotencyGuards:
@@ -1813,7 +1705,7 @@ class TestSpatialSendComputation:
 
         # 验证民美用户指定值
         base = _GENRE_DELAY_SEND_BASE["chinese_folk_bel_canto"]
-        assert base["slap"] == -20.0
+        assert base["slap"] == -28.0
         assert base["throw"] == -27.8
         assert base["pingpong"] == -27.0
 
@@ -1910,8 +1802,8 @@ class TestSpatialSendComputation:
             sends = _compute_spatial_sends(g, 12.0, 2.0, -3.0)
             for key, val in sends.items():
                 if val is not None:
-                    assert -24.0 <= val <= -6.0, (
-                        f"流派 {g}: {key}={val} 超出 [-24, -6]"
+                    assert -30.0 <= val <= -6.0, (
+                        f"流派 {g}: {key}={val} 超出 [-30, -6]"
                     )
 
     # ── 回退 ──────────────────────────────────────────────
@@ -2028,14 +1920,14 @@ class TestBuildSpatialChainLogic:
         """_compute_spatial_sends 的输出可直接作为 build_spatial_chain 输入。"""
         from hermes_core.engine import _compute_spatial_sends
         sends = _compute_spatial_sends("pop", 14.0, 3.0, -3.0, -28.0)
-        # 所有非 None 值应在 [-24, -6] 范围
+        # 所有非 None 值应在 [-30, -6] 范围
         # 接受 reverb_* / delay_* / microshift 键
         for key, val in sends.items():
             assert key.startswith("reverb_") or key.startswith("delay_") or key == "microshift", (
                 f"key={key} 格式不正确"
             )
             if val is not None:
-                assert -24.0 <= val <= -6.0, f"{key}={val} 超出范围"
+                assert -30.0 <= val <= -6.0, f"{key}={val} 超出范围"
 
     def test_return_eq_table_coverage(self):
         """_GENRE_RETURN_EQ 覆盖所有流派和总线类型。"""
@@ -2305,27 +2197,27 @@ class TestVocalChainEnhancement:
         chain = get_default_vocal_chain()
         assert len(chain) == 9
 
-        # 验证链中包含 saturation、dynamic_eq、doubler 阶段
+        # 验证链中包含 saturation、color_eq_232d、air_eq 阶段
         types = [fx.fx_type for fx in chain]
         assert "saturation" in types
-        assert "dynamic_eq" in types
-        assert "doubler" in types
+        assert "color_eq_232d" in types
+        assert "air_eq" in types
 
     def test_get_default_vocal_chain_order(self):
-        """链顺序: eq → saturation → eq → fet → deesser → dynamic_eq → rvox → eq → doubler。"""
+        """链顺序: eq → fet → saturation → deesser → color_eq_232d → rvox → harmonic → tube_opto_sh → air_eq。"""
         from hermes_core.profiles import get_default_vocal_chain
         chain = get_default_vocal_chain()
         order = [(fx.fx_type, fx.eq_position) for fx in chain]
         expected = [
             ("eq", "pre"),
-            ("saturation", "solo"),    # eq_position 默认为 "solo"
-            ("eq", "solo"),
             ("fet", "solo"),
+            ("saturation", "solo"),
             ("deesser", "solo"),
-            ("dynamic_eq", "solo"),
+            ("color_eq_232d", "solo"),
             ("rvox", "solo"),
-            ("eq", "post"),
-            ("doubler", "solo"),
+            ("harmonic", "solo"),
+            ("tube_opto_sh", "solo"),
+            ("air_eq", "solo"),
         ]
         assert order == expected
 

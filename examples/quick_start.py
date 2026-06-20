@@ -7,7 +7,7 @@ Run from the project root::
 
 Prerequisites:
     - REAPER 7.73+ running
-    - Python 3.13 + ``pip install -e .``
+    - Python 3.11 + ``pip install -e .``
     - Required plugins installed (see profiles/vocal_pop.yaml)
 """
 

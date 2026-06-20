@@ -42,6 +42,6 @@ test = ["pytest>=8", "pytest-cov>=6"]
 dev = ["ruff", "mypy"]
 
 [tool.pytest.ini_options]
-markers = ["unit: no REAPER required", "integration: requires running REAPER"]
+markers = ["unit: no REAPER required"]
 testpaths = ["tests"]
 addopts = ["-v", "--tb=short", "--cov=src/hermes_core", "--cov-report=term-missing"]

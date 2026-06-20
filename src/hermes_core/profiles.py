@@ -197,7 +197,7 @@ class MixingProfile:
     })
 
     @classmethod
-    def for_genre(cls, genre: str, variant: str = "") -> "MixingProfile":
+    def for_genre(cls, genre: str, variant: str = "a") -> "MixingProfile":
         """根据流派名加载对应的 Profile YAML。
 
         YAML 文件位于 ``profiles/vocal_{variant}_{genre}.yaml``。
@@ -208,7 +208,8 @@ class MixingProfile:
         genre : str
             流派名称，如 ``"pop"``, ``"rock"``, ``"jazz"`` 等。
         variant : str
-            链版本，如 ``"a"``（Vocal A 无 UAD）或 ``""``（Vocal B 默认 UAD）。
+            链版本。``"a"`` = Vocal A（无 UAD，默认），``"b"`` = Vocal B（有 UAD）。
+            传 ``""`` 加载旧版无前缀 profile。
 
         Returns
         -------

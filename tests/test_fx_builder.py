@@ -390,7 +390,7 @@ class TestBuildEQ232DParams:
         )
         result = _build_eq232d_params(ctx)
         assert result is not None
-        # EQ232D 专属参数名
+        # EQ232D 专属参数名（Channel 1 激活，Channel 2 镜像）
         assert "ENGAGE 1" in result
         assert "PEQ IN 1" in result
         assert "LO CPS 1" in result
@@ -402,13 +402,15 @@ class TestBuildEQ232DParams:
         # 通道配置参数
         assert "CHANNEL" in result
         assert "MS MATRIX" in result
-        assert "ENGAGE 2" in result
+        # Channel 2 参数（镜像 Channel 1）
+        assert "LO CPS 2" in result
+        assert "HI BOOST 2" in result
         # 不应包含 Pultec 参数名
         assert "Low Freq" not in result
         assert "High Freq" not in result
 
     def test_channel_config(self):
-        """Ch1 ON, Ch2 OFF, Dual Mono 模式, MS 关闭。"""
+        """Ch1 ON, Stereo 模式, MS 关闭。"""
         from hermes_core.fx_builder import _build_eq232d_params
         ctx = FXBuildContext(
             fx_name="Bettermaker EQ232D", fx_type="color_eq_232d",
@@ -416,11 +418,11 @@ class TestBuildEQ232DParams:
         )
         result = _build_eq232d_params(ctx)
         assert result["ENGAGE 1"] == 1.0
-        assert result["ENGAGE 2"] == 0.0   # Ch2 完全关闭
-        assert result["CHANNEL"] == 1.0     # Dual Mono
+        assert result["CHANNEL"] == 0.0     # Stereo
         assert result["MS MATRIX"] == 0.0   # M/S 关闭
         assert result["PEQ IN 1"] == 1.0
-        assert result["LVL OUT 1"] == 0.5   # unity
+        # LVL OUT 应接近 unity (~0.492)
+        assert 0.4 <= result["LVL OUT 1"] <= 0.6
 
     def test_eq1_eq2_hpf_disabled(self):
         """参量段和 HPF 关闭（已有 Pro-Q 3 处理）。"""
@@ -434,26 +436,29 @@ class TestBuildEQ232DParams:
         assert result["EQ1 IN 1"] == 0.0
         assert result["EQ2 IN 1"] == 0.0
 
-    def test_kcs_bypass(self):
-        """Kick/Snare 滤波器应保持关闭（人声用）。"""
+    def test_kcs_active_on_vocal(self):
+        """Kick/Snare 滤波器在人声模式下激活（频率根据流派变化）。"""
         from hermes_core.fx_builder import _build_eq232d_params
         ctx = FXBuildContext(
             fx_name="Bettermaker EQ232D", fx_type="color_eq_232d",
             role="vocal", genre="pop", presence_deficit=0.0,
         )
         result = _build_eq232d_params(ctx)
-        assert result["KCS BST 1"] == 0.0
-        assert result["KCS ATT 1"] == 0.0
+        # KCS BST/ATT 在人声模式下设为有效档位（非 0.0）
+        assert result["KCS BST 1"] > 0.0
+        # KCS ATT 固定 20kHz
+        assert result["KCS ATT 1"] == 1.0
 
-    def test_low_cps_fixed_60hz(self):
-        """LO CPS 应固定为 0.33（约 60Hz）。"""
+    def test_low_cps_genre_dependent(self):
+        """LO CPS 根据流派动态选择（pop 默认 100Hz）。"""
         from hermes_core.fx_builder import _build_eq232d_params
         ctx = FXBuildContext(
             fx_name="Bettermaker EQ232D", fx_type="color_eq_232d",
             role="vocal", genre="pop", presence_deficit=0.0,
         )
         result = _build_eq232d_params(ctx)
-        assert result["LO CPS 1"] == pytest.approx(0.33, abs=0.01)
+        # pop 默认 LO CPS = 1.0 (100Hz)
+        assert result["LO CPS 1"] == 1.0
 
     def test_deficit_affects_high_boost(self):
         """presence_deficit 驱动 HI BOOST 值。"""

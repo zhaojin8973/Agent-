@@ -115,7 +115,7 @@ _GENRE_REVERB_SEND_BASE: dict[str, dict[str, float]] = {
     "rock":                    {"plate": -14.0, "hall": -20.0, "room": -17.0},
     "electronic":              {"plate": -9.0,  "hall": -15.0, "room": -12.0},
     # 中国民歌/民族美声：透亮水灵 + 大气绵长，混响偏大但不浑
-    "chinese_folk_bel_canto":  {"plate": -8.0, "hall": -14.0, "room": -11.0},
+    "chinese_folk_bel_canto":  {"plate": -6.0, "hall": -11.0, "room": -8.0},
 }
 
 # Delay send level base per genre (dB).  -99.0 = disabled for this genre.
@@ -138,7 +138,7 @@ _GENRE_MICROSHIFT_SEND: dict[str, float] = {
     "pop":                     -9.0,
     "rock":                    -9.0,
     "electronic":              -7.0,
-    "chinese_folk_bel_canto":  -11.0,
+    "chinese_folk_bel_canto":  -8.0,
 }
 
 # Send level range (dB).  Outside these bounds is impractical.

@@ -5,7 +5,7 @@
 ```bash
 git clone https://github.com/zhaojin/hermes-core
 cd hermes-core
-python3.13 -m venv .venv
+python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev,test]"
 ```

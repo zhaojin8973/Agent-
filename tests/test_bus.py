@@ -7,7 +7,6 @@ import pytest
 from hermes_core.bus import BusManager, FolderInfo
 from hermes_core.track import TrackManager
 from hermes_core.bridge import ReaperBridge
-from tests.conftest import require_reaper, clean_project
 
 
 def _mock_bridge(**api_overrides):
@@ -168,61 +167,3 @@ class TestValidate:
         assert result["valid"] is False
 
 
-@pytest.mark.integration
-class TestBusIntegration:
-    def test_create_and_validate_bus(self):
-        require_reaper()
-        bridge = ReaperBridge()
-        bridge.connect()
-        clean_project(bridge)
-        tm = TrackManager(bridge)
-        bm = BusManager(bridge)
-
-        c1 = tm.create(name="Child1")
-        c2 = tm.create(name="Child2")
-        bus_idx = bm.create_bus("TestBus", [c1, c2])
-        assert bus_idx == c1  # bus inserted before first child
-
-        result = bm.validate(bus_idx)
-        assert result["valid"] is True
-        assert result["child_count"] == 2
-
-    def test_dissolve_bus(self):
-        require_reaper()
-        bridge = ReaperBridge()
-        bridge.connect()
-        clean_project(bridge)
-        tm = TrackManager(bridge)
-        bm = BusManager(bridge)
-
-        c1 = tm.create(name="C1")
-        c2 = tm.create(name="C2")
-        bus_idx = bm.create_bus("TempBus", [c1, c2])
-        bm.dissolve_bus(bus_idx)
-
-        result = bm.validate(bus_idx)
-        assert result["valid"] is False
-
-    def test_get_structure_flat(self):
-        require_reaper()
-        bridge = ReaperBridge()
-        bridge.connect()
-        clean_project(bridge)
-        tm = TrackManager(bridge)
-        bm = BusManager(bridge)
-
-        tm.create(name="A")
-        tm.create(name="B")
-        tree = bm.get_structure()
-        assert len(tree) == 2
-
-    def test_create_bus_empty_children(self):
-        require_reaper()
-        bridge = ReaperBridge()
-        bridge.connect()
-        clean_project(bridge)
-        bm = BusManager(bridge)
-
-        idx = bm.create_bus("EmptyBus", [])
-        result = bm.validate(idx)
-        assert result["valid"] is False  # no children

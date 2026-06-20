@@ -324,22 +324,11 @@ def _build_seventh_heaven(
     pdl_ms = round(60_000.0 / eff_bpm / PDL_SUB, 1)
     pdl = _sh_pdl_ms_to_norm(pdl_ms)
 
-    # ── 4. 音色微调（参照预设但保留设计意图）──
-    elm = _SH_GENRE_EARLY_LATE.get(genre, _SH_DEFAULTS["EARLY_LATE"])
-    vlf = _SH_GENRE_VLF.get(genre, _SH_DEFAULTS["VLF"])
-    ref = _SH_GENRE_REFLECTION.get(genre, _SH_DEFAULTS["REFLECTION"])
-    hpf_hz = _SH_GENRE_HIPASS_HZ.get(genre, _SH_DEFAULTS["HIPASS_HZ"])
-    hpf = _sh_hz_to_hpf_norm(hpf_hz)
-    lpf = _SH_GENRE_LOPASS.get(genre, _SH_DEFAULTS["LOPASS"])
-    ero = _SH_GENRE_EARLY_ROLLOFF.get(genre, 0.48)
-    lro = _SH_GENRE_LATE_ROLLOFF.get(genre, 0.46)
-
     log.info(
         "Auto-Hall(SH): preset=bank%.4f/p%.4f RTM=%.4f(%.1fs) PDL=%.4f(%.0fms/%s) "
-        "EarlyLate=%.2f VLF=%.2f Refl=%.2f Eroll=%.2f Lroll=%.2f HP=%dHz LP=%.2f "
-        "(genre=%s bpm=%s)",
+        "(genre=%s bpm=%s) — 其他参数使用预设默认",
         bank, preset, rtm, rtm_s, pdl, pdl_ms, PDL_NOTE,
-        elm, vlf, ref, ero, lro, hpf_hz, lpf, genre,
+        genre,
         f"{eff_bpm:.0f}" if bpm else "N/A",
     )
 
@@ -347,30 +336,11 @@ def _build_seventh_heaven(
         # ── 预设选择 ──
         "Content Bank":             bank,
         "Content Preset":           preset,
-        # ── BPM 驱动时值 ──
+        # ── BPM 驱动时值（仅覆盖这两个，其他用预设默认）──
         "Decay Time":               rtm,
         "Pre-delay":                pdl,
-        # ── 音色（参照 Sunset/A&M 预设校准）──
-        "Early / Late Level":       elm,
-        "Reflection Pattern":       ref,
-        "VLF Reverb Level":         vlf,
-        "Early Rolloff":            ero,
-        "Late Rolloff":             lro,
-        # ── 频率整形 ──
-        "Low Pass Freq":            lpf,
-        "High Pass Freq":           hpf,
-        "High Pass Enable":         1.0,
-        # ── 衰减倍率（中性，由预设决定）──
-        "Low Decay Multiplier":     0.50,   # ~1.0X
-        "High Decay Multiplier":    0.50,
-        # ── Ducker（Late-only）──
-        "Ducker Enable":            1.0,
-        "Ducker Mode":              1.0,
-        # ── 关闭 tempo sync ──
-        "Pre-delay Sync":           0.0,
         # ── 固定 ──
         "Dry/Wet Mix":              _MIX_WET,
-        "Master Gain":              0.50,
         "Bypass":                   _BYPASS,
         "Wet":                      1.0,
     }

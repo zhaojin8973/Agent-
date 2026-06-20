@@ -350,6 +350,7 @@ class MixingEngine:
             raise TypeError(f"Expected MixingProfile, got {type(profile).__name__}")
 
         self._profile = profile
+        self._genre = genre  # 存储流派，后续方法（post_fx/finalize）自动继承
 
         # ── 声纹画像：优先用参数，其次用 profile 字段，最后回退 ──
         _gender = gender or getattr(profile, "gender", "") or "female"
@@ -1775,7 +1776,7 @@ class MixingEngine:
         *,
         vocal_indices: list[int] | None = None,
         backing_indices: list[int] | None = None,
-        genre: str = "pop",
+        genre: str | None = None,
         tmp_dir: str | None = None,
     ) -> dict:
         """Measure post-FX LUFS, set fader balance, enforce peak ceiling.
@@ -1789,6 +1790,10 @@ class MixingEngine:
 
         Returns balance metadata plus combined LUFS and peak.
         """
+
+        # 流派继承：未显式传参时从 apply_profile 继承
+        if genre is None:
+            genre = getattr(self, '_genre', 'pop')
 
         tmp = tmp_dir or tempfile.mkdtemp(prefix="hermes_balance_")
 
@@ -3034,7 +3039,7 @@ class MixingEngine:
         if not getattr(self, "_bus_comp_applied", False):
             self.apply_bus_compressor(
                 bpm=getattr(self, "_bpm", None),
-                genre=getattr(self._meta, "genre", "pop") if self._meta else "pop",
+                genre=getattr(self, '_genre', None) or (getattr(self._meta, "genre", "pop") if self._meta else "pop"),
             )
             self._bus_comp_applied = True
 
@@ -3047,7 +3052,7 @@ class MixingEngine:
         # 2. bx_2098 EQ — M/S 母带 EQ（REAPER 逐参数校准对照表）
         bx2098_idx = self.add_master_fx("bx_2098 EQ (Plugin Alliance)")
         if bx2098_idx >= 0:
-            genre = getattr(self._meta, "genre", "pop") if self._meta else "pop"
+            genre = getattr(self, '_genre', None) or (getattr(self._meta, "genre", "pop") if self._meta else "pop")
             # 必须用原始 RPR —— FxManager.set_param 在母线上有 bug
             import reapy
             from reapy import reascript_api as _R
@@ -3170,7 +3175,7 @@ class MixingEngine:
         if god_idx >= 0:
             import reapy; from reapy import reascript_api as _R
             _MP = reapy.Project().master_track.id
-            genre = getattr(self._meta, "genre", "pop") if self._meta else "pop"
+            genre = getattr(self, '_genre', None) or (getattr(self._meta, "genre", "pop") if self._meta else "pop")
             post_bal = master_spec if master_spec else (getattr(self, "_post_balance_signal", {}) or {})
             mud_db = post_bal.get("mud_ratio_db", 0.0)
             air_rel_db = post_bal.get("air_rel_db", -80.0)
@@ -3213,7 +3218,11 @@ class MixingEngine:
 
         # 4. Pro-L 2 final limiter
         self._mastering._on_progress = on_progress
-        self._mastering._finalize_genre = getattr(self._meta, "genre", "pop") if self._meta else "pop"
+        # 流派继承链：apply_profile → self._genre → self._meta.genre → "pop"
+        _mix_genre = getattr(self, '_genre', None)
+        if not _mix_genre and self._meta:
+            _mix_genre = getattr(self._meta, "genre", "pop")
+        self._mastering._finalize_genre = _mix_genre or "pop"
         result = self._undo_block(
             "Finalize Master",
             lambda: self._mastering.finalize(

@@ -134,8 +134,8 @@ class TestDeriveEqIntentMoreEdges:
         assert hpf_bands[0].freq_hz <= 80.0
 
     def test_tilt_very_dark_air_moderate(self):
-        """tilt_very_dark + air_moderate → air_gain=1.0。"""
-        # post (非 conservative): tilt < -4.5 → very_dark, air < -22 → moderate
+        """air 偏离参考 (female: -32±10) → 产生 high_shelf 修正。"""
+        # air 偏离参考容差 → 触发修正
         report = SpectrumReport(
             spectral_tilt_db_per_octave=-5.0,
             mud_ratio_db=0.0,
@@ -143,15 +143,15 @@ class TestDeriveEqIntentMoreEdges:
             sibilance_peak_hz=8000,
             air_level_db=-25.0,
             resonances=[],
-            band_energy_db={"sub": 0.0, "low": 3.0, "mid": 2.0, "hm": -12.0, "air": -25.0},
+            band_energy_db={"sub": 0.0, "low": 3.0, "low_mid": 2.0, "mid": 2.0, "high_mid": -5.0, "presence": -12.0, "air": -50.0},
         )
         intent = _derive_eq_intent(report, role="vocal", genre="pop", position="post")
         air_bands = [b for b in intent.bands if b.band_type == "high_shelf"]
         assert len(air_bands) >= 1
 
     def test_air_low_tilt_very_dark(self):
-        """air_low + tilt_very_dark → air_gain=1.5。"""
-        # post (非 conservative): tilt < -4.5 → very_dark, air < -30 → low
+        """极低 air + 陡峭负 tilt → air 修正频段。"""
+        # air 远低于参考容差 → 较强空气感提升
         report = SpectrumReport(
             spectral_tilt_db_per_octave=-5.0,
             mud_ratio_db=0.0,
@@ -159,7 +159,7 @@ class TestDeriveEqIntentMoreEdges:
             sibilance_peak_hz=8000,
             air_level_db=-35.0,
             resonances=[],
-            band_energy_db={"sub": 0.0, "low": 3.0, "mid": 0.0, "hm": -12.0, "air": -35.0},
+            band_energy_db={"sub": 0.0, "low": 3.0, "low_mid": 0.0, "mid": 0.0, "high_mid": -12.0, "presence": -12.0, "air": -60.0},
         )
         intent = _derive_eq_intent(report, role="vocal", genre="rock", position="post")
         air_bands = [b for b in intent.bands if b.band_type == "high_shelf"]

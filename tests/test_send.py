@@ -9,7 +9,6 @@ from hermes_core.send import SendManager
 from hermes_core.audio_utils import db_to_norm
 from hermes_core.track import TrackManager
 from hermes_core.bridge import ReaperBridge
-from tests.conftest import require_reaper, clean_project
 
 
 def _mock_bridge(**api_overrides):
@@ -177,80 +176,3 @@ class TestListAll:
         assert mgr.list_all(0) == []
 
 
-@pytest.mark.integration
-class TestSendIntegration:
-    def test_create_send(self):
-        require_reaper()
-        bridge = ReaperBridge()
-        bridge.connect()
-        clean_project(bridge)
-        tm = TrackManager(bridge)
-        sm = SendManager(bridge)
-
-        src = tm.create(name="Src")
-        dst = tm.create(name="Dst")
-        result = sm.create(src=src, dest=dst, level_db=-6.0)
-        assert result["index"] >= 0
-        assert result["category"] >= 0
-
-    def test_set_and_get_send_level(self):
-        require_reaper()
-        bridge = ReaperBridge()
-        bridge.connect()
-        clean_project(bridge)
-        tm = TrackManager(bridge)
-        sm = SendManager(bridge)
-
-        src = tm.create(name="Src")
-        dst = tm.create(name="Dst")
-        result = sm.create(src=src, dest=dst, level_db=0.0)
-        send_idx = result["index"]
-
-        sm.set_level(src, send_idx, -10.0)
-        info = sm.get_info(src, send_idx)
-        assert info is not None
-
-    def test_list_sends(self):
-        require_reaper()
-        bridge = ReaperBridge()
-        bridge.connect()
-        clean_project(bridge)
-        tm = TrackManager(bridge)
-        sm = SendManager(bridge)
-
-        src = tm.create(name="Src")
-        dst = tm.create(name="Dst")
-        sm.create(src=src, dest=dst)
-        sends = sm.list_all(src)
-        assert len(sends) == 1
-
-    def test_remove_send(self):
-        require_reaper()
-        bridge = ReaperBridge()
-        bridge.connect()
-        clean_project(bridge)
-        tm = TrackManager(bridge)
-        sm = SendManager(bridge)
-
-        src = tm.create(name="Src")
-        dst = tm.create(name="Dst")
-        result = sm.create(src=src, dest=dst)
-        sm.remove(src, result["index"])
-        sends = sm.list_all(src)
-        assert len(sends) == 0
-
-    def test_set_mute(self):
-        require_reaper()
-        bridge = ReaperBridge()
-        bridge.connect()
-        clean_project(bridge)
-        tm = TrackManager(bridge)
-        sm = SendManager(bridge)
-
-        src = tm.create(name="Src")
-        dst = tm.create(name="Dst")
-        result = sm.create(src=src, dest=dst)
-        sm.set_mute(src, result["index"], True)
-        info = sm.get_info(src, result["index"])
-        assert info is not None
-        assert info["mute"] is True

@@ -16,7 +16,7 @@ git clone https://github.com/zhaojin/hermes-core
 cd hermes-core
 
 # 2. 创建虚拟环境
-python3.13 -m venv .venv
+python3.11 -m venv .venv
 source .venv/bin/activate
 
 # 3. 安装（开发依赖可选）
@@ -33,14 +33,14 @@ pip install -e ".[dev,test]"
 4. 填入 Python 库路径（macOS ARM64 示例）：
 
     ```
-    /opt/homebrew/opt/python@3.13/Frameworks/Python.framework/Versions/3.13
+    /Library/Frameworks/Python.framework/Versions/3.11
     ```
 
 或直接编辑 `reaper.ini`：
 
 ```ini
 [reaper]
-pythonlibpath64=/opt/homebrew/opt/python@3.13/Frameworks/Python.framework/Versions/3.13
+pythonlibpath64=/Library/Frameworks/Python.framework/Versions/3.11
 ```
 
 ## 5 分钟跑通一次贴唱混音

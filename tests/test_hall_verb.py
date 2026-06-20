@@ -33,13 +33,14 @@ class TestBuildParams:
 
     # ── 插件选择 ──
     def test_seventh_heaven_genres(self):
-        """folk/ballad/民美 → Seventh Heaven 参数格式（含预设选择器）。"""
+        """folk/ballad/民美 → Seventh Heaven 仅覆盖时值+预设。"""
         for g in ["folk", "ballad", "chinese_folk_bel_canto"]:
             params = build_params(_FakeCtx(g))
             assert "Content Bank" in params, f"{g}: missing preset bank"
             assert "Content Preset" in params, f"{g}: missing preset index"
-            assert "Decay Time" in params, f"{g}: missing SH key"
-            assert "Ducker Enable" in params, f"{g}: missing ducker"
+            assert "Decay Time" in params, f"{g}: missing Decay Time"
+            assert "Pre-delay" in params, f"{g}: missing Pre-delay"
+            # 其他参数（Ducker/EarlyLate/VLF等）由预设决定，不覆盖
 
     def test_vintage_verb_genres(self):
         """pop/rock/rap/electronic → ValhallaVintageVerb 参数格式。"""
@@ -57,12 +58,13 @@ class TestBuildParams:
         assert (p_folk["Content Bank"], p_folk["Content Preset"]) != \
                (p_bal["Content Bank"], p_bal["Content Preset"])
 
-    # ── Ducker 必须启用 ──
-    def test_ducker_enabled(self):
+    # ── 预设参数不覆盖 — Ducker/音色等由预设决定 ──
+    def test_no_tone_overrides_in_sh(self):
+        """Seventh Heaven 仅覆盖时值，不覆盖音色/Ducker。"""
         for g in ["folk", "ballad"]:
             p = build_params(_FakeCtx(g))
-            assert p["Ducker Enable"] == 1.0, f"{g}: ducker should be ON"
-            assert p["Ducker Mode"] == 1.0, f"{g}: should be Late-only mode"
+            assert "Ducker Enable" not in p, f"{g}: ducker should use preset default"
+            assert "Early / Late Level" not in p, f"{g}: EarlyLate should use preset default"
 
     # ── RTM: 校准曲线 ──
     def test_rtm_seventh_heaven(self):

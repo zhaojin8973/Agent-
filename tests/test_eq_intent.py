@@ -178,28 +178,41 @@ class TestTonalBalance:
         assert len(cuts) == 0, f"Clean vocal should not get mud cut, got {cuts}"
 
     def test_presence_boost_when_dark(self):
-        """High presence_deficit → 3 kHz boost."""
-        report = _make_report(presence_deficit_db=5.0)  # > 2.0
+        """presence 远低于 vocal_ref female 参考 → 3 kHz boost。"""
+        # vocal_ref female: presence center=-20, tol=8
+        # 需要 rel = presence - mid < -28 → presence < -48 (mid=-20)
+        report = _make_report(band_energy_db={
+            "sub": -50.0, "low": -30.0, "low_mid": -25.0,
+            "mid": -20.0, "high_mid": -22.0, "presence": -50.0, "air": -35.0,
+        })
         intent = _derive_eq_intent(report, role="vocal", genre="pop")
         boosts = [b for b in intent.bands if b.band_type == "bell" and b.gain_db > 0
                   and abs(b.freq_hz - 3000.0) < 5]
         assert len(boosts) == 1, f"Dark vocal should get presence boost, got {boosts}"
-        assert 0 < boosts[0].gain_db <= 3.5, (
-            f"Presence boost should be 0..3.5 dB, got {boosts[0].gain_db}"
+        assert 0 < boosts[0].gain_db <= 5.0, (
+            f"Presence boost should be 0..5.0 dB, got {boosts[0].gain_db}"
         )
 
     def test_no_presence_boost_when_bright(self):
-        """Low presence_deficit → no boost."""
-        report = _make_report(presence_deficit_db=1.0)  # < 2.0
+        """presence 在参考容差内 → no boost。"""
+        report = _make_report(band_energy_db={
+            "sub": -50.0, "low": -30.0, "low_mid": -25.0,
+            "mid": -20.0, "high_mid": -22.0, "presence": -23.0, "air": -35.0,
+        })
         intent = _derive_eq_intent(report, role="vocal", genre="pop")
         boosts = [b for b in intent.bands if b.band_type == "bell" and b.gain_db > 0
                   and abs(b.freq_hz - 3000.0) < 5]
         assert len(boosts) == 0, f"Bright vocal should not get presence boost, got {boosts}"
 
     def test_air_shelf_when_dull(self):
-        """Very low air + steep negative tilt → high shelf at 8 kHz."""
+        """air 远低于 vocal_ref female 参考 → high shelf at 8 kHz。"""
+        # vocal_ref female: air center=-32, tol=10
+        # 需要 rel = air - mid < -42 → air < -62 (mid=-20)
         report = _make_report(
-            air_level_db=-35.0,
+            band_energy_db={
+                "sub": -50.0, "low": -30.0, "low_mid": -25.0,
+                "mid": -20.0, "high_mid": -22.0, "presence": -24.0, "air": -65.0,
+            },
             spectral_tilt_db_per_octave=-4.0,
         )
         intent = _derive_eq_intent(report, role="vocal", genre="pop")
@@ -208,11 +221,13 @@ class TestTonalBalance:
         assert shelves[0].gain_db > 0, f"Air shelf should be positive gain"
 
     def test_no_air_shelf_when_not_dull(self):
-        """Normal air level → no shelf."""
-        report = _make_report(
-            air_level_db=-25.0,
-            spectral_tilt_db_per_octave=-1.0,
-        )
+        """air 在参考容差内（~32dB below mid）→ no shelf。"""
+        # vocal_ref female: air center=-32, tol=10
+        # 正常 air ≈ center → rel ≈ -32 → air = -52 (mid=-20)
+        report = _make_report(band_energy_db={
+            "sub": -50.0, "low": -30.0, "low_mid": -25.0,
+            "mid": -20.0, "high_mid": -22.0, "presence": -24.0, "air": -52.0,
+        })
         intent = _derive_eq_intent(report, role="vocal", genre="pop")
         shelves = [b for b in intent.bands if b.band_type == "high_shelf"]
         assert len(shelves) == 0, f"Normal vocal should not get air shelf"
@@ -226,8 +241,12 @@ class TestGenreAdjustments:
     """Verify genre-specific tweaks to EQ derivation."""
 
     def test_pop_gets_extra_presence(self):
-        """Pop genre → extra +0.5 dB presence boost."""
-        report = _make_report(presence_deficit_db=4.0)
+        """Pop genre (35% pct) → 比 folk (30% pct) 更大的 presence boost。"""
+        # 创建暗人声 (presence 偏离参考较大)
+        report = _make_report(band_energy_db={
+            "sub": -50.0, "low": -30.0, "low_mid": -25.0,
+            "mid": -20.0, "high_mid": -22.0, "presence": -50.0, "air": -35.0,
+        })
         pop = _derive_eq_intent(report, role="vocal", genre="pop")
         folk = _derive_eq_intent(report, role="vocal", genre="folk")
 
@@ -241,7 +260,7 @@ class TestGenreAdjustments:
              if b.band_type == "bell" and abs(b.freq_hz - 3000) < 5),
             0,
         )
-        # Pop should have more presence boost than folk (which scales to 0.75×)
+        # Pop (35%) 应比 folk (30%) 有更大的 presence boost
         assert pop_boost > folk_boost, (
             f"Pop presence boost ({pop_boost}) should exceed folk ({folk_boost})"
         )

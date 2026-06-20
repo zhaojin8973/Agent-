@@ -40,7 +40,7 @@ git clone <repo-url>
 cd hermes-core
 
 # 2. 创建虚拟环境（推荐）
-python3.13 -m venv .venv
+python3.11 -m venv .venv
 source .venv/bin/activate
 
 # 3. 安装
@@ -53,7 +53,7 @@ pip install -e ".[dev,test]"
 
 ```ini
 [reaper]
-pythonlibpath64=/opt/homebrew/opt/python@3.13/Frameworks/Python.framework/Versions/3.13
+pythonlibpath64=/Library/Frameworks/Python.framework/Versions/3.11
 ```
 
 或通过 REAPER 菜单：`Options → Preferences → Plug-ins → ReaScript → Python`
@@ -202,8 +202,8 @@ hermes check --profile profiles/rock.yaml
 ## 已知限制
 
 1. **跨平台弹窗处理**：macOS (AppleScript)、Windows (pywinauto)、Linux (xdotool) 均已实现，但 Windows/Linux 版本需实机验证
-2. **REAPER 7.73 arm64**：仅在 ARM64 macOS + REAPER 7.73 上测试
-3. **Python 3.14 不兼容**：REAPER 7.73 不支持 Python 3.14
+2. **REAPER 7.48+**：在 Intel/ARM64 macOS + REAPER 7.48+ 上测试
+3. **Python 3.14 未测试**：REAPER 7.48 建议使用 Python 3.11
 4. **实时 REAPER 依赖**：单元测试不需要 REAPER（287 tests），但真实混音流程需要 REAPER 运行中
 5. **非 WAV 输入**：track.py 的媒体导入仍需要 WAV（分析用 soundfile 支持多种格式）
 
